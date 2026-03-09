@@ -39,12 +39,12 @@ Trust Stack Network is a **Layer 1 blockchain** designed from the ground up for 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   TSN Node                          │
-├──────────┬──────────┬───────────┬──────────────────-┤
+├──────────┬──────────┬───────────┬───────────────────┤
 │  Core    │ Crypto   │ Consensus │    Network        │
 │  Block   │ Poseidon2│ PoW + MIK │    P2P Protocol   │
 │  TX      │ SLH-DSA  │ Difficulty│    Sync & Relay   │
 │  UTXO    │ Plonky3  │ Validation│    Discovery      │
-├──────────┴──────────┴───────────┴──────────────────-┤
+├──────────┴──────────┴───────────┴───────────────────┤
 │  Storage (RocksDB)  │  Wallet (Shielded)  │  RPC    │
 └─────────────────────┴─────────────────────┴─────────┘
 ```
@@ -67,17 +67,40 @@ Trust Stack Network is a **Layer 1 blockchain** designed from the ground up for 
 
 ## Roadmap
 
-| Phase | Status |
-|-------|--------|
-| Core, Crypto, Consensus, Network, Storage | Done |
-| Wallet, RPC, Explorer, Faucet | Done |
-| Multi-Role Nodes (Miner, Relay, Prover, Light Client) | In Progress |
-| Plonky3 Migration & Halo2 Removal | Planned |
-| zkVM & Smart Contracts | Planned |
-| Private Testnet (April 2026) | Active |
-| Incentivized Testnet (May-July 2026) | Planned |
-| Mainnet Launch (Q3 2026) | Planned |
-| Gold-Backed Stablecoin ZST (Post-Mainnet L2) | Planned |
+### Phase 1 — Foundations (Done)
+Core blockchain engine: blocks, transactions, UTXO, Poseidon2 hashing, SLH-DSA signatures, Proof of Work consensus, P2P networking, storage, wallet, RPC API, block explorer, and faucet.
+
+### Phase 2 — Advanced Features (In Progress)
+Multi-role nodes (Miner, Relay, Prover, Light Client), Plonky3 STARK migration (replacing Halo2), and shielded wallet with full privacy.
+
+### Phase 3 — Smart Contracts
+zkVM (zero-knowledge virtual machine) for executing smart contracts inside ZK proofs. Multi-asset UTXO support, TSN-20 token standard, and Ethereum bridge.
+
+### Phase 4 — Launch Roadmap
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                                                                  │
+│  APRIL 2026          MAY — JULY 2026            Q3 2026          │
+│  ───────────         ──────────────────         ────────         │
+│                                                                  │
+│  ┌──────────┐        ┌──────────────────┐       ┌────────────┐  │
+│  │ PRIVATE  │───────>│   INCENTIVIZED   │──────>│  MAINNET   │  │
+│  │ TESTNET  │        │  PUBLIC TESTNET  │       │  LAUNCH    │  │
+│  └──────────┘        └──────────────────┘       └────────────┘  │
+│                                                                  │
+│  • 5 internal nodes   • Open to everyone        • Genesis block  │
+│  • Stress testing     • Bug bounty program      • Fair launch    │
+│  • Bug hunting        • Node operator rewards   • No premine     │
+│  • Core validation    • Smart contract testing  • Full privacy   │
+│  • ZK proof testing   • Security audit          • zkVM live      │
+│                       • 2-3 months duration                      │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 5 — Post-Mainnet
+Gold-backed stablecoin **ZST** (1 ZST = 1g gold) as an independent Layer 2, with decentralized oracle price feeds and 150% over-collateralization.
 
 ## Links
 
