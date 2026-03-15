@@ -166,6 +166,17 @@ TSN v0.4.0 introduces a **fast-sync protocol** allowing new nodes to join the ne
 | **Anti-Fork Sync Gate** | Miners must be within 2 blocks of network tip to submit blocks |
 | **Genesis hash verification** | All nodes verify genesis block hash at startup |
 
+## Network Simulation
+
+<p align="center">
+  <img src="tsn-network-simulation.gif" alt="TSN Network Simulation — 100 nodes" width="800">
+</p>
+
+<p align="center">
+  <em>Live simulation of the TSN multi-role network: 100 nodes — Miners, Relays, Provers &amp; Light Clients</em><br>
+  <a href="https://tsnchain.com/network-simulation.html">Try the interactive version</a>
+</p>
+
 ## API Overview
 
 Each TSN node exposes a REST API:
