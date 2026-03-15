@@ -211,9 +211,9 @@ Each TSN node exposes a REST API:
 
 Core blockchain engine: blocks, transactions, UTXO, Poseidon2 hashing, ML-DSA-65 signatures, Proof of Work consensus with MIK anti-Sybil, P2P networking with Kademlia DHT, SledDB storage, shielded wallet, JSON-RPC API, block explorer, and testnet faucet.
 
-### Phase 2 — Advanced Features (In Progress)
+### Phase 2 — Advanced Features ✅
 
-Multi-role nodes (Miner, Relay, Prover, Light Client), **Plonky3 STARK migration ✅** (Halo2 removed, AIR-based proofs via p3-uni-stark), browser-based WASM prover, and enhanced shielded wallet with viewing keys.
+Multi-role nodes ✅ (Miner, Relay, Prover, Light Client with `--role` CLI flag), Plonky3 STARK migration ✅ (Halo2 removed, AIR-based proofs via p3-uni-stark), browser-based WASM prover ✅ (plonky3-wasm crate), enhanced shielded wallet with viewing keys ✅ (export/import viewing keys, watch-only wallets), and hardened fast-sync with multi-peer snapshot verification.
 
 ### Phase 3 — Smart Contracts
 
