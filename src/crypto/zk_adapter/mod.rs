@@ -1,7 +1,7 @@
-//! Couche d'adaptation ZK pour TSN - Migration Plonky2 → Halo2
+//! Couche d'adaptation ZK pour TSN - Migration Plonky2 → Plonky3
 //!
 //! Ce module fournit une abstraction unifiée sur les systèmes de preuve ZK,
-//! permettant une migration progressive de Plonky2 vers Halo2.
+//! permettant une migration progressive de Plonky2 vers Plonky3.
 //!
 //! ## Architecture
 //!
@@ -11,27 +11,27 @@
 //! ├─────────────────────────────────────────┤
 //! │    ZkProofSystem (trait commun)         │
 //! ├─────────────────────────────────────────┤
-//! │  Plonky2Adapter    │    Halo2Adapter    │
+//! │  Plonky2Adapter    │  Plonky3Adapter    │
 //! ├─────────────────────────────────────────┤
-//! │  plonky2::plonk    │    halo2_proofs    │
+//! │  plonky2::plonk    │  p3-uni-stark/AIR  │
 //! └─────────────────────────────────────────┘
 //! ```
 //!
 //! ## Feature Flags
 //!
-//! - `zk-plonky2` : Active le backend Plonky2 (défaut, stable)
-//! - `zk-halo2` : Active le backend Halo2 (expérimental)
+//! - `zk-plonky2` : Active le backend Plonky2 (legacy, stable)
+//! - `zk-plonky3` : Active le backend Plonky3 (défaut, AIR-based)
 //! - `zk-compat` : Active les deux backends avec sélection runtime
 //!
 //! ## Security Considerations
 //!
 //! - Les preuves Plonky2 utilisent FRI (post-quantique, hash-based)
-//! - Les preuves Halo2 utilisent KZG (nécessite trusted setup, mais recursive)
+//! - Les preuves Plonky3 utilisent FRI + AIR (post-quantique, Poseidon2 natif)
 //! - Les deux fournissent ~128 bits de sécurité post-quantique
 //!
 //! Références:
 //! - Plonky2: https://github.com/0xPolygonZero/plonky2
-//! - Halo2: https://zcash.github.io/halo2/
+//! - Plonky3: https://github.com/Plonky3/Plonky3
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -40,10 +40,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Version du système de preuve utilisée
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum ZkSystemVersion {
-    /// Plonky2 STARKs - système actuel, post-quantique pur
+    /// Plonky2 STARKs - système legacy, post-quantique pur
     Plonky2,
-    /// Halo2 PLONK - système cible, recursive proofs
-    Halo2,
+    /// Plonky3 AIR - système actuel, FRI + Poseidon2 natif sur Goldilocks
+    Plonky3,
 }
 
 impl ZkSystemVersion {
@@ -51,7 +51,7 @@ impl ZkSystemVersion {
     pub fn as_u8(&self) -> u8 {
         match self {
             ZkSystemVersion::Plonky2 => 1,
-            ZkSystemVersion::Halo2 => 2,
+            ZkSystemVersion::Plonky3 => 3,
         }
     }
 
@@ -59,7 +59,7 @@ impl ZkSystemVersion {
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             1 => Some(ZkSystemVersion::Plonky2),
-            2 => Some(ZkSystemVersion::Halo2),
+            3 => Some(ZkSystemVersion::Plonky3),
             _ => None,
         }
     }
@@ -214,7 +214,7 @@ pub struct OutputWitness {
 
 /// Trait principal pour les systèmes de preuve ZK
 ///
-/// Ce trait définit l'interface commune entre Plonky2 et Halo2.
+/// Ce trait définit l'interface commune entre Plonky2 et Plonky3.
 /// Les implémentations doivent garantir:
 /// - La soundness: une preuve invalide ne passe pas la vérification
 /// - La completeness: une preuve valide passe toujours
@@ -265,49 +265,27 @@ pub trait ZkProofSystem: Send + Sync {
 pub struct ZkSystemFactory;
 
 impl ZkSystemFactory {
-    /// Crée le système de preuve par défaut (Plonky2)
-    #[cfg(feature = "zk-plonky2")]
+    /// Crée le système de preuve par défaut (Plonky3)
     pub fn create_default() -> Result<Box<dyn ZkProofSystem>, ZkAdapterError> {
-        Ok(Box::new(plonky2_adapter::Plonky2Adapter::new()?))
-    }
-
-    /// Crée le système de preuve par défaut (fallback si Plonky2 non disponible)
-    #[cfg(not(feature = "zk-plonky2"))]
-    pub fn create_default() -> Result<Box<dyn ZkProofSystem>, ZkAdapterError> {
-        Err(ZkAdapterError::BackendNotAvailable(
-            "No ZK backend enabled".to_string(),
-        ))
+        Ok(Box::new(plonky3_adapter::Plonky3Adapter::new()?))
     }
 
     /// Crée un système de preuve spécifique
     pub fn create(version: ZkSystemVersion) -> Result<Box<dyn ZkProofSystem>, ZkAdapterError> {
         match version {
-            #[cfg(feature = "zk-plonky2")]
             ZkSystemVersion::Plonky2 => {
                 Ok(Box::new(plonky2_adapter::Plonky2Adapter::new()?))
             }
-            #[cfg(feature = "zk-halo2")]
-            ZkSystemVersion::Halo2 => {
-                Ok(Box::new(halo2_adapter::Halo2Adapter::new()?))
+            ZkSystemVersion::Plonky3 => {
+                Ok(Box::new(plonky3_adapter::Plonky3Adapter::new()?))
             }
-            _ => Err(ZkAdapterError::UnsupportedSystem(format!(
-                "System {:?} not available (check feature flags)",
-                version
-            ))),
         }
     }
 }
 
-// Modules conditionnels selon les feature flags
-#[cfg(feature = "zk-plonky2")]
+// Backend modules
 pub mod plonky2_adapter;
-
-#[cfg(feature = "zk-halo2")]
-pub mod halo2_adapter;
-
-// Module de compatibilité runtime (quand les deux sont activés)
-#[cfg(all(feature = "zk-plonky2", feature = "zk-halo2", feature = "zk-compat"))]
-pub mod compat;
+pub mod plonky3_adapter;
 
 #[cfg(test)]
 mod tests {
@@ -316,16 +294,17 @@ mod tests {
     #[test]
     fn test_version_serialization() {
         assert_eq!(ZkSystemVersion::Plonky2.as_u8(), 1);
-        assert_eq!(ZkSystemVersion::Halo2.as_u8(), 2);
+        assert_eq!(ZkSystemVersion::Plonky3.as_u8(), 3);
         assert_eq!(ZkSystemVersion::from_u8(1), Some(ZkSystemVersion::Plonky2));
-        assert_eq!(ZkSystemVersion::from_u8(2), Some(ZkSystemVersion::Halo2));
+        assert_eq!(ZkSystemVersion::from_u8(3), Some(ZkSystemVersion::Plonky3));
+        assert_eq!(ZkSystemVersion::from_u8(2), None); // Halo2 removed
         assert_eq!(ZkSystemVersion::from_u8(99), None);
     }
 
     #[test]
     fn test_proof_validation() {
         let proof = ZkProof::new(
-            ZkSystemVersion::Plonky2,
+            ZkSystemVersion::Plonky3,
             vec![1, 2, 3],
             vec![4, 5],
         );
@@ -336,7 +315,7 @@ mod tests {
     #[test]
     fn test_proof_empty_validation() {
         let proof = ZkProof::new(
-            ZkSystemVersion::Plonky2,
+            ZkSystemVersion::Plonky3,
             vec![],
             vec![],
         );
@@ -346,7 +325,7 @@ mod tests {
     #[test]
     fn test_proof_oversized() {
         let proof = ZkProof::new(
-            ZkSystemVersion::Plonky2,
+            ZkSystemVersion::Plonky3,
             vec![0u8; MAX_PROOF_SIZE + 1],
             vec![],
         );

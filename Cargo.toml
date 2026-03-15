@@ -34,15 +34,18 @@ ark-crypto-primitives = { version = "0.4", features = ["commitment", "merkle_tre
 plonky2 = "1.0"
 plonky2_field = "1.0"
 
-# Poseidon2 over Goldilocks (plonky3) — V2 PoW hash (activated at POSEIDON2_V2_ACTIVATION_HEIGHT)
+# Plonky3 (p3-*) — V3 AIR-based ZK proofs + Poseidon2 PoW hash
 p3-poseidon2 = "0.4"
 p3-goldilocks = "0.4"
 p3-field = "0.4"
 p3-symmetric = "0.4"
-
-# Halo2 ZK proofs (PLONK-based, no trusted setup) - V3 FUTURE
-halo2_proofs = "0.3"
-ff = "0.13"
+p3-uni-stark = "0.4"
+p3-air = "0.4"
+p3-challenger = "0.4"
+p3-commit = "0.4"
+p3-fri = "0.4"
+p3-merkle-tree = "0.4"
+p3-matrix = "0.4"
 
 # Encryption (for note encryption)
 chacha20poly1305 = "0.10"
