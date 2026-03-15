@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Post-quantum privacy blockchain</strong><br>
-  Plonky2 STARKs &bull; ML-DSA-65 &bull; Poseidon2 &bull; Shielded Transactions
+  Plonky3 STARKs &bull; ML-DSA-65 &bull; Poseidon2 &bull; Shielded Transactions
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@ Trust Stack Network is a **Layer 1 blockchain** designed from the ground up for 
 
 | Feature | Description |
 |---------|-------------|
-| **Plonky2 STARKs** | Hash-based zero-knowledge proofs — no trusted setup, truly post-quantum |
+| **Plonky3 STARKs** | Next-gen AIR-based zero-knowledge proofs — no trusted setup, truly post-quantum |
 | **ML-DSA-65 (FIPS 204)** | NIST post-quantum digital signatures for all transactions and blocks |
 | **SLH-DSA (FIPS 205)** | Stateless hash-based signatures as secondary post-quantum layer |
 | **Poseidon2** | ZK-friendly hash function over the Goldilocks field, 3x faster than Poseidon |
@@ -53,7 +53,7 @@ TSN is designed to be **fully quantum-safe** — not just signatures, but the en
 | Attack Vector | Protection |
 |---------------|------------|
 | Forge signatures | ML-DSA-65 (NIST PQ standard) |
-| Break ZK proofs | Plonky2 STARKs (hash-based, no elliptic curves) |
+| Break ZK proofs | Plonky3 STARKs (hash-based, no elliptic curves) |
 | Crack commitments | Poseidon over Goldilocks field |
 | Brute force hashes | Poseidon2 (256-bit security) |
 | Sybil mining | MIK identity bound to blockchain |
@@ -76,7 +76,7 @@ Every miner must register a **Mining Identity Key** before mining:
 │    Core      │    Crypto    │  Consensus   │        Network          │
 │  Block       │  Poseidon2   │  PoW Mining  │  P2P Protocol           │
 │  Transaction │  ML-DSA-65   │  MIK Anti-   │  Kademlia DHT           │
-│  UTXO State  │  Plonky2 ZK  │    Sybil     │  Gossip & Sync          │
+│  UTXO State  │  Plonky3 ZK  │    Sybil     │  Gossip & Sync          │
 │  Validation  │  SLH-DSA     │  Difficulty   │  Rate Limiting          │
 │              │  Nullifiers  │    Adjust    │  Anti-Eclipse            │
 ├──────────────┴──────────────┴──────────────┴─────────────────────────┤
@@ -92,7 +92,7 @@ Every miner must register a **Mining Identity Key** before mining:
 |-------|-----------|----------|---------|
 | Signatures | ML-DSA-65 | FIPS 204 | Transaction & block signing |
 | Backup Signatures | SLH-DSA (SPHINCS+) | FIPS 205 | Stateless hash-based fallback |
-| ZK Proofs | Plonky2 STARKs | — | Shielded transaction validity |
+| ZK Proofs | Plonky3 STARKs (AIR) | — | Shielded transaction validity |
 | Hash Function | Poseidon2 | — | PoW mining, Merkle trees, commitments |
 | Field | Goldilocks | p = 2⁶⁴ - 2³² + 1 | ZK-friendly arithmetic |
 | Encryption | ChaCha20-Poly1305 | RFC 8439 | Note payload encryption |
@@ -213,7 +213,7 @@ Core blockchain engine: blocks, transactions, UTXO, Poseidon2 hashing, ML-DSA-65
 
 ### Phase 2 — Advanced Features (In Progress)
 
-Multi-role nodes (Miner, Relay, Prover, Light Client), Plonky3 STARK migration (replacing legacy Groth16/Halo2), browser-based WASM prover, and enhanced shielded wallet with viewing keys.
+Multi-role nodes (Miner, Relay, Prover, Light Client), **Plonky3 STARK migration ✅** (Halo2 removed, AIR-based proofs via p3-uni-stark), browser-based WASM prover, and enhanced shielded wallet with viewing keys.
 
 ### Phase 3 — Smart Contracts
 
