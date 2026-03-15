@@ -14,6 +14,7 @@ use crate::config::SEED_NODES;
 struct RemoteVersionInfo {
     version: String,
     minimum_version: String,
+    #[allow(dead_code)]
     protocol_version: u16,
 }
 
