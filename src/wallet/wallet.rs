@@ -300,6 +300,95 @@ impl ShieldedWallet {
     pub fn last_scanned_height(&self) -> u64 {
         self.last_scanned_height
     }
+
+    /// Export viewing key as hex string for sharing with third parties.
+    ///
+    /// The viewing key allows scanning the blockchain for incoming notes
+    /// without granting spending capability.
+    pub fn export_viewing_key(&self) -> String {
+        hex::encode(self.viewing_key.to_bytes())
+    }
+
+    /// Create a watch-only wallet from an imported viewing key.
+    ///
+    /// A watch-only wallet can scan blocks and compute balances but cannot
+    /// spend notes because it lacks the signing keypair and nullifier key.
+    pub fn from_viewing_key(vk_hex: &str) -> Result<Self, WalletError> {
+        let vk_bytes = hex::decode(vk_hex).map_err(|_| WalletError::InvalidKey)?;
+        if vk_bytes.len() != 32 {
+            return Err(WalletError::InvalidKey);
+        }
+        let mut vk_arr = [0u8; 32];
+        vk_arr.copy_from_slice(&vk_bytes);
+
+        let viewing_key = ViewingKey::from_bytes(vk_arr);
+
+        // For a watch-only wallet we generate a throwaway keypair.
+        // The pk_hash is derived from the viewing key itself so that
+        // `scan_block_view_only` can attempt decryption using it.
+        let keypair = KeyPair::generate();
+        let nullifier_key = NullifierKey::new(&[0u8; 32]);
+
+        // The viewing secret doubles as the pk_hash for decryption in the
+        // watch-only context (ViewingKey::from_pk_hash uses pk_hash directly).
+        let pk_hash = vk_arr;
+
+        Ok(Self {
+            keypair,
+            nullifier_key,
+            viewing_key,
+            pk_hash,
+            notes: Vec::new(),
+            last_scanned_height: 0,
+        })
+    }
+
+    /// Scan a block using only the viewing key (no spending capability).
+    ///
+    /// This is used by watch-only wallets to discover incoming notes.
+    /// Discovered notes can be viewed but not spent because the watch-only
+    /// wallet lacks the nullifier key and signing keypair.
+    pub fn scan_block_view_only(&self, block: &ShieldedBlock) -> Vec<WalletNote> {
+        let height = block.height();
+        let mut found = Vec::new();
+        let mut position = 0u64;
+
+        // Decrypt using our viewing key (which is pk_hash-based)
+        let decryption_key = ViewingKey::from_pk_hash(self.pk_hash);
+
+        // Scan transaction outputs
+        for tx in &block.transactions {
+            for output in &tx.outputs {
+                if let Some(note) = decryption_key.decrypt_note(&output.encrypted_note) {
+                    if note.recipient_pk_hash == self.pk_hash {
+                        let wallet_note = WalletNote::new(
+                            note,
+                            output.note_commitment,
+                            position,
+                            height,
+                        );
+                        found.push(wallet_note);
+                    }
+                }
+                position += 1;
+            }
+        }
+
+        // Scan coinbase
+        if let Some(note) = decryption_key.decrypt_note(&block.coinbase.encrypted_note) {
+            if note.recipient_pk_hash == self.pk_hash {
+                let wallet_note = WalletNote::new(
+                    note,
+                    block.coinbase.note_commitment,
+                    position,
+                    height,
+                );
+                found.push(wallet_note);
+            }
+        }
+
+        found
+    }
 }
 
 /// Stored wallet format for serialization.

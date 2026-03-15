@@ -23,6 +23,7 @@ use tokio::sync::RwLock as TokioRwLock;
 use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction, ShieldedTransactionV2, Transaction};
 use crate::crypto::nullifier::Nullifier;
 use crate::faucet::{FaucetService, FaucetStatus, ClaimResult, FaucetStats, FaucetError};
+use crate::wallet::ShieldedWallet;
 use tracing::{info, warn};
 
 use super::Mempool;
@@ -110,6 +111,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/debug/poseidon-pq", get(debug_poseidon_pq_test))
         .route("/debug/merkle-pq", get(debug_merkle_pq))
         .route("/debug/verify-path", post(debug_verify_path))
+        // Wallet viewing-key endpoints
+        .route("/wallet/viewing-key", get(wallet_viewing_key))
+        .route("/wallet/watch", post(wallet_watch))
         // Faucet endpoints
         .route("/faucet/status/:pk_hash", get(faucet_status))
         .route("/faucet/claim", post(faucet_claim))
@@ -1936,4 +1940,52 @@ async fn serve_whitepaper() -> Html<String> {
             "<!DOCTYPE html><html><head><title>TSN Whitepaper</title></head><body><h1>TSN Whitepaper</h1><p>Whitepaper content not available. Please check the deployment.</p></body></html>".to_string()
         });
     Html(content)
+}
+
+// ============ Wallet Viewing-Key Endpoints ============
+
+/// GET /wallet/viewing-key
+///
+/// Export the viewing key of a freshly generated wallet as a hex string.
+/// In production the wallet identity would come from an authenticated session;
+/// here we generate a new wallet for demonstration / integration-test purposes.
+async fn wallet_viewing_key() -> Json<serde_json::Value> {
+    let wallet = ShieldedWallet::generate();
+    let vk_hex = wallet.export_viewing_key();
+    Json(serde_json::json!({
+        "viewing_key": vk_hex,
+        "address": wallet.address().to_hex(),
+    }))
+}
+
+/// Request body for POST /wallet/watch.
+#[derive(Deserialize)]
+struct WatchWalletRequest {
+    viewing_key: String,
+}
+
+/// POST /wallet/watch
+///
+/// Create a watch-only wallet from an imported viewing key.  The response
+/// confirms the wallet was created and returns its pk_hash (which is the
+/// identity used for scanning).
+async fn wallet_watch(
+    Json(body): Json<WatchWalletRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match ShieldedWallet::from_viewing_key(&body.viewing_key) {
+        Ok(wallet) => {
+            let pk_hash_hex = hex::encode(wallet.pk_hash());
+            Ok(Json(serde_json::json!({
+                "status": "ok",
+                "watch_only": true,
+                "pk_hash": pk_hash_hex,
+            })))
+        }
+        Err(_) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invalid viewing key — expected 64-char hex (32 bytes)"
+            })),
+        )),
+    }
 }
