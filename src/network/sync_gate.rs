@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 /// Maximum block gap allowed before mining is paused
 const MAX_MINING_GAP: u64 = 2;
@@ -8,6 +10,50 @@ const MAX_MINING_GAP: u64 = 2;
 const STALE_BLOCK_THRESHOLD: u64 = 3;
 /// Tip announcements expire after this many seconds
 const TIP_EXPIRY_SECS: u64 = 120;
+
+/// Statut de minage retourné par le sync gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MiningStatus {
+    /// Le noeud est synchronisé, le minage est autorisé.
+    CanMine,
+    /// Le noeud est en retard par rapport au réseau.
+    BehindNetwork {
+        local_height: u64,
+        network_tip: u64,
+        gap: u64,
+    },
+    /// Aucun tip réseau connu (pas de peers).
+    NoNetworkTips,
+}
+
+impl MiningStatus {
+    /// Retourne true si le minage est autorisé.
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, MiningStatus::CanMine | MiningStatus::NoNetworkTips)
+    }
+
+    /// Retourne un message lisible décrivant le statut de minage.
+    pub fn mining_status_message(&self) -> String {
+        match self {
+            MiningStatus::CanMine => "Minage autorisé: noeud synchronisé avec le réseau".to_string(),
+            MiningStatus::BehindNetwork { local_height, network_tip, gap } => {
+                format!(
+                    "Minage suspendu: noeud en retard de {} blocs (local: {}, réseau: {})",
+                    gap, local_height, network_tip
+                )
+            }
+            MiningStatus::NoNetworkTips => {
+                "Minage autorisé: aucun peer connu, fonctionnement en mode solo".to_string()
+            }
+        }
+    }
+}
+
+impl fmt::Display for MiningStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.mining_status_message())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TipAnnouncement {
@@ -47,11 +93,33 @@ impl SyncGate {
             .unwrap_or(0)
     }
 
-    /// Check if local node is synced enough to mine
-    pub fn can_mine(&self, local_height: u64) -> bool {
+    /// Retourne le statut de minage détaillé.
+    /// Logue un WARNING si le noeud est en retard.
+    pub fn mining_status(&self, local_height: u64) -> MiningStatus {
         let net_tip = self.network_tip_height();
-        if net_tip == 0 { return true; } // No peers known, allow mining
-        local_height + MAX_MINING_GAP >= net_tip
+        if net_tip == 0 {
+            return MiningStatus::NoNetworkTips;
+        }
+        if local_height + MAX_MINING_GAP >= net_tip {
+            MiningStatus::CanMine
+        } else {
+            let gap = net_tip - local_height;
+            warn!(
+                "Minage suspendu: noeud en retard de {} blocs (local: {}, réseau: {})",
+                gap, local_height, net_tip
+            );
+            MiningStatus::BehindNetwork {
+                local_height,
+                network_tip: net_tip,
+                gap,
+            }
+        }
+    }
+
+    /// Check if local node is synced enough to mine.
+    /// Rétrocompatible: retourne un bool (true = minage autorisé).
+    pub fn can_mine(&self, local_height: u64) -> bool {
+        self.mining_status(local_height).is_allowed()
     }
 
     /// Check if a received block is stale (too far behind network tip)

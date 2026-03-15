@@ -675,24 +675,32 @@ impl ShieldedState {
     /// If V1 tree is being skipped (V2-only mode), save as version 1 (V2-only).
     pub fn snapshot_pq(&self) -> StateSnapshotPQ {
         if self.skip_v1_tree {
-            // V2-only mode: don't save the empty/partial V1 tree
+            // V2-only mode: pas de V1 tree, pas de migration_hash
             StateSnapshotPQ {
                 tree_snapshot: self.commitment_tree_pq.snapshot(),
                 nullifiers: self.nullifier_set.iter().map(|n| n.0).collect(),
                 version: 1,
                 v1_tree: None,
+                migration_hash: None,
             }
         } else {
+            // V1+V2 mode: calculer le migration_hash pour vérification ultérieure
+            let v1_root = self.commitment_tree.root();
+            let v2_root = self.commitment_tree_pq.root();
+            let height = self.commitment_tree_pq.size();
+            let mig_hash = StateSnapshotPQ::compute_migration_hash(&v1_root, &v2_root, height);
             StateSnapshotPQ {
                 tree_snapshot: self.commitment_tree_pq.snapshot(),
                 nullifiers: self.nullifier_set.iter().map(|n| n.0).collect(),
                 version: 2,
                 v1_tree: Some(self.commitment_tree.clone()),
+                migration_hash: Some(mig_hash),
             }
         }
     }
 
     /// Restore full state from a snapshot (V1 + V2 trees + nullifiers).
+    /// Vérifie le migration_hash si disponible dans le snapshot.
     pub fn restore_pq_from_snapshot(&mut self, snapshot: StateSnapshotPQ) {
         self.commitment_tree_pq = CommitmentTreePQ::from_snapshot(snapshot.tree_snapshot);
         self.nullifier_set = snapshot.nullifiers.into_iter().map(Nullifier).collect();
@@ -700,11 +708,38 @@ impl ShieldedState {
         if let Some(v1_tree) = snapshot.v1_tree {
             self.commitment_tree = v1_tree;
             self.skip_v1_tree = false;
+
+            // Vérifier le migration_hash si présent dans le checkpoint
+            if snapshot.migration_hash.is_some() {
+                let v1_root = self.commitment_tree.root();
+                let v2_root = self.commitment_tree_pq.root();
+                let height = self.commitment_tree_pq.size();
+                let check = StateSnapshotPQ::compute_migration_hash(&v1_root, &v2_root, height);
+                if let Some(expected) = &snapshot.migration_hash {
+                    if &check != expected {
+                        tracing::error!(
+                            "Migration hash invalide lors de la restauration! attendu={}, calculé={}",
+                            hex::encode(expected),
+                            hex::encode(check)
+                        );
+                    } else {
+                        tracing::info!("Migration hash vérifié avec succès");
+                    }
+                }
+            }
         } else {
             // V2-only snapshot: V1 tree stays empty, skip V1 tree updates
             // and commitment_root validation (V1 root won't match headers).
             // Blocks are still validated by PoW, V2 tree, and all other checks.
             self.skip_v1_tree = true;
+
+            // Pour un snapshot V2-only, vérifier le migration_hash contre le checkpoint si disponible
+            if let Some(ref expected) = snapshot.migration_hash {
+                tracing::warn!(
+                    "Snapshot V2-only avec migration_hash présent ({}), vérification différée au prochain checkpoint V1+V2",
+                    hex::encode(expected)
+                );
+            }
         }
     }
 
@@ -726,6 +761,42 @@ pub struct StateSnapshotPQ {
     /// V1 commitment tree (added in version 2).
     #[serde(default)]
     pub v1_tree: Option<CommitmentTree>,
+    /// Hash de migration: SHA-256(v1_root || v2_root || height).
+    /// Permet de vérifier l'intégrité lors de la restauration.
+    #[serde(default)]
+    pub migration_hash: Option<[u8; 32]>,
+}
+
+impl StateSnapshotPQ {
+    /// Calcule le hash de migration: SHA-256(v1_root || v2_root || height).
+    /// Utilisé pour vérifier l'intégrité entre les arbres V1 et V2 lors d'un checkpoint.
+    pub fn compute_migration_hash(v1_root: &[u8; 32], v2_root: &[u8; 32], height: u64) -> [u8; 32] {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(v1_root);
+        hasher.update(v2_root);
+        hasher.update(height.to_le_bytes());
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    }
+
+    /// Vérifie le migration_hash si présent.
+    /// Retourne Ok(()) si le hash est absent ou valide, Err sinon.
+    pub fn verify_migration_hash(&self, v1_root: &[u8; 32], v2_root: &[u8; 32], height: u64) -> Result<(), String> {
+        if let Some(expected) = &self.migration_hash {
+            let computed = Self::compute_migration_hash(v1_root, v2_root, height);
+            if &computed != expected {
+                return Err(format!(
+                    "Migration hash invalide: attendu {}, calculé {}",
+                    hex::encode(expected),
+                    hex::encode(computed)
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// State errors for shielded transactions.

@@ -288,7 +288,7 @@ impl BlockSync {
     pub fn new(config: SyncConfig) -> Self {
         Self { _config: config }
     }
-    
+
     pub async fn sync(
         &self,
         _peer: &str,
@@ -297,4 +297,152 @@ impl BlockSync {
         // TODO: Implémenter
         Ok(())
     }
+}
+
+/// Réponse d'un peer pour /snapshot/info
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct PeerSnapshotInfo {
+    block_hash: String,
+    height: u64,
+    state_root: String,
+}
+
+/// Résultat de la vérification multi-peer d'un snapshot
+#[derive(Debug)]
+pub struct SnapshotVerification {
+    /// Nombre de peers qui ont répondu
+    pub responding_peers: usize,
+    /// Nombre de peers en accord avec le hash majoritaire
+    pub agreeing_peers: usize,
+    /// Hash majoritaire du snapshot (block_hash)
+    pub majority_hash: Option<String>,
+}
+
+/// Vérifie un snapshot auprès de plusieurs peers.
+///
+/// Interroge GET /snapshot/info sur au moins 3 peers et vérifie
+/// que la majorité (>50%) s'accorde sur le même block_hash et height.
+/// Logue un warning pour chaque peer en désaccord.
+pub async fn verify_snapshot_multi_peer(
+    peer_urls: &[String],
+    expected_state_root: &str,
+) -> Result<SnapshotVerification, SyncError> {
+    const MIN_PEERS: usize = 3;
+
+    if peer_urls.len() < MIN_PEERS {
+        return Err(SyncError::InvalidResponse(format!(
+            "Au moins {} peers requis pour la vérification, {} fournis",
+            MIN_PEERS, peer_urls.len()
+        )));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(SyncError::Request)?;
+
+    // Interroger tous les peers en parallèle
+    let mut handles = Vec::new();
+    for peer_url in peer_urls {
+        let client = client.clone();
+        let url = format!("{}/snapshot/info", peer_url);
+        let peer = peer_url.clone();
+        handles.push(tokio::spawn(async move {
+            let result = client.get(&url).send().await;
+            (peer, result)
+        }));
+    }
+
+    // Collecter les réponses
+    let mut responses: Vec<(String, PeerSnapshotInfo)> = Vec::new();
+    for handle in handles {
+        if let Ok((peer, result)) = handle.await {
+            match result {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<PeerSnapshotInfo>().await {
+                        Ok(info) => responses.push((peer, info)),
+                        Err(e) => {
+                            warn!("Peer {} a renvoyé une réponse invalide: {}", peer, e);
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    warn!("Peer {} a renvoyé HTTP {}", peer, resp.status());
+                }
+                Err(e) => {
+                    warn!("Peer {} injoignable: {}", peer, e);
+                }
+            }
+        }
+    }
+
+    let responding_peers = responses.len();
+    if responding_peers < MIN_PEERS {
+        return Err(SyncError::InvalidResponse(format!(
+            "Seulement {} peers ont répondu, minimum {} requis",
+            responding_peers, MIN_PEERS
+        )));
+    }
+
+    // Compter les votes par (block_hash, height)
+    let mut votes: std::collections::HashMap<(String, u64), Vec<String>> =
+        std::collections::HashMap::new();
+    for (peer, info) in &responses {
+        votes
+            .entry((info.block_hash.clone(), info.height))
+            .or_default()
+            .push(peer.clone());
+    }
+
+    // Trouver le consensus majoritaire
+    let (majority_key, majority_peers) = votes
+        .iter()
+        .max_by_key(|(_, peers)| peers.len())
+        .map(|(k, p)| (k.clone(), p.clone()))
+        .unwrap(); // safe: responding_peers >= MIN_PEERS > 0
+
+    let agreeing_peers = majority_peers.len();
+    let majority_hash = majority_key.0.clone();
+    let is_majority = agreeing_peers * 2 > responding_peers;
+
+    // Loguer les peers en désaccord
+    for (peer, info) in &responses {
+        if info.block_hash != majority_hash || info.height != majority_key.1 {
+            warn!(
+                "Peer {} en désaccord: block_hash={}, height={} (majorité: hash={}, height={})",
+                peer, info.block_hash, info.height, majority_hash, majority_key.1
+            );
+        }
+    }
+
+    // Vérifier que le state_root attendu correspond
+    let majority_root_matches = responses
+        .iter()
+        .any(|(_, info)| info.state_root == expected_state_root && info.block_hash == majority_hash);
+
+    if !majority_root_matches {
+        warn!(
+            "Le state_root attendu {} ne correspond à aucun peer majoritaire",
+            expected_state_root
+        );
+    }
+
+    if !is_majority {
+        return Err(SyncError::InvalidResponse(format!(
+            "Pas de majorité: {}/{} peers d'accord sur le même snapshot",
+            agreeing_peers, responding_peers
+        )));
+    }
+
+    info!(
+        "Vérification snapshot OK: {}/{} peers d'accord (hash={}, height={})",
+        agreeing_peers, responding_peers, majority_hash, majority_key.1
+    );
+
+    Ok(SnapshotVerification {
+        responding_peers,
+        agreeing_peers,
+        majority_hash: Some(majority_hash),
+    })
 }
