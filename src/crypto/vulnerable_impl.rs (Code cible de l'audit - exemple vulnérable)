@@ -1,0 +1,56 @@
+//! Implémentation vulnérable pour démonstration des tests de régression
+//! NE PAS UTILISER EN PRODUCTION
+
+use zeroize::Zeroize;
+
+/// VULNÉRABILITÉ: Comparaison non constant-time (CRYPTO-001)
+pub fn insecure_compare_mac(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    // Timing leak ici: early return sur première différence
+    for i in 0..a.len() {
+        if a[i] != b[i] {
+            return false; // Leak: position de la première différence
+        }
+    }
+    true
+}
+
+/// VULNÉRABILITÉ: Branchement secret-dépendant (CRYPTO-005)
+pub fn decrypt_rsa_pkcs1_private(ciphertext: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+    // Simulation de déchiffrement
+    let decrypted = rsa_decrypt_raw(ciphertext, key);
+    
+    // LEAK: Branchement sur résultat déchiffrement (timing oracle)
+    if !check_padding_pkcs1_v15(&decrypted) {
+        return None; // Timing différent si padding invalide
+    }
+    
+    Some(decrypted[11..].to_vec()) // Skip padding headers
+}
+
+fn rsa_decrypt_raw(ciphertext: &[u8], _key: &[u8]) -> Vec<u8> {
+    // Stub
+    ciphertext.to_vec()
+}
+
+fn check_padding_pkcs1_v15(data: &[u8]) -> bool {
+    // VULNÉRABILITÉ: Validation non constant-time
+    if data.len() < 11 {
+        return false;
+    }
+    data[0] == 0x00 && data[1] == 0x02 // Early return leak
+}
+
+/// STRUCTURE SÈCHE: Clé sans zeroization automatique
+#[derive(Clone)]
+pub struct InsecureKey {
+    pub material: Vec<u8>, // Reste en mémoire après drop
+}
+
+impl Drop for InsecureKey {
+    fn drop(&mut self) {
+        // Oubli: pas d'effacement mémoire
+    }
+}

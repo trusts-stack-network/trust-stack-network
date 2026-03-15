@@ -1,0 +1,6 @@
+# Config minimal pour testnet local (node-2)
+
+[node]
+name = "node-2"
+p2p_port = 9944
+rpc_port =

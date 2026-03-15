@@ -1,0 +1,5 @@
+[dependencies]
+# Post-quantique
+fips205 = { version = "0.1", features = ["slh_dsa_sha2_128s"] }
+zeroize = { version = "1.7", features = ["derive"] }
+rand_core = "0.6"

@@ -1,0 +1,152 @@
+---
+# Déploiement du service TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Arrêt du service TSN existant"
+  systemd:
+    name: tsn-node
+    state: stopped
+  ignore_errors: yes
+  when: force_recreate | default(false)
+  
+- name: "Suppression du conteneur existant"
+  docker_container:
+    name: tsn-node
+    state: absent
+  when: force_recreate | default(false)
+  
+- name: "Vérification de l'image TSN"
+  docker_image_info:
+    name: "{{ docker_registry }}/tsn:{{ tsn_version }}"
+  register: tsn_image_info
+  
+- name: "Échec si image non trouvée"
+  fail:
+    msg: "Image TSN non trouvée: {{ docker_registry }}/tsn:{{ tsn_version }}"
+  when: tsn_image_info.images | length == 0
+  
+- name: "Génération de la configuration spécifique au nœud"
+  template:
+    src: node.toml.j2
+    dest: "{{ tsn_config_dir }}/node.toml"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0640'
+    backup: yes
+  register: config_updated
+  
+- name: "Génération du script d'environnement"
+  copy:
+    content: |
+      # Variables d'environnement TSN
+      # Nœud: {{ inventory_hostname }} (ID: {{ node_id }}, Rôle: {{ node_role }})
+      
+      TSN_NODE_ID={{ node_id }}
+      TSN_NODE_ROLE={{ node_role }}
+      TSN_VERSION={{ tsn_version }}
+      TSN_HTTP_BIND=0.0.0.0:{{ tsn_http_port | default(8080) }}
+      TSN_P2P_BIND=0.0.0.0:{{ tsn_p2p_port | default(9000) }}
+      TSN_RPC_BIND=0.0.0.0:{{ tsn_rpc_port | default(9001) }}
+      TSN_METRICS_BIND=0.0.0.0:{{ tsn_metrics_port | default(9090) }}
+      TSN_DATA_DIR={{ tsn_data_dir }}
+      TSN_CONFIG_FILE={{ tsn_config_dir }}/node.toml
+      TSN_LOG_LEVEL={{ log_level | default('info') }}
+      RUST_LOG=info,tsn=debug
+      RUST_BACKTRACE=1
+    dest: "{{ tsn_config_dir }}/env"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0640'
+    
+- name: "Test de la configuration TSN"
+  docker_container:
+    name: tsn-config-test
+    image: "{{ docker_registry }}/tsn:{{ tsn_version }}"
+    command: ["--config", "/config/node.toml", "--validate-config"]
+    volumes:
+      - "{{ tsn_config_dir }}:/config:ro"
+    user: "{{ ansible_user_uid }}:{{ ansible_user_gid }}"
+    detach: no
+    cleanup: yes
+    state: started
+  register: config_test
+  
+- name: "Échec si configuration invalide"
+  fail:
+    msg: "Configuration TSN invalide: {{ config_test.container.Output }}"
+  when: config_test.container.ExitCode != 0
+  
+- name: "Déploiement du conteneur TSN"
+  docker_container:
+    name: tsn-node
+    image: "{{ docker_registry }}/tsn:{{ tsn_version }}"
+    state: started
+    restart_policy: unless-stopped
+    user: "{{ ansible_user_uid }}:{{ ansible_user_gid }}"
+    env_file: "{{ tsn_config_dir }}/env"
+    volumes:
+      - "{{ tsn_data_dir }}:/data/tsn:rw"
+      - "{{ tsn_config_dir }}:/config:ro"
+      - "{{ tsn_logs_dir }}:/data/tsn/logs:rw"
+    ports:
+      - "{{ tsn_http_port | default(8080) }}:8080"
+      - "{{ tsn_p2p_port | default(9000) }}:9000"
+      - "{{ tsn_rpc_port | default(9001) }}:9001"
+      - "{{ tsn_metrics_port | default(9090) }}:9090"
+    command: ["--config", "/config/node.toml"]
+    log_driver: json-file
+    log_options:
+      max-size: "100m"
+      max-file: "3"
+    memory: "{{ memory_limit | default('2g') }}"
+    cpus: "{{ cpu_limit | default('1.0') }}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      tsn.node.id: "{{ node_id }}"
+      tsn.node.role: "{{ node_role }}"
+      tsn.version: "{{ tsn_version }}"
+      tsn.deployed_by: "ansible"
+      tsn.deployed_at: "{{ ansible_date_time.iso8601 }}"
+  register: container_deploy
+  
+- name: "Attente du démarrage du conteneur"
+  wait_for:
+    port: "{{ tsn_http_port | default(8080) }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    timeout: "{{ deploy_timeout | default(300) }}"
+    delay: 5
+    
+- name: "Vérification de la santé du conteneur"
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ tsn_http_port | default(8080) }}/health"
+    method: GET
+    timeout: 10
+  register: health_check
+  retries: 5
+  delay: 10
+  until: health_check.status == 200
+  
+- name: "Collecte des informations de déploiement"
+  set_fact:
+    deployment_info:
+      node_id: "{{ node_id }}"
+      node_role: "{{ node_role }}"
+      container_id: "{{ container_deploy.container.Id[:12] }}"
+      image_id: "{{ tsn_image_info.images[0].Id[:12] }}"
+      version: "{{ tsn_version }}"
+      deployed_at: "{{ ansible_date_time.iso8601 }}"
+      health_status: "{{ health_check.status }}"
+      config_updated: "{{ config_updated.changed }}"
+      
+- name: "Sauvegarde des informations de déploiement"
+  copy:
+    content: "{{ deployment_info | to_nice_json }}"
+    dest: "{{ tsn_base_dir }}/deployment.json"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0644'

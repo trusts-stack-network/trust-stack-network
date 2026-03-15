@@ -1,0 +1,112 @@
+name: Docker CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - '.github/workflows/docker-ci.yml'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    branches: [main, develop]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: truststack/tsn
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            TARGETARCH=${{ matrix.arch }}
+
+  test-compose:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start testnet
+        run: |
+          docker-compose -f docker-compose.yml up -d
+          ./scripts/wait-for-it.sh localhost:9933 --timeout=60
+          ./scripts/wait-for-it.sh localhost:9944 --timeout=60
+
+      - name: Test health endpoints
+        run: |
+          curl -f http://localhost:9933/health
+          curl -f http://localhost:9944/health
+
+      - name: Test sync
+        run: |
+          docker-compose exec -T tsn-node-1 tsn-node sync-status
+
+      - name: Logs
+        if: failure()
+        run: docker-compose logs
+
+      - name: Cleanup
+        run: docker-compose down -v
+
+  size-check:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t tsn:size-check .
+
+      - name: Check size
+        run: |
+          SIZE=$(docker images tsn:size-check --format "{{.Size}}" | numfmt --from=iec)
+          MAX=150MiB
+          if [ $SIZE -gt $(numfmt --from=iec $MAX) ]; then
+            echo "Image trop grande: $(numfmt --to=iec $SIZE) > $MAX"
+            exit 1
+          fi
+          echo "✅ Taille image: $(numfmt --to=iec $SIZE)"

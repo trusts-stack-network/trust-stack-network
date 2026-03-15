@@ -1,0 +1,27 @@
+name: Bench Docker
+
+on:
+  schedule:
+    - cron: "0 2 * * *"  # nightly 02:00 UTC
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker buildx build --tag tsn-node:bench --load .
+
+      - name: Size benchmark
+        run: ./scripts/docker-size.sh
+
+      - name: Start compose
+        run: |
+          docker compose up --detach
+          sleep 30
+          curl -f http://localhost:9944/health
+          docker compose down --volumes

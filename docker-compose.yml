@@ -1,0 +1,78 @@
+version: "3.9"
+# ------------------------------------------------------------
+# TSN local testnet – 3 nodes + explorer
+# ------------------------------------------------------------
+services:
+  node1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: tsn-node1
+    ports:
+      - "9944:9944"
+      - "30303:30303"
+    environment:
+      - TSN_CHAIN=testnet
+      - TSN_DATA_DIR=/data
+      - TSN_LOG=info
+    volumes:
+      - node1-data:/data
+    networks:
+      - tsn-testnet
+    command: ["--bootnodes", "node2:30303,node3:30303"]
+
+  node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: tsn-node2
+    ports:
+      - "9945:9944"
+      - "30304:30303"
+    environment:
+      - TSN_CHAIN=testnet
+      - TSN_DATA_DIR=/data
+      - TSN_LOG=info
+    volumes:
+      - node2-data:/data
+    networks:
+      - tsn-testnet
+
+  node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: tsn-node3
+    ports:
+      - "9946:9944"
+      - "30305:30303"
+    environment:
+      - TSN_CHAIN=testnet
+      - TSN_DATA_DIR=/data
+      - TSN_LOG=info
+    volumes:
+      - node3-data:/data
+    networks:
+      - tsn-testnet
+
+  explorer:
+    image: ghcr.io/truststack/tsn-explorer:latest
+    container_name: tsn-explorer
+    ports:
+      - "3000:3000"
+    environment:
+      - TSN_API_URL=http://node1:9944
+    networks:
+      - tsn-testnet
+
+networks:
+  tsn-testnet:
+    driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

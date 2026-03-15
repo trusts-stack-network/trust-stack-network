@@ -1,0 +1,38 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    pub version: u32,
+    pub inputs: Vec<TxInput>,
+    pub outputs: Vec<TxOutput>,
+    pub lock_time: u64,
+    pub signatures: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxInput {
+    pub prev_tx: [u8; 32],
+    pub prev_index: u32,
+    pub script_sig: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxOutput {
+    pub value: u64,
+    pub script_pubkey: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShieldedTransaction {
+    pub nullifiers: Vec<[u8; 32]>,
+    pub commitments: Vec<[u8; 32]>,
+    pub ciphertexts: Vec<u8>,
+    pub proof: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShieldedTransactionV2 {
+    pub version: u32,
+    pub orchard_bundle: Option<Vec<u8>>,
+    pub sapling_bundle: Option<Vec<u8>>,
+}

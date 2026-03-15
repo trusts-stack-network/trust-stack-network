@@ -1,0 +1,43 @@
+[package]
+name = "tsn-benches"
+version = "0.1.0"
+edition = "2021"
+
+[[bench]]
+name = "throughput_bench"
+path = "throughput_bench.rs"
+harness = false
+
+[[bench]]
+name = "latency_bench"
+path = "latency_bench.rs"
+harness = false
+
+[[bench]]
+name = "memory_bench"
+path = "memory_bench.rs"
+harness = false
+
+[[bench]]
+name = "parallel_bench"
+path = "parallel_bench.rs"
+harness = false
+
+[[bench]]
+name = "workload_bench"
+path = "workload_bench.rs"
+harness = false
+
+[[bench]]
+name = "mik_consensus_stress"
+path = "mik_consensus_stress.rs"
+harness = false
+
+[dependencies]
+tsn = { path = ".." }
+criterion = { version = "0.5", features = ["async", "async_tokio"] }
+rand = "0.8"
+jemallocator = "0.5"
+tokio = { version = "1", features = ["full"] }
+rayon = "1.10"
+tracing = "0.1"

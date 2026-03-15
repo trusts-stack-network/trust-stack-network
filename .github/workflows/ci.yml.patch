@@ -1,0 +1,11 @@
+# À ajouter dans le job « checks » existant
+      - name: Dockerfile lint
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: Dockerfile
+
+      - name: Ensure docker build
+        run: ./scripts/docker-build.sh
+
+      - name: Ensure smoke test
+        run: ./scripts/docker-smoke-test.sh

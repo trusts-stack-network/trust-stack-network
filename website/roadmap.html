@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roadmap Technique TSN - Trust Stack Network</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        .roadmap-header {
+            background: linear-gradient(135deg, #6366F1, #8B5CF6);
+            color: white;
+            padding: 2rem 0;
+            text-align: center;
+        }
+        .roadmap-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            margin: 2rem 0;
+        }
+        .status-section {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .status-section.done {
+            border-left: 4px solid #10B981;
+        }
+        .status-section.todo {
+            border-left: 4px solid #F59E0B;
+        }
+        .status-section.blocked {
+            border-left: 4px solid #EF4444;
+        }
+        .status-title {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+            font-size: 1.25rem;
+        }
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid #E5E7EB;
+        }
+        .status-item:last-child {
+            border-bottom: none;
+        }
+        .status-icon {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: bold;
+            color: white;
+        }
+        .status-icon.done {
+            background: #10B981;
+        }
+        .status-icon.todo {
+            background: #F59E0B;
+        }
+        .status-icon.blocked {
+            background: #EF4444;
+        }
+        .status-text {
+            flex: 1;
+        }
+        .status-owner {
+            font-size: 0.875rem;
+            color: #6B7280;
+            font-weight: 500;
+        }
+        .update-time {
+            background: #F3F4F6;
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 0.875rem;
+            color: #6B7280;
+            margin: 2rem 0;
+        }
+        .critical-issues {
+            background: #FEF2F2;
+            border: 1px solid #FCA5A5;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 2rem 0;
+        }
+        .critical-title {
+            color: #DC2626;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #E5E7EB;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 1rem 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #10B981, #059669);
+            transition: width 0.3s ease;
+        }
+        .module-section {
+            margin: 2rem 0;
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .module-title {
+            font-weight: 600;
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            color: #1F2937;
+        }
+    </style>
+</head>
+<body>
+    <header class="roadmap-header">
+        <div class="roadmap-container">
+            <h1>Roadmap Technique TSN</h1>
+            <p>État de développement en temps réel - Mise à jour automatique toutes les heures</p>
+        </div>
+    </header>
+
+    <main class="roadmap-container">
+        <div class="update-time">
+            <strong>Dernière mise à jour :</strong> 6 Mars 2026 - 14:30 UTC
+            <br><em>Prochaine mise à jour automatique : 15:30 UTC</em>
+        </div>
+
+        <div class="critical-issues">
+            <div class="critical-title">
+                🚨 BLOCKERS CRITIQUES DE RELEASE
+            </div>
+            <div class="status-item">
+                <div class="status-icon blocked">!</div>
+                <div class="status-text">
+                    <strong>Pipeline CI/CD cassée</strong> - Workflows GitHub Actions obsolètes
+                    <div class="status-owner">DEVOPS (Malik.B)</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="status-icon blocked">!</div>
+                <div class="status-text">
+                    <strong>Réseau P2P non décentralisé</strong> - Seulement sync HTTP basique
+                    <div class="status-owner">NETWORK (Jamal.O)</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="status-icon blocked">!</div>
+                <div class="status-text">
+                    <strong>Bug: "Invalid commitment root"</strong> - Échec sync mainnet
+                    <div class="status-owner">CRYPTO (Sara.L)</div>
+                </div>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin: 2rem 0;">
+            <h2>Avancement Global Release V1.0</h2>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: 34%;"></div>
+            </div>
+            <p><strong>34% complet</strong> (45/132 tâches critiques terminées)</p>
+        </div>
+
+        <div class="status-grid">
+            <div class="status-section done">
+                <div class="status-title">
+                    <span style="color: #10B981;">✅</span>
+                    FAIT - PRODUCTION READY
+                </div>
+                <div class="status-item">
+                    <div class="status-icon done">✓</div>
+                    <div class="status-text">
+                        <strong>Base blockchain Rust</strong> - Architecture modulaire complète
+                        <div class="status-owner">CORE (Alex.D)</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon done">✓</div>
+                    <div class="status-text">
+                        <strong>Crypto post-quantique ML-DSA-65</strong> - FIPS204 opérationnel
+                        <div class="status-owner">CRYPTO (Sara.L)</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon done">✓</div>
+                    <div class="status-text">
+                        <strong>Plonky2 STARKs V2</strong> - Architecture ZK complète
+                        <div class="status-owner">CRYPTO (Sara.L)</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon done">✓</div>
+                    <div class="status-text">
+                        <strong>Poseidon2 hash</strong> - Optimisé pour STARK
+                        <div class="status-owner">CRYPTO (Sara.L)</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon done">✓</div>
+                    <div class="status-text">
+                        <strong>HTTP API</strong> - RPC Axum fonctionnel
+                        <div class="status-owner">NETWORK (Jamal.O)</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon done">✓</div>
+                    <div class="status-text">
+                        <strong>Website moderne</strong> - Landing + wallet React
+                        <div class="status-owner">HERALD (Zoe.K)</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon done">✓</div>
+                    <div class="status-text">
+                        <strong>Whitepaper V0.1</strong> - Spec technique française
+                        <div class="status-owner">SCRIBE (Laila.H)</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="status-section todo">
+                <div class="status-title">
+                    <span style="color: #F59E0B;">⏳</span>
+                    À FAIRE - PRIORITÉ HAUTE
+                </div>
+                <div class="status-item">
+                    <div class="status-icon todo">!</div>
+                    <div class="status-text">
+                        <strong>CI/CD Pipeline</strong> - GitHub Actions + tests automatisés
+                        <div class="status-owner">DEVOPS (Malik.B) - Sprint actuel</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon todo">!</div>
+                    <div class="status-text">
+                        <strong>P2P Discovery</strong> - Kademlia DHT + bootstrap nodes
+                        <div class="status-owner">NETWORK (Jamal.O) - Sprint actuel</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon todo">!</div>
+                    <div class="status-text">
+                        <strong>Consensus BFT</strong> - Production-ready validator set
+                        <div class="status-owner">CORE (Alex.D) - 2 semaines</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon todo">!</div>
+                    <div class="status-text">
+                        <strong>Storage optimisé</strong> - Migration Sled → RocksDB
+                        <div class="status-owner">CORE (Alex.D) - 1 semaine</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon todo">!</div>
+                    <div class="status-text">
+                        <strong>Tests end-to-end</strong> - Suite de tests réseau complets
+                        <div class="status-owner">DEVOPS (Malik.B) - 3 semaines</div>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon todo">!</div>
+                    <div class="status-text">
+                        <strong>Documentation API</strong> - OpenAPI + guides développeur
+                        <div class="status-owner">SCRIBE (Laila.H) - 1 semaine</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="module-section">
+            <div class="module-title">📊 DÉTAIL PAR MODULE</div>
+
+            <h4>🔐 CRYPTO (/src/crypto/) - 85% complet</h4>
+            <ul>
+                <li>✅ ML-DSA-65 post-quantique (FIPS204)</li>
+                <li>✅ Plonky2 STARKs V2 architecture</li>
+                <li>✅ Poseidon2 optimisé</li>
+                <li>✅ ChaCha20Poly1305 symétrique</li>
+                <li>❌ Bug "Invalid commitment root" à corriger</li>
+                <li>❌ Audit sécurité externe à planifier</li>
+            </ul>
+
+            <h4>🌐 NETWORK (/src/network/) - 40% complet</h4>
+            <ul>
+                <li>✅ HTTP API Axum fonctionnel</li>
+                <li>✅ Mempool basique</li>
+                <li>❌ Découverte P2P Kademlia DHT</li>
+                <li>❌ Gossip protocol</li>
+                <li>❌ NAT traversal</li>
+                <li>❌ Bootstrap nodes réseau</li>
+            </ul>
+
+            <h4>⚙️ CORE (/src/core/) - 70% complet</h4>
+            <ul>
+                <li>✅ Structure Block/Transaction</li>
+                <li>✅ State management</li>
+                <li>✅ Account model</li>
+                <li>❌ Consensus BFT production</li>
+                <li>❌ Sharding dynamique</li>
+                <li>❌ Fork choice rule</li>
+            </ul>
+
+            <h4>🔧 DEVOPS - 15% complet</h4>
+            <ul>
+                <li>❌ Pipeline CI/CD GitHub Actions</li>
+                <li>❌ Tests automatisés</li>
+                <li>❌ Release automation</li>
+                <li>❌ Monitoring Prometheus</li>
+                <li>❌ Docker optimisé production</li>
+            </ul>
+        </div>
+
+        <div class="module-section">
+            <div class="module-title">🎯 SPRINT ACTUEL (6-13 Mars 2026)</div>
+            <div class="status-item">
+                <div class="status-text">
+                    <strong>DEVOPS:</strong> Réparer pipeline CI/CD - GitHub Actions workflows
+                    <br><em>Blocage: Tests unitaires cassés depuis migration async</em>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="status-text">
+                    <strong>NETWORK:</strong> Implémenter Kademlia DHT pour discovery P2P
+                    <br><em>Target: Bootstrap nodes fonctionnels + peer discovery</em>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="status-text">
+                    <strong>CRYPTO:</strong> Corriger bug "Invalid commitment root"
+                    <br><em>Impact: Sync mainnet TSN échoue systématiquement</em>
+                </div>
+            </div>
+        </div>
+
+        <div class="module-section">
+            <div class="module-title">📈 MÉTRIQUES CLÉS</div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
+                <div style="text-align: center; padding: 1rem; background: #F9FAFB; border-radius: 8px;">
+                    <div style="font-size: 2rem; font-weight: bold; color: #059669;">15,700</div>
+                    <div style="color: #6B7280;">Lignes de code Rust</div>
+                </div>
+                <div style="text-align: center; padding: 1rem; background: #F9FAFB; border-radius: 8px;">
+                    <div style="font-size: 2rem; font-weight: bold; color: #DC2626;">14</div>
+                    <div style="color: #6B7280;">Warnings à corriger</div>
+                </div>
+                <div style="text-align: center; padding: 1rem; background: #F9FAFB; border-radius: 8px;">
+                    <div style="font-size: 2rem; font-weight: bold; color: #0891B2;">44</div>
+                    <div style="color: #6B7280;">Modules Rust</div>
+                </div>
+                <div style="text-align: center; padding: 1rem; background: #F9FAFB; border-radius: 8px;">
+                    <div style="font-size: 2rem; font-weight: bold; color: #7C3AED;">3</div>
+                    <div style="color: #6B7280;">Blockers critiques</div>
+                </div>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin: 3rem 0; padding: 2rem; background: #EFF6FF; border-radius: 12px;">
+            <h3 style="color: #1E40AF;">VERDICT TECHNIQUE CEO</h3>
+            <p style="font-size: 1.25rem; margin: 1rem 0; color: #1F2937;">
+                <strong>❌ TSN n'est PAS prêt pour release production</strong>
+            </p>
+            <p style="color: #6B7280;">
+                Base technique solide mais blockers critiques empêchent le déploiement mainnet.
+                <br>ETA release: <strong>Q2 2026</strong> si sprint actuel résolu.
+            </p>
+        </div>
+
+        <div style="text-align: center; margin: 2rem 0;">
+            <a href="index.html" style="display: inline-block; padding: 0.75rem 1.5rem; background: #6366F1; color: white; text-decoration: none; border-radius: 8px; font-weight: 500;">
+                ← Retour au site principal
+            </a>
+        </div>
+    </main>
+
+    <script>
+        // Auto-refresh toutes les heures
+        setTimeout(() => {
+            location.reload();
+        }, 3600000); // 1 heure = 3,600,000 ms
+
+        // Afficher le countdown jusqu'au prochain refresh
+        function updateCountdown() {
+            const now = new Date();
+            const nextHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 30, 0);
+            const diff = nextHour - now;
+            const minutes = Math.floor(diff / 60000);
+            const seconds = Math.floor((diff % 60000) / 1000);
+
+            document.querySelector('.update-time em').textContent =
+                `Prochaine mise à jour automatique dans ${minutes}m ${seconds}s`;
+        }
+
+        setInterval(updateCountdown, 1000);
+        updateCountdown();
+    </script>
+</body>
+</html>

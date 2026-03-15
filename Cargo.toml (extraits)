@@ -1,0 +1,5 @@
+[dependencies]
+slh_dsa = { version = "0.1", features = ["std"] } # ou fips205 = "0.2"
+zeroize = { version = "1.7", features = ["derive"] }
+hex = "0.4"
+thiserror = "1.0"

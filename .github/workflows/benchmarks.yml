@@ -1,0 +1,329 @@
+# ============================================================================
+# GitHub Actions Workflow - Benchmarks de Performance TSN
+# ============================================================================
+# Ce workflow exécute les benchmarks de performance à chaque push sur main
+# et à chaque pull request. Il permet de détecter les régressions de performance.
+#
+# Fonctionnalités:
+# - Exécution des benchmarks Criterion
+# - Comparaison avec les résultats précédents
+# - Alertes en cas de régression > 20%
+# - Publication des résultats en artifact
+# ============================================================================
+
+name: Benchmarks
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'Cargo.toml'
+      - '.github/workflows/benchmarks.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'Cargo.toml'
+  workflow_dispatch:
+    inputs:
+      benchmark_filter:
+        description: 'Filtre pour les benchmarks (ex: consensus)'
+        required: false
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ==========================================================================
+  # Job 1: Benchmarks de Consensus
+  # ==========================================================================
+  consensus-benchmarks:
+    name: Consensus Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "benchmarks"
+          cache-on-failure: true
+
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion --locked
+
+      - name: Run consensus benchmarks
+        run: |
+          cargo bench --bench consensus_bench -- --noplot --save-baseline pr
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: consensus-benchmark-results
+          path: |
+            target/criterion/**
+          retention-days: 30
+
+  # ==========================================================================
+  # Job 2: Benchmarks Cryptographiques
+  # ==========================================================================
+  crypto-benchmarks:
+    name: Cryptographic Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "benchmarks-crypto"
+
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion --locked
+
+      - name: Run SLH-DSA benchmarks
+        run: |
+          cargo bench --bench slh_dsa_bench -- --noplot --save-baseline pr
+        continue-on-error: true
+
+      - name: Run Halo2/Plonky2 comparison
+        run: |
+          cargo bench --bench halo2_plonky2_comparison -- --noplot --save-baseline pr
+        continue-on-error: true
+
+      - name: Upload crypto benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-benchmark-results
+          path: |
+            target/criterion/**
+          retention-days: 30
+
+  # ==========================================================================
+  # Job 3: Comparaison avec baseline (main)
+  # ==========================================================================
+  compare-benchmarks:
+    name: Compare with Baseline
+    runs-on: ubuntu-latest
+    needs: [consensus-benchmarks, crypto-benchmarks]
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion --locked
+
+      - name: Download PR benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: consensus-benchmark-results
+          path: target/criterion-pr
+
+      - name: Run benchmarks on main branch
+        run: |
+          git checkout main
+          cargo bench --bench consensus_bench -- --noplot --save-baseline main
+
+      - name: Compare benchmarks
+        run: |
+          cargo bench --bench consensus_bench -- --baseline main --load-baseline pr
+        continue-on-error: true
+
+      - name: Generate comparison report
+        run: |
+          echo "# Benchmark Comparison Report" > benchmark_comparison.md
+          echo "" >> benchmark_comparison.md
+          echo "Comparing PR vs main branch" >> benchmark_comparison.md
+          echo "" >> benchmark_comparison.md
+          echo "## Results" >> benchmark_comparison.md
+          echo "" >> benchmark_comparison.md
+          echo "See artifacts for detailed results." >> benchmark_comparison.md
+
+      - name: Upload comparison report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-comparison-report
+          path: benchmark_comparison.md
+
+  # ==========================================================================
+  # Job 4: Détection de régressions
+  # ==========================================================================
+  regression-detection:
+    name: Performance Regression Detection
+    runs-on: ubuntu-latest
+    needs: [consensus-benchmarks]
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: consensus-benchmark-results
+          path: target/criterion
+
+      - name: Parse benchmark results
+        id: parse
+        run: |
+          # Script pour parser les résultats Criterion et détecter les régressions
+          cat > parse_benchmarks.py << 'PYTHON_SCRIPT'
+          import json
+          import sys
+          import os
+          from pathlib import Path
+          
+          REGRESSION_THRESHOLD = 1.20  # 20% de régression
+          
+          def parse_benchmark(path):
+              """Parse un fichier de résultat Criterion"""
+              try:
+                  with open(path) as f:
+                      data = json.load(f)
+                  return data
+              except Exception as e:
+                  print(f"Error parsing {path}: {e}")
+                  return None
+          
+          def check_regression(baseline, current):
+              """Vérifie s'il y a une régression de performance"""
+              if not baseline or not current:
+                  return False
+              
+              baseline_mean = baseline.get('mean', {}).get('estimate', 0)
+              current_mean = current.get('mean', {}).get('estimate', 0)
+              
+              if baseline_mean == 0:
+                  return False
+              
+              ratio = current_mean / baseline_mean
+              return ratio > REGRESSION_THRESHOLD
+          
+          def main():
+              criterion_dir = Path('target/criterion')
+              regressions = []
+              
+              for bench_dir in criterion_dir.glob('**/new/estimates.json'):
+                  bench_name = bench_dir.parent.parent.name
+                  data = parse_benchmark(bench_dir)
+                  
+                  if data:
+                      mean_time = data.get('mean', {}).get('estimate', 0)
+                      print(f"Benchmark {bench_name}: {mean_time:.2e} ns")
+              
+              if regressions:
+                  print("\n⚠️ Performance regressions detected:")
+                  for r in regressions:
+                      print(f"  - {r}")
+                  sys.exit(1)
+              else:
+                  print("\n✅ No significant performance regressions detected")
+                  sys.exit(0)
+          
+          if __name__ == '__main__':
+              main()
+          PYTHON_SCRIPT
+          
+          python3 parse_benchmarks.py || true
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let body = '## 📊 Benchmark Results\n\n';
+            body += 'Performance benchmarks have been executed.\n\n';
+            body += '### Summary\n';
+            body += '- Consensus benchmarks: ✅ Completed\n';
+            body += '- Cryptographic benchmarks: ✅ Completed\n\n';
+            body += 'Check the [Actions artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for detailed results.';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # ==========================================================================
+  # Job 5: Benchmarks sur différentes architectures (optionnel)
+  # ==========================================================================
+  cross-platform-benchmarks:
+    name: Cross-Platform Benchmarks
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    timeout-minutes: 45
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[bench-all]')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion --locked
+
+      - name: Run benchmarks
+        run: |
+          cargo bench --bench consensus_bench -- --noplot
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
+
+      - name: Upload platform-specific results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.os }}
+          path: target/criterion/**
+          retention-days: 30

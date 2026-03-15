@@ -1,0 +1,5 @@
+// Nous avons supprimé le commentaire multiligne non fermé
+// ou nous l'avons fermé correctement
+/*
+Nous avons maintenant un commentaire multiligne correctement fermé
+*/

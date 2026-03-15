@@ -1,0 +1,392 @@
+# Makefile DevOps pour Trust Stack Network
+# Trust Stack Network DevOps Automation
+# Author: Yuki.T Release & DevOps Engineer
+
+.PHONY: help setup build test deploy monitor backup update clean
+.DEFAULT_GOAL := help
+
+# ===== CONFIGURATION =====
+PROJECT_NAME := tsn
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# Configuration Docker
+DOCKER_REGISTRY := ghcr.io/tsn-network
+IMAGE_NAME := $(DOCKER_REGISTRY)/$(PROJECT_NAME)
+IMAGE_TAG := $(VERSION)
+DOCKERFILE := devops/Dockerfile
+
+# Configuration des nœuds
+NODES := node1 node2 node3 node4 node5
+ANSIBLE_INVENTORY := devops/ansible/inventory/hosts.yml
+ANSIBLE_PLAYBOOK := devops/ansible/deploy.yml
+
+# Répertoires
+SCRIPTS_DIR := scripts
+LOGS_DIR := logs
+BACKUP_DIR := backups
+
+# Couleurs pour l'affichage
+RED := \033[0;31m
+GREEN := \033[0;32m
+YELLOW := \033[1;33m
+BLUE := \033[0;34m
+NC := \033[0m # No Color
+
+# ===== FONCTIONS UTILITAIRES =====
+define log
+	@echo -e "$(BLUE)[$(shell date '+%H:%M:%S')]$(NC) $(1)"
+endef
+
+define success
+	@echo -e "$(GREEN)✓$(NC) $(1)"
+endef
+
+define warn
+	@echo -e "$(YELLOW)⚠$(NC) $(1)"
+endef
+
+define error
+	@echo -e "$(RED)✗$(NC) $(1)"
+endef
+
+# ===== AIDE =====
+help: ## Afficher cette aide
+	@echo "Trust Stack Network - DevOps Makefile"
+	@echo ""
+	@echo "USAGE:"
+	@echo "  make <target> [OPTIONS]"
+	@echo ""
+	@echo "TARGETS PRINCIPAUX:"
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  $(BLUE)%-20s$(NC) %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo ""
+	@echo "VARIABLES:"
+	@echo "  VERSION=$(VERSION)"
+	@echo "  IMAGE_TAG=$(IMAGE_TAG)"
+	@echo "  DOCKER_REGISTRY=$(DOCKER_REGISTRY)"
+	@echo ""
+	@echo "EXEMPLES:"
+	@echo "  make setup                    # Configuration environnement"
+	@echo "  make build                    # Construction image Docker"
+	@echo "  make deploy                   # Déploiement sur tous les nœuds"
+	@echo "  make deploy-node NODE=node1   # Déploiement sur un nœud"
+	@echo "  make monitor                  # Monitoring continu"
+	@echo "  make backup                   # Backup de tous les nœuds"
+	@echo "  make update VERSION=v1.2.0    # Mise à jour vers version"
+
+# ===== SETUP ET CONFIGURATION =====
+setup: ## Configuration de l'environnement de développement
+	$(call log,"Configuration de l'environnement...")
+	@chmod +x $(SCRIPTS_DIR)/*.sh
+	@$(SCRIPTS_DIR)/setup-dev.sh
+	$(call success,"Environnement configuré")
+
+check-deps: ## Vérification des dépendances
+	$(call log,"Vérification des dépendances...")
+	@command -v docker >/dev/null 2>&1 || { $(call error,"Docker non installé"); exit 1; }
+	@command -v ansible >/dev/null 2>&1 || { $(call error,"Ansible non installé"); exit 1; }
+	@command -v jq >/dev/null 2>&1 || { $(call error,"jq non installé"); exit 1; }
+	@command -v curl >/dev/null 2>&1 || { $(call error,"curl non installé"); exit 1; }
+	$(call success,"Dépendances vérifiées")
+
+# ===== BUILD ET TESTS =====
+build: check-deps ## Construction de l'image Docker
+	$(call log,"Construction de l'image Docker...")
+	@docker build \
+		-f $(DOCKERFILE) \
+		-t $(IMAGE_NAME):$(IMAGE_TAG) \
+		-t $(IMAGE_NAME):latest \
+		--build-arg TSN_VERSION=$(VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) \
+		--target runtime \
+		.
+	$(call success,"Image construite: $(IMAGE_NAME):$(IMAGE_TAG)")
+
+test-image: build ## Test de l'image Docker
+	$(call log,"Test de l'image Docker...")
+	@docker run --rm $(IMAGE_NAME):$(IMAGE_TAG) --version
+	$(call success,"Image testée")
+
+push: test-image ## Push de l'image vers le registry
+	$(call log,"Push vers $(DOCKER_REGISTRY)...")
+	@docker push $(IMAGE_NAME):$(IMAGE_TAG)
+	@docker push $(IMAGE_NAME):latest
+	$(call success,"Image pushée")
+
+# ===== COMPILATION RUST =====
+cargo-check: ## Vérification du code Rust
+	$(call log,"Vérification du code...")
+	@cargo check --all-targets
+	$(call success,"Code vérifié")
+
+cargo-test: ## Tests Rust
+	$(call log,"Exécution des tests...")
+	@cargo test
+	$(call success,"Tests passés")
+
+cargo-fmt: ## Formatage du code
+	$(call log,"Formatage du code...")
+	@cargo fmt --all
+	$(call success,"Code formaté")
+
+cargo-clippy: ## Linting avec Clippy
+	$(call log,"Linting avec Clippy...")
+	@cargo clippy --all-targets --all-features -- -D warnings
+	$(call success,"Linting terminé")
+
+cargo-audit: ## Audit de sécurité
+	$(call log,"Audit de sécurité...")
+	@cargo audit
+	$(call success,"Audit terminé")
+
+cargo-all: cargo-fmt cargo-clippy cargo-test cargo-audit ## Toutes les vérifications Rust
+
+# ===== DÉPLOIEMENT =====
+deploy: check-deps build push ## Déploiement complet sur tous les nœuds
+	$(call log,"Déploiement sur tous les nœuds...")
+	@ansible-playbook \
+		-i $(ANSIBLE_INVENTORY) \
+		$(ANSIBLE_PLAYBOOK) \
+		-e tsn_version=$(VERSION) \
+		-e docker_registry=$(DOCKER_REGISTRY)
+	$(call success,"Déploiement terminé")
+
+deploy-node: check-deps ## Déploiement sur un nœud spécifique (NODE=nodeX)
+ifndef NODE
+	$(call error,"Variable NODE requise. Usage: make deploy-node NODE=node1")
+	@exit 1
+endif
+	$(call log,"Déploiement sur $(NODE)...")
+	@ansible-playbook \
+		-i $(ANSIBLE_INVENTORY) \
+		$(ANSIBLE_PLAYBOOK) \
+		-e tsn_version=$(VERSION) \
+		-e docker_registry=$(DOCKER_REGISTRY) \
+		--limit $(NODE)
+	$(call success,"Déploiement sur $(NODE) terminé")
+
+deploy-rolling: check-deps build push ## Déploiement progressif (rolling update)
+	$(call log,"Déploiement progressif...")
+	@ansible-playbook \
+		-i $(ANSIBLE_INVENTORY) \
+		$(ANSIBLE_PLAYBOOK) \
+		-e tsn_version=$(VERSION) \
+		-e docker_registry=$(DOCKER_REGISTRY) \
+		-e deploy_serial=1
+	$(call success,"Déploiement progressif terminé")
+
+deploy-canary: check-deps build push ## Déploiement canary (node1 puis autres)
+	$(call log,"Déploiement canary...")
+	@$(SCRIPTS_DIR)/update-nodes.sh update $(VERSION) --strategy canary
+	$(call success,"Déploiement canary terminé")
+
+# ===== MONITORING =====
+monitor: check-deps ## Monitoring continu des nœuds
+	$(call log,"Démarrage du monitoring...")
+	@$(SCRIPTS_DIR)/monitor-nodes.sh start
+
+monitor-status: check-deps ## Status actuel des nœuds
+	$(call log,"Status des nœuds...")
+	@$(SCRIPTS_DIR)/monitor-nodes.sh status
+
+monitor-test: check-deps ## Test de connectivité unique
+	$(call log,"Test de connectivité...")
+	@$(SCRIPTS_DIR)/monitor-nodes.sh test
+
+health-check: check-deps ## Vérification de santé via Ansible
+	$(call log,"Vérification de santé...")
+	@ansible-playbook \
+		-i $(ANSIBLE_INVENTORY) \
+		devops/ansible/deploy.yml \
+		--tags health \
+		--skip-tags deploy
+
+# ===== BACKUP =====
+backup: check-deps ## Backup de tous les nœuds
+	$(call log,"Backup de tous les nœuds...")
+	@mkdir -p $(BACKUP_DIR)
+	@$(SCRIPTS_DIR)/backup-nodes.sh backup
+	$(call success,"Backup terminé")
+
+backup-node: check-deps ## Backup d'un nœud spécifique (NODE=nodeX)
+ifndef NODE
+	$(call error,"Variable NODE requise. Usage: make backup-node NODE=node1")
+	@exit 1
+endif
+	$(call log,"Backup de $(NODE)...")
+	@$(SCRIPTS_DIR)/backup-nodes.sh backup $(NODE)
+	$(call success,"Backup de $(NODE) terminé")
+
+backup-cleanup: check-deps ## Nettoyage des anciens backups
+	$(call log,"Nettoyage des anciens backups...")
+	@$(SCRIPTS_DIR)/backup-nodes.sh cleanup
+	$(call success,"Nettoyage terminé")
+
+backup-verify: check-deps ## Vérification des backups
+	$(call log,"Vérification des backups...")
+	@$(SCRIPTS_DIR)/backup-nodes.sh report
+	$(call success,"Vérification terminée")
+
+# ===== MISE À JOUR =====
+update: check-deps ## Mise à jour vers une version (VERSION=vX.Y.Z)
+ifndef VERSION
+	$(call error,"Variable VERSION requise. Usage: make update VERSION=v1.2.0")
+	@exit 1
+endif
+	$(call log,"Mise à jour vers $(VERSION)...")
+	@$(SCRIPTS_DIR)/update-nodes.sh update $(VERSION)
+	$(call success,"Mise à jour terminée")
+
+update-rolling: check-deps ## Mise à jour progressive
+ifndef VERSION
+	$(call error,"Variable VERSION requise. Usage: make update-rolling VERSION=v1.2.0")
+	@exit 1
+endif
+	$(call log,"Mise à jour progressive vers $(VERSION)...")
+	@$(SCRIPTS_DIR)/update-nodes.sh update $(VERSION) --strategy rolling
+	$(call success,"Mise à jour progressive terminée")
+
+rollback: check-deps ## Rollback d'un nœud (NODE=nodeX)
+ifndef NODE
+	$(call error,"Variable NODE requise. Usage: make rollback NODE=node1")
+	@exit 1
+endif
+	$(call log,"Rollback de $(NODE)...")
+	@$(SCRIPTS_DIR)/update-nodes.sh rollback $(NODE)
+	$(call success,"Rollback de $(NODE) terminé")
+
+# ===== UTILITAIRES =====
+logs: ## Affichage des logs d'un nœud (NODE=nodeX)
+ifndef NODE
+	$(call error,"Variable NODE requise. Usage: make logs NODE=node1")
+	@exit 1
+endif
+	$(call log,"Logs de $(NODE)...")
+	@ssh user@$(NODE).tsn.network "docker logs tsn-node --tail 100 -f"
+
+shell: ## Shell dans le conteneur d'un nœud (NODE=nodeX)
+ifndef NODE
+	$(call error,"Variable NODE requise. Usage: make shell NODE=node1")
+	@exit 1
+endif
+	$(call log,"Shell sur $(NODE)...")
+	@ssh -t user@$(NODE).tsn.network "docker exec -it tsn-node /bin/sh"
+
+restart: ## Redémarrage d'un nœud (NODE=nodeX)
+ifndef NODE
+	$(call error,"Variable NODE requise. Usage: make restart NODE=node1")
+	@exit 1
+endif
+	$(call log,"Redémarrage de $(NODE)...")
+	@ssh user@$(NODE).tsn.network "sudo systemctl restart tsn-node"
+	$(call success,"$(NODE) redémarré")
+
+stop: ## Arrêt d'un nœud (NODE=nodeX)
+ifndef NODE
+	$(call error,"Variable NODE requise. Usage: make stop NODE=node1")
+	@exit 1
+endif
+	$(call log,"Arrêt de $(NODE)...")
+	@ssh user@$(NODE).tsn.network "sudo systemctl stop tsn-node"
+	$(call success,"$(NODE) arrêté")
+
+start: ## Démarrage d'un nœud (NODE=nodeX)
+ifndef NODE
+	$(call error,"Variable NODE requise. Usage: make start NODE=node1")
+	@exit 1
+endif
+	$(call log,"Démarrage de $(NODE)...")
+	@ssh user@$(NODE).tsn.network "sudo systemctl start tsn-node"
+	$(call success,"$(NODE) démarré")
+
+# ===== DÉVELOPPEMENT =====
+dev-setup: setup ## Configuration complète pour développement
+	$(call log,"Configuration développement...")
+	@$(SCRIPTS_DIR)/setup-dev.sh
+	@make cargo-all
+	$(call success,"Environnement de développement prêt")
+
+dev-watch: ## Surveillance des changements (cargo watch)
+	$(call log,"Surveillance des changements...")
+	@cargo watch -x check -x test
+
+dev-run: ## Démarrage en mode développement
+	$(call log,"Démarrage en mode développement...")
+	@cargo run -- --config config/dev.toml
+
+dev-test-local: build ## Test local avec Docker
+	$(call log,"Test local avec Docker...")
+	@docker run --rm -p 8080:8080 -p 9000:9000 $(IMAGE_NAME):$(IMAGE_TAG)
+
+# ===== NETTOYAGE =====
+clean: ## Nettoyage des fichiers temporaires
+	$(call log,"Nettoyage...")
+	@cargo clean
+	@docker system prune -f
+	@rm -rf $(LOGS_DIR)/*.log
+	$(call success,"Nettoyage terminé")
+
+clean-images: ## Suppression des images Docker locales
+	$(call log,"Suppression des images Docker...")
+	@docker rmi $(IMAGE_NAME):$(IMAGE_TAG) 2>/dev/null || true
+	@docker rmi $(IMAGE_NAME):latest 2>/dev/null || true
+	$(call success,"Images supprimées")
+
+clean-all: clean clean-images ## Nettoyage complet
+
+# ===== RAPPORTS =====
+report: ## Génération d'un rapport complet
+	$(call log,"Génération du rapport...")
+	@mkdir -p $(LOGS_DIR)/reports
+	@echo "# Rapport TSN - $(shell date)" > $(LOGS_DIR)/reports/report_$(shell date +%Y%m%d_%H%M%S).md
+	@echo "" >> $(LOGS_DIR)/reports/report_$(shell date +%Y%m%d_%H%M%S).md
+	@echo "## Version" >> $(LOGS_DIR)/reports/report_$(shell date +%Y%m%d_%H%M%S).md
+	@echo "- Version: $(VERSION)" >> $(LOGS_DIR)/reports/report_$(shell date +%Y%m%d_%H%M%S).md
+	@echo "- Commit: $(GIT_COMMIT)" >> $(LOGS_DIR)/reports/report_$(shell date +%Y%m%d_%H%M%S).md
+	@echo "- Build: $(BUILD_DATE)" >> $(LOGS_DIR)/reports/report_$(shell date +%Y%m%d_%H%M%S).md
+	@echo "" >> $(LOGS_DIR)/reports/report_$(shell date +%Y%m%d_%H%M%S).md
+	@$(SCRIPTS_DIR)/monitor-nodes.sh report
+	@$(SCRIPTS_DIR)/backup-nodes.sh report
+	$(call success,"Rapport généré dans $(LOGS_DIR)/reports/")
+
+# ===== CI/CD =====
+ci-test: cargo-all test-image ## Tests pour CI/CD
+	$(call log,"Tests CI/CD...")
+	$(call success,"Tests CI/CD passés")
+
+ci-build: build push ## Build pour CI/CD
+	$(call log,"Build CI/CD...")
+	$(call success,"Build CI/CD terminé")
+
+ci-deploy: deploy ## Déploiement pour CI/CD
+	$(call log,"Déploiement CI/CD...")
+	$(call success,"Déploiement CI/CD terminé")
+
+# ===== SÉCURITÉ =====
+security-scan: ## Scan de sécurité
+	$(call log,"Scan de sécurité...")
+	@cargo audit
+	@docker run --rm -v $(PWD):/app clair-scanner:latest /app
+	$(call success,"Scan de sécurité terminé")
+
+# ===== MÉTRIQUES =====
+metrics: ## Collecte des métriques
+	$(call log,"Collecte des métriques...")
+	@for node in $(NODES); do \
+		echo "=== $$node ==="; \
+		curl -s http://$$node.tsn.network:9090/metrics | grep -E "tsn_|process_" | head -10; \
+		echo ""; \
+	done
+	$(call success,"Métriques collectées")
+
+# ===== TARGETS SPÉCIAUX =====
+.PHONY: all
+all: setup build test deploy ## Pipeline complet
+
+.PHONY: quick
+quick: cargo-check build ## Build rapide sans tests
+
+.PHONY: full
+full: clean setup cargo-all build test-image push deploy monitor ## Pipeline complet avec nettoyage

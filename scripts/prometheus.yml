@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "tsn-node"
+    static_configs:
+      - targets:
+          - "tsn-node-0:9944"
+          - "tsn-node-1:9944"

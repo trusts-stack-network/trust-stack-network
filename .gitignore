@@ -1,0 +1,60 @@
+# Wallets
+wallet.json
+wallet2.json
+my-wallet.json
+shielded-wallet.json
+*.wallet
+wallets/
+my-wallet
+
+# Build artifacts
+target/
+static/
+
+# React wallet
+wallet/node_modules/
+wallet/dist/
+
+# Blockchain data
+data/
+data-faucet/
+your-data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Claude Code
+.claude/
+
+# Fly.io
+.fly/
+
+# Docker
+*.tar
+
+# ZK trusted setup (powers of tau)
+*.ptau
+*powersOfTau*
+pot*.ptau
+powersoftau/
+
+# Circuits build artifacts
+circuits/node_modules/
+circuits/build/
+*.r1cs
+*.sym
+*.zkey
+circuits/**/*.wasm
+
+# Keep verification keys (committed for reproducibility)
+!circuits/keys/
+.backups/
+bin/
+__pycache__/
+*.pyc

@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trust Stack Network - Whitepaper Technique v0.1</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="nav-brand">
+                <span class="logo">⛓️</span>
+                <span class="brand-text">Trust Stack Network</span>
+            </div>
+            <div class="nav-links">
+                <a href="#overview" class="nav-link">Vue d'ensemble</a>
+                <a href="#architecture" class="nav-link">Architecture</a>
+                <a href="#crypto" class="nav-link">Cryptographie</a>
+                <a href="#consensus" class="nav-link">Consensus</a>
+                <a href="#network" class="nav-link">Réseau</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="main-content">
+        <header class="hero">
+            <div class="hero-container">
+                <h1 class="hero-title">Trust Stack Network</h1>
+                <p class="hero-subtitle">Blockchain Post-Quantique avec Preuves ZK Récursives</p>
+                <div class="hero-meta">
+                    <span class="version">Version 0.1.0</span>
+                    <span class="date">Mars 2026</span>
+                    <span class="status">Draft Technique</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="content-wrapper">
+            <aside class="sidebar">
+                <nav class="toc">
+                    <h3>Table des matières</h3>
+                    <ul>
+                        <li><a href="#overview">1. Vue d'ensemble</a></li>
+                        <li><a href="#architecture">2. Architecture modulaire</a></li>
+                        <li><a href="#crypto">3. Cryptographie post-quantique</a></li>
+                        <li><a href="#consensus">4. Consensus Nakamoto avec MIK</a></li>
+                        <li><a href="#network">5. Réseau P2P & synchronisation</a></li>
+                        <li><a href="#privacy">6. Protection de la vie privée</a></li>
+                        <li><a href="#threats">7. Menaces post-quantiques</a></li>
+                        <li><a href="#roadmap">8. Roadmap & versions futures</a></li>
+                        <li><a href="#references">9. Références</a></li>
+                    </ul>
+                </nav>
+            </aside>
+
+            <article class="article">
+                <section id="overview" class="section">
+                    <h2>Vue d'ensemble</h2>
+                    <p>Trust Stack Network (TSN) est une blockchain de couche 1 conçue pour survivre à l'ère post-quantique.</p>
+
+                    <div class="feature-grid">
+                        <div class="feature-card">
+                            <h4>🔐 SLH-DSA (FIPS 204)</h4>
+                            <p>Signatures de blocs et de transactions post-quantiques</p>
+                        </div>
+                        <div class="feature-card">
+                            <h4>🧮 Halo2 + KZG</h4>
+                            <p>Preuves ZK quantum-safe avec Plonky2</p>
+                        </div>
+                        <div class="feature-card">
+                            <h4>🌊 Poseidon2</h4>
+                            <p>Primitive de hachage arithmétique</p>
+                        </div>
+                        <div class="feature-card">
+                            <h4>🗂️ MIK</h4>
+                            <p>Merkle Interval Keeps pour le consensus</p>
+                        </div>
+                        <div class="feature-card">
+                            <h4>🔒 ChaCha20-Poly1305</h4>
+                            <p>Chiffrement des payloads réseau</p>
+                        </div>
+                        <div class="feature-card">
+                            <h4>⚡ Performance</h4>
+                            <p>1 000 tps, latence < 3s, 200 validateurs</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="architecture" class="section">
+                    <h2>Architecture modulaire</h2>
+                    <div class="mermaid-container">
+                        <div class="mermaid">
+                            graph TD
+                                A[Application] -->|RPC| B[API Layer Axum]
+                                B --> C[Consensus MIK]
+                                B --> D[Mempool]
+                                C --> E[Block Builder]
+                                D --> E
+                                E --> F[Crypto Service]
+                                F -->|SLH-DSA| G[Keys]
+                                F -->|Plonky2| H[Proofs]
+                                F -->|Poseidon2| I[Hash]
+                                E --> J[Storage Sled]
+                                C --> K[P2P Sync]
+                        </div>
+                    </div>
+                    <p class="section-note">Chaque module est librement remplaçable (cf. ADR-0003 « Boundaries & Crates »).</p>
+                </section>
+
+                <section id="crypto" class="section">
+                    <h2>Couche cryptographique post-quantique</h2>
+
+                    <div class="subsection">
+                        <h3>1. Signatures</h3>
+                        <ul>
+                            <li><strong>Algorithme</strong> : SLH-SHA2-65s (paramètres « e »)</li>
+                            <li><strong>Contexte</strong> : <code>b"TSN-v0.1-PQ"</code> (domain-separation)</li>
+                            <li><strong>Randomiser</strong> : RFC 9381 § 4.2 (sig-rnd)</li>
+                            <li><strong>Taille clef publique</strong> : 32 B</li>
+                            <li><strong>Taille signature</strong> : 2 460 B</li>
+                        </ul>
+                    </div>
+
+                    <div class="subsection">
+                        <h3>2. Primitives de hachage</h3>
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Primitive</th>
+                                        <th>Usage</th>
+                                        <th>Sécurité (bits PQ)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>Poseidon2</td>
+                                        <td>Commitments, Merkle, ZK</td>
+                                        <td>128</td>
+                                    </tr>
+                                    <tr>
+                                        <td>SHA-3-256</td>
+                                        <td>Block headers</td>
+                                        <td>256</td>
+                                    </tr>
+                                    <tr>
+                                        <td>BLAKE3</td>
+                                        <td>Networking checksum</td>
+                                        <td>256</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="subsection">
+                        <h3>3. Preuves ZK</h3>
+                        <ul>
+                            <li><strong>Halo2 + KZG</strong> sur BLS12-381 (Plonky2 fork)</li>
+                            <li><strong>Recursion</strong> : 2 niveaux max (agrégation de 128 tx)</li>
+                            <li><strong>Taille proof</strong> : 192 kB (compressée)</li>
+                            <li><strong>Temps génération</strong> : 1.4 s (Apple M3)</li>
+                        </ul>
+                    </div>
+                </section>
+
+                <section id="consensus" class="section">
+                    <h2>Consensus Nakamoto avec preuves MIK</h2>
+
+                    <div class="subsection">
+                        <h3>1. Rappel MIK</h3>
+                        <div class="code-block">
+                            <p>MIK = Merkle Interval Keep</p>
+                            <p>Un « keep » est un tuple <code>(C, i, j)</code> où :</p>
+                            <ul>
+                                <li><code>C</code> : racine Poseidon2 d'un arbre binaire de hauteur 30</li>
+                                <li><code>i, j</code> : intervalle <code>[i, j]</code> de 64 bits</li>
+                            </ul>
+                        </div>
+
+                        <p><strong>Pour produire un bloc :</strong></p>
+                        <ol>
+                            <li>Le mineur prouve possession d'un keep valide sur <code>[H-Δ, H]</code></li>
+                            <li>Il résout un mini-puzzle VDF (verif_delay = 2 s)</li>
+                            <li>Il émet le bloc avec preuve SLH-DSA</li>
+                        </ol>
+                    </div>
+
+                    <div class="subsection">
+                        <h3>2. Difficulty adjustment</h3>
+                        <div class="formula">
+                            next_diff = prev_diff × (target_time / actual_time).sqrt()
+                        </div>
+                        <p>Fenêtre : 120 blocs, cible : 3 s (ADR-0007)</p>
+                    </div>
+
+                    <div class="subsection">
+                        <h3>3. Fork-choice</h3>
+                        <ul>
+                            <li>Règle : « MIK-heaviest » = plus grand <code>Σ keep.weight</code></li>
+                            <li>Pas de slashing ; reorg max 30 blocs (cf. TSN-0002)</li>
+                        </ul>
+                    </div>
+                </section>
+
+                <section id="network" class="section">
+                    <h2>Réseau P2P & synchronisation</h2>
+
+                    <div class="subsection">
+                        <h3>Transport</h3>
+                        <ul>
+                            <li>QUIC v1 + TLS 1.3 (draft-34)</li>
+                            <li>Identité éphémère : clef X25519 (post-quantique transition)</li>
+                        </ul>
+                    </div>
+
+                    <div class="subsection">
+                        <h3>Messages principaux</h3>
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Type</th>
+                                        <th>Payload max</th>
+                                        <th>Fréquence typ.</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>Ping</td>
+                                        <td>64 B</td>
+                                        <td>30 s</td>
+                                    </tr>
+                                    <tr>
+                                        <td>BlockHeader</td>
+                                        <td>1 kB</td>
+                                        <td>3 s</td>
+                                    </tr>
+                                    <tr>
+                                        <td>BlockBody</td>
+                                        <td>1 MB</td>
+                                        <td>3 s</td>
+                                    </tr>
+                                    <tr>
+                                        <td>TX</td>
+                                        <td>2 kB</td>
+                                        <td>aléatoire</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="subsection">
+                        <h3>Synchronisation rapide</h3>
+                        <ul>
+                            <li>Snap-sync : télécharge 512 blocs parallèles + preuve MIK agrégée</li>
+                            <li>Vérification : 300 ms/bloc (Ryzen 9)</li>
+                        </ul>
+                    </div>
+                </section>
+
+                <section id="privacy" class="section">
+                    <h2>Protection de la vie privée</h2>
+
+                    <div class="subsection">
+                        <h3>1. Notes & Commitments</h3>
+                        <ul>
+                            <li>Note = <code>(pk, v, ρ, r)</code></li>
+                            <li>Commit : <code>Com = Poseidon2(pk∥v∥ρ∥r)</code></li>
+                            <li>Nullifier : <code>nf = Poseidon2(ρ∥sk)</code> empêche la double-dépense</li>
+                        </ul>
+                    </div>
+
+                    <div class="subsection">
+                        <h3>2. Pool anonyme</h3>
+                        <ul>
+                            <li>Mélange de 16 notes par défaut (ring-size)</li>
+                            <li>Pas de trusted-setup (Halo2)</li>
+                            <li>Taille tx privée : 4.2 kB</li>
+                        </ul>
+                    </div>
+
+                    <div class="subsection">
+                        <h3>3. Auditabilité réglementaire</h3>
+                        <p>Vue en clair possible via clef de vue <code>vk</code> (diffie-hellman) – cf. TSN-0005</p>
+                    </div>
+                </section>
+
+                <section id="threats" class="section">
+                    <h2>Menaces post-quantiques & contre-mesures</h2>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Menace</th>
+                                    <th>Impact</th>
+                                    <th>Contre-mesure TSN</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>Shor sur ECDSA</td>
+                                    <td>Signatures falsifiées</td>
+                                    <td>SLH-DSA (EU-CMA)</td>
+                                </tr>
+                                <tr>
+                                    <td>Grover sur SHA-256</td>
+                                    <td>128 bits</td>
+                                    <td>Poseidon2 (256 bits)</td>
+                                </tr>
+                                <tr>
+                                    <td>Attaque de migration</td>
+                                    <td>Key-harvest</td>
+                                    <td>Flag <code>PQ_MIGRATE_TX</code> interdit les clefs ECDSA</td>
+                                </tr>
+                                <tr>
+                                    <td>Quantum-networking</td>
+                                    <td>MITM</td>
+                                    <td>Authenticité via SLH-DSA sur chaque handshake QUIC</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section id="roadmap" class="section">
+                    <h2>Roadmap & versions futures</h2>
+                    <div class="roadmap">
+                        <div class="roadmap-item">
+                            <h4>v0.2</h4>
+                            <p>Migration complète SLH-DSA-44 (plus petit)</p>
+                        </div>
+                        <div class="roadmap-item">
+                            <h4>v0.3</h4>
+                            <p>Rollup ZK natif (Halo2 recursion 3 niveaux)</p>
+                        </div>
+                        <div class="roadmap-item">
+                            <h4>v0.4</h4>
+                            <p>Support hardware wallets Ledger PQ</p>
+                        </div>
+                        <div class="roadmap-item">
+                            <h4>v1.0</h4>
+                            <p>Mainnet stable, audit NCC + TrailOfBits</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="references" class="section">
+                    <h2>Références</h2>
+                    <ol>
+                        <li>TSN-0001 – Poseidon2 Parameter Selection</li>
+                        <li>TSN-0002 – Fork-choice & Reorg Limits</li>
+                        <li>TSN-0003 – SLH-DSA Context & Randomiser</li>
+                        <li>ADR-0003 – Modular Crates Boundaries</li>
+                        <li>FIPS 204 (draft) – Stateless Hash-Based Digital Signature Standard</li>
+                        <li>Plonky2 – Polygon Labs (commit 3f5c1a9)</li>
+                        <li>RFC 9381 – SIG-RND for SLH-DSA</li>
+                    </ol>
+                </section>
+            </article>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="footer-container">
+            <p>&copy; 2026 Trust Stack Network. Whitepaper v0.1 - Documentation technique.</p>
+            <div class="footer-links">
+                <a href="https://github.com/trusts-stack-network/trust-stack-network">GitHub</a>
+                <span>|</span>
+                <a href="#references">Références</a>
+            </div>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

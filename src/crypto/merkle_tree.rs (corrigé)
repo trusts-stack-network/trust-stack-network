@@ -1,0 +1,18 @@
+// Exemple de code corrigé :
+use std::collections::HashMap;
+
+pub struct MerkleTree {
+    pub prefix: String,
+}
+
+impl MerkleTree {
+    pub fn new(prefix: String) -> Self {
+        MerkleTree { prefix }
+    }
+}
+
+fn main() {
+    let merkle_tree = MerkleTree::new("fermé".to_string());
+    println!("{}", merkle_tree.prefix);
+}
+cargo check

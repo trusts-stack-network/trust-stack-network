@@ -1,0 +1,67 @@
+version: "3.8"
+
+services:
+  # Bootnode pour la découverte réseau
+  bootnode:
+    build:
+      context: .
+      target: runtime
+      args:
+        VERSION: ${VERSION:-local}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
+    image: tsn-node:${VERSION:-latest}
+    container_name: tsn-bootnode
+    command:
+      - "--chain=local"
+      - "--base-path=/data"
+      - "--node-key=bootnode-key-001"
+      - "--listen-addr=/ip4/0.0.0.0/tcp/30333"
+      - "--prometheus-external"
+      - "--prometheus-port=9090"
+    volumes:
+      - bootnode-data:/data
+    ports:
+      - "30333:30333"
+      - "9090:9090"
+    networks:
+      tsn-testnet:
+        ipv4_address: 172.28.0.2
+    healthcheck:
+      test: ["CMD", "/app/tsn-node", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Validateur 1
+  validator-1:
+    image: tsn-node:${VERSION:-latest}
+    container_name: tsn-validator-1
+    depends_on:
+      bootnode:
+        condition: service_healthy
+    command:
+      - "--chain=local"
+      - "--base-path=/data"
+      - "--validator"
+      - "--bootnodes=/dns/bootnode/tcp/30333/p2p/12D3KooWBmAwcd4PJNJvfV89HwE48nwkRmAgo8Vy3uQEyNNHBox2"
+      - "--listen-addr=/ip4/0.0.0.0/tcp/30334"
+      - "--rpc-external"
+      - "--rpc-cors=all"
+      - "--rpc-methods=unsafe"
+      - "--prometheus-external"
+      - "--prometheus-port=9090"
+      - "--name=validator-1"
+    volumes:
+      - validator-1-data:/data
+    ports:
+      - "30334:30334"
+      - "9944:9944"
+      - "9091:9090"
+    networks:
+      tsn-testnet:
+        ipv4_address: 172.28.0.10
+    environment:
+      - RUST_LOG=info
+
+  # Validateur 2

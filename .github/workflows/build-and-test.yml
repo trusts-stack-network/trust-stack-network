@@ -1,0 +1,21 @@
+name: Build et test
+on:
+  push:
+    branches:
+      - main
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v3
+      - name: Build et test
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+          cargo test --release --target x86_64-unknown-linux-musl
+      - name: Build de l'image Docker
+        run: |
+          docker build -t tsn-node .
+      - name: Test de l'image Docker
+        run: |
+          docker run -it --rm tsn-node

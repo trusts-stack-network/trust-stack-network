@@ -1,0 +1,77 @@
+---
+# Vérification des prérequis pour le déploiement TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Vérification de la connectivité"
+  ping:
+  register: ping_result
+  
+- name: "Affichage des informations système"
+  debug:
+    msg: |
+      Nœud: {{ inventory_hostname }}
+      OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+      Architecture: {{ ansible_architecture }}
+      Mémoire: {{ ansible_memtotal_mb }}MB
+      CPU: {{ ansible_processor_vcpus }} vCPUs
+      
+- name: "Vérification de l'espace disque"
+  assert:
+    that:
+      - ansible_mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_available') | first > 10737418240  # 10GB
+    fail_msg: "Espace disque insuffisant (< 10GB disponible)"
+    success_msg: "Espace disque suffisant"
+    
+- name: "Vérification de la mémoire"
+  assert:
+    that:
+      - ansible_memtotal_mb >= 2048
+    fail_msg: "Mémoire insuffisante (< 2GB)"
+    success_msg: "Mémoire suffisante"
+    
+- name: "Vérification des ports requis"
+  wait_for:
+    port: "{{ item }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    state: stopped
+    timeout: 5
+  loop:
+    - "{{ tsn_http_port | default(8080) }}"
+    - "{{ tsn_p2p_port | default(9000) }}"
+    - "{{ tsn_rpc_port | default(9001) }}"
+    - "{{ tsn_metrics_port | default(9090) }}"
+  ignore_errors: yes
+  register: port_check
+  
+- name: "Avertissement ports occupés"
+  debug:
+    msg: "ATTENTION: Port {{ item.item }} semble occupé"
+  loop: "{{ port_check.results }}"
+  when: item.failed is defined and not item.failed
+  
+- name: "Test de résolution DNS"
+  command: nslookup {{ item }}
+  loop: "{{ groups['tsn_nodes'] | map('extract', hostvars, 'ansible_host') | list }}"
+  changed_when: false
+  ignore_errors: yes
+  register: dns_check
+  
+- name: "Vérification de la connectivité inter-nœuds"
+  wait_for:
+    host: "{{ hostvars[item]['ansible_host'] }}"
+    port: 22
+    timeout: 10
+  loop: "{{ groups['tsn_nodes'] }}"
+  when: item != inventory_hostname
+  ignore_errors: yes
+  register: connectivity_check
+  
+- name: "Rapport de connectivité"
+  debug:
+    msg: |
+      Connectivité inter-nœuds:
+      {% for result in connectivity_check.results %}
+      {% if result.skipped is not defined %}
+      {{ result.item }}: {{ 'OK' if not result.failed else 'ÉCHEC' }}
+      {% endif %}
+      {% endfor %}

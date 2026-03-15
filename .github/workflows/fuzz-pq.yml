@@ -1,0 +1,261 @@
+name: Fuzzing Post-Quantum Crypto
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/crypto/pq/**'
+      - 'fuzz/**'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/crypto/pq/**'
+      - 'fuzz/**'
+  schedule:
+    # Exécuter tous les jours à 2h du matin
+    - cron: '0 2 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz-commitment-pq:
+    name: Fuzz Commitment PQ
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+      
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      
+      - name: Cache fuzz corpus
+        uses: actions/cache@v3
+        with:
+          path: fuzz/corpus/commitment_pq_fuzzer
+          key: fuzz-corpus-commitment-pq-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-commitment-pq-
+      
+      - name: Run fuzzer
+        run: |
+          cargo fuzz run commitment_pq_fuzzer \
+            --max-total-time=600 \
+            --jobs=2 \
+            || true
+      
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: commitment-pq-crashes
+          path: fuzz/artifacts/commitment_pq_fuzzer/
+
+  fuzz-proof-pq:
+    name: Fuzz Proof PQ
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+      
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      
+      - name: Cache fuzz corpus
+        uses: actions/cache@v3
+        with:
+          path: fuzz/corpus/proof_pq_fuzzer
+          key: fuzz-corpus-proof-pq-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-proof-pq-
+      
+      - name: Run fuzzer
+        run: |
+          cargo fuzz run proof_pq_fuzzer \
+            --max-total-time=600 \
+            --jobs=2 \
+            || true
+      
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: proof-pq-crashes
+          path: fuzz/artifacts/proof_pq_fuzzer/
+
+  fuzz-verify-pq:
+    name: Fuzz Verify PQ
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+      
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      
+      - name: Cache fuzz corpus
+        uses: actions/cache@v3
+        with:
+          path: fuzz/corpus/verify_pq_fuzzer
+          key: fuzz-corpus-verify-pq-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-verify-pq-
+      
+      - name: Run fuzzer
+        run: |
+          cargo fuzz run verify_pq_fuzzer \
+            --max-total-time=600 \
+            --jobs=2 \
+            || true
+      
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: verify-pq-crashes
+          path: fuzz/artifacts/verify_pq_fuzzer/
+
+  fuzz-slh-dsa-batch:
+    name: Fuzz SLH-DSA Batch
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+      
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      
+      - name: Cache fuzz corpus
+        uses: actions/cache@v3
+        with:
+          path: fuzz/corpus/slh_dsa_batch_fuzzer
+          key: fuzz-corpus-slh-dsa-batch-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-slh-dsa-batch-
+      
+      - name: Run fuzzer
+        run: |
+          cargo fuzz run slh_dsa_batch_fuzzer \
+            --max-total-time=600 \
+            --jobs=2 \
+            || true
+      
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: slh-dsa-batch-crashes
+          path: fuzz/artifacts/slh_dsa_batch_fuzzer/
+
+  fuzz-circuit-pq:
+    name: Fuzz Circuit PQ
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+      
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      
+      - name: Cache fuzz corpus
+        uses: actions/cache@v3
+        with:
+          path: fuzz/corpus/circuit_pq_fuzzer
+          key: fuzz-corpus-circuit-pq-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-circuit-pq-
+      
+      - name: Run fuzzer
+        run: |
+          cargo fuzz run circuit_pq_fuzzer \
+            --max-total-time=600 \
+            --jobs=2 \
+            || true
+      
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: circuit-pq-crashes
+          path: fuzz/artifacts/circuit_pq_fuzzer/
+
+  property-tests:
+    name: Property Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+      
+      - name: Run property tests
+        run: cargo test --test crypto_pq_proptest --release
+        env:
+          PROPTEST_CASES: 10000
+
+  adversarial-tests:
+    name: Adversarial Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+      
+      - name: Run adversarial tests
+        run: cargo test --test adversarial_pq_test --release
+
+  coverage:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    needs: [fuzz-commitment-pq, fuzz-proof-pq, fuzz-verify-pq, 
+            fuzz-slh-dsa-batch, fuzz-circuit-pq]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+      
+      - name: Install tarpaulin
+        run: cargo install cargo-tarpaulin
+      
+      - name: Generate coverage
+        run: |
+          cargo tarpaulin \
+            --packages tsn \
+            --lib \
+            --out Xml \
+            --output-dir coverage
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/cobertura.xml
+          fail_ci_if_error: false

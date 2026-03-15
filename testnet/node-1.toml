@@ -1,0 +1,6 @@
+[network]
+listen_addr = "0.0.0.0:30333"
+bootnodes = []
+
+[rpc]
+enabled = true

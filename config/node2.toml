@@ -1,0 +1,20 @@
+[chain]
+name = "tsn_testnet"
+genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+
+[network]
+listen_addr = "0.0.0.0:30333"
+rpc_addr = "0.0.0.0:9944"
+max_peers = 25
+bootnodes = ["/dns4/tsn-node-1/tcp/30333/p2p/12D3KooWExampleNode1"]
+
+[consensus]
+mining_enabled = false
+difficulty = "0x100000"
+
+[storage]
+path = "/opt/tsn/data"
+cache_size = 256
+
+[logging]
+level = "info"

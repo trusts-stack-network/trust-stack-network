@@ -1,0 +1,142 @@
+# =============================================================================
+# TSN (Trust Stack Network) - clippy configuration
+# Lint configuration for code quality
+# =============================================================================
+
+# =============================================================================
+# Allowed Lints (Warnings we want to suppress)
+# =============================================================================
+
+# Allow certain patterns that are common in crypto/blockchain code
+allow = [
+    # Performance lints that may not apply to crypto code
+    "clippy::large_enum_variant",
+    "clippy::type_complexity",
+    
+    # Style lints that may be too strict
+    "clippy::module_name_repetitions",
+    "clippy::similar_names",
+    
+    # Documentation lints
+    "clippy::missing_errors_doc",
+    "clippy::missing_panics_doc",
+    
+    # Other
+    "clippy::must_use_candidate",
+    "clippy::return_self_not_must_use",
+]
+
+# =============================================================================
+# Denied Lints (Errors we want to enforce)
+# =============================================================================
+
+deny = [
+    # Security-critical lints
+    "clippy::unwrap_used",
+    "clippy::expect_used",
+    "clippy::panic",
+    "clippy::unimplemented",
+    "clippy::todo",
+    
+    # Performance lints
+    "clippy::inefficient_to_string",
+    "clippy::redundant_clone",
+    "clippy::slow_vector_initialization",
+    
+    # Correctness lints
+    "clippy::cast_lossless",
+    "clippy::cast_possible_truncation",
+    "clippy::cast_possible_wrap",
+    "clippy::cast_sign_loss",
+]
+
+# =============================================================================
+# Warn Lints (Warnings we want to see)
+# =============================================================================
+
+warn = [
+    # Code quality
+    "clippy::complexity",
+    "clippy::correctness",
+    "clippy::nursery",
+    "clippy::pedantic",
+    "clippy::perf",
+    "clippy::style",
+    "clippy::suspicious",
+    
+    # Documentation
+    "clippy::doc_markdown",
+    "missing_docs",
+]
+
+# =============================================================================
+# Lint Configuration
+# =============================================================================
+
+# Cognitive complexity threshold
+cognitive-complexity-threshold = 25
+
+# Too many arguments threshold
+too-many-arguments-threshold = 7
+
+# Too many lines threshold
+too-many-lines-threshold = 100
+
+# Type complexity threshold
+type-complexity-threshold = 250
+
+# =============================================================================
+# Allowed Methods (for unwrap/expect linting)
+# =============================================================================
+
+# Methods that are allowed to use unwrap/expect
+# These are typically in test code or where failure is truly impossible
+allowed-unwrap-in-tests = true
+allowed-expect-in-tests = true
+
+# =============================================================================
+# MSRV (Minimum Supported Rust Version)
+# =============================================================================
+
+msrv = "1.70"
+
+# =============================================================================
+# Additional Checks
+# =============================================================================
+
+# Check for disallowed methods
+disallowed-methods = [
+    # Security: Avoid unsafe methods
+    "std::mem::uninitialized",
+    "std::mem::zeroed",
+    
+    # Performance: Avoid inefficient methods
+    "std::string::String::as_str",
+]
+
+# Check for disallowed types
+disallowed-types = [
+    # Security: Avoid unsafe types
+    "std::mem::MaybeUninit",
+]
+
+# =============================================================================
+# Import Style
+# =============================================================================
+
+# Enforce consistent import style
+enum-variant-name-threshold = 3
+
+# =============================================================================
+# Async/Await
+# =============================================================================
+
+# Await holding lock
+await-holding-invalid-type = "std::sync::MutexGuard"
+
+# =============================================================================
+# Documentation
+# =============================================================================
+
+# Check for missing docs in public items
+missing-docs-in-crate-items = true

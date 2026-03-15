@@ -1,0 +1,76 @@
+[Unit]
+Description=TSN Node - Trust Stack Network Post-Quantum Blockchain
+Documentation=https://docs.tsn.network/
+After=docker.service network.target
+Wants=docker.service
+Requires=docker.service
+
+[Service]
+Type=notify
+User=root
+Group=docker
+
+# Variables d'environnement
+Environment=TSN_SERVICE_NAME=tsn-node
+Environment=TSN_IMAGE_TAG=latest
+Environment=TSN_DATA_DIR=/opt/tsn/data
+Environment=TSN_CONFIG_DIR=/opt/tsn/config
+Environment=TSN_LOGS_DIR=/opt/tsn/logs
+Environment=DOCKER_REGISTRY=ghcr.io/tsn-network
+
+# Commandes du service
+ExecStartPre=/bin/bash -c 'docker pull ${DOCKER_REGISTRY}/tsn:${TSN_IMAGE_TAG}'
+ExecStartPre=-/usr/bin/docker stop ${TSN_SERVICE_NAME}
+ExecStartPre=-/usr/bin/docker rm ${TSN_SERVICE_NAME}
+
+ExecStart=/usr/bin/docker run --rm \
+    --name ${TSN_SERVICE_NAME} \
+    --user tsn \
+    --log-driver journald \
+    --log-opt tag=${TSN_SERVICE_NAME} \
+    -v ${TSN_DATA_DIR}:/data/tsn \
+    -v ${TSN_LOGS_DIR}:/data/tsn/logs \
+    -p 8080:8080 \
+    -p 9000:9000 \
+    -p 9001:9001 \
+    -p 9090:9090 \
+    --health-cmd="curl -f http://localhost:8080/health || exit 1" \
+    --health-interval=30s \
+    --health-timeout=10s \
+    --health-retries=3 \
+    --health-start-period=15s \
+    ${DOCKER_REGISTRY}/tsn:${TSN_IMAGE_TAG}
+
+ExecStop=/usr/bin/docker stop ${TSN_SERVICE_NAME}
+ExecStopPost=-/usr/bin/docker rm ${TSN_SERVICE_NAME}
+
+# Configuration du service
+TimeoutStartSec=0
+TimeoutStopSec=30
+Restart=always
+RestartSec=10
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Monitoring et santé
+WatchdogSec=60
+NotifyAccess=none
+
+# Sécurité
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+NoNewPrivileges=true
+ReadWritePaths=/opt/tsn
+
+# Resources limits
+MemoryLimit=2G
+CPUQuota=200%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tsn-node
+
+[Install]
+WantedBy=multi-user.target

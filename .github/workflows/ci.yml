@@ -1,0 +1,333 @@
+# =============================================================================
+# TSN CI Pipeline
+# Tests complets, linting, audit sécurité et build reproductible
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop, 'release/*']
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Audit sécurité quotidien à 6h UTC
+    - cron: '0 6 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ==========================================================================
+  # Job 1: Format et Lint
+  # ==========================================================================
+  fmt-and-lint:
+    name: Format & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "tsn-ci"
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run clippy on tests
+        run: cargo clippy --tests -- -D warnings
+
+  # ==========================================================================
+  # Job 2: Tests unitaires et intégration
+  # ==========================================================================
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable, nightly]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "tsn-test-${{ matrix.rust }}"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libclang-dev clang cmake
+
+      - name: Run unit tests
+        run: cargo test --lib --verbose
+
+      - name: Run integration tests
+        run: cargo test --test '*' --verbose
+
+      - name: Run doc tests
+        run: cargo test --doc --verbose
+
+      - name: Generate coverage report
+        if: matrix.rust == 'stable'
+        run: |
+          cargo install cargo-tarpaulin --version 0.27.3 --locked
+          cargo tarpaulin --out Xml --output-dir coverage
+
+      - name: Upload coverage to Codecov
+        if: matrix.rust == 'stable'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage/cobertura.xml
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # ==========================================================================
+  # Job 3: Audit sécurité des dépendances
+  # ==========================================================================
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cargo audit
+        uses: actions-rust-lang/audit@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.14.11 --locked
+
+      - name: Run cargo deny check
+        run: cargo deny check
+
+  # ==========================================================================
+  # Job 4: Build reproductible et vérification
+  # ==========================================================================
+  build:
+    name: Build Verification
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04-arm]
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        exclude:
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "tsn-build-${{ matrix.target }}"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libclang-dev clang cmake
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --locked
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Verify binary
+        run: |
+          file target/${{ matrix.target }}/release/tsn
+          ls -lh target/${{ matrix.target }}/release/tsn
+
+      - name: Generate checksum
+        run: |
+          cd target/${{ matrix.target }}/release
+          sha256sum tsn > tsn.sha256
+          cat tsn.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsn-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/tsn
+            target/${{ matrix.target }}/release/tsn.sha256
+          retention-days: 7
+
+  # ==========================================================================
+  # Job 5: Tests Docker
+  # ==========================================================================
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: tsn:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          target: runtime
+
+      - name: Test Docker image
+        run: |
+          docker run --rm tsn:test --version || true
+          docker images tsn:test --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}"
+
+      - name: Check image size
+        run: |
+          SIZE=$(docker images tsn:test --format "{{.Size}}" | head -1)
+          echo "Image size: $SIZE"
+          # Alert if image is larger than 200MB
+          # Note: This is a simple check, actual implementation would parse the size
+
+  # ==========================================================================
+  # Job 6: Tests de fuzzing (court)
+  # ==========================================================================
+  fuzz-smoke:
+    name: Fuzz Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libclang-dev clang cmake
+
+      - name: Build fuzz targets
+        run: cargo fuzz build --dev
+
+      - name: Run quick fuzz tests (30s each)
+        run: |
+          timeout 30 cargo fuzz run crypto_fuzz -- -max_total_time=25 || true
+          timeout 30 cargo fuzz run commitment_fuzz -- -max_total_time=25 || true
+
+  # ==========================================================================
+  # Job 7: Documentation
+  # ==========================================================================
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libclang-dev clang cmake
+
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Check for broken links
+        run: |
+          cargo install cargo-deadlinks --locked || true
+          cargo deadlinks || true
+
+  # ==========================================================================
+  # Job 8: Vérification des features
+  # ==========================================================================
+  features:
+    name: Feature Flags Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-hack
+        run: cargo install cargo-hack --locked
+
+      - name: Check feature powerset
+        run: cargo hack check --feature-powerset --no-dev-deps
+
+  # ==========================================================================
+  # Job 9: Vérification semver (pour les releases)
+  # ==========================================================================
+  semver:
+    name: Semver Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+
+      - name: Check semver compliance
+        run: cargo semver-checks check-release
+        continue-on-error: true  # Informational only for now

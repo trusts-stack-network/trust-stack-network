@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TSN Network Monitoring Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+        }
+        
+        .header {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 1rem 2rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .header h1 {
+            color: white;
+            font-size: 2rem;
+            font-weight: 300;
+        }
+        
+        .header .subtitle {
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 0.9rem;
+            margin-top: 0.5rem;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .card h3 {
+            color: #333;
+            margin-bottom: 1rem;
+            font-size: 1.2rem;
+            font-weight: 600;
+        }
+        
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 1rem;
+        }
+        
+        .metric {
+            text-align: center;
+            padding: 1rem;
+            background: rgba(103, 126, 234, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(103, 126, 234, 0.2);
+        }
+        
+        .metric-value {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 0.5rem;
+        }
+        
+        .metric-label {
+            font-size: 0.9rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+        }
+        
+        .status-online { background-color: #4CAF50; }
+        .status-warning { background-color: #FF9800; }
+        .status-error { background-color: #F44336; }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 1rem;
+        }
+        
+        .alerts-container {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .alert {
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            border-radius: 6px;
+            border-left: 4px solid;
+            background: rgba(255, 255, 255, 0.5);
+        }
+        
+        .alert-critical {
+            border-left-color: #F44336;
+            background-color: rgba(244, 67, 54, 0.1);
+        }
+        
+        .alert-warning {
+            border-left-color: #FF9800;
+            background-color: rgba(255, 152, 0, 0.1);
+        }
+        
+        .alert-info {
+            border-left-color: #2196F3;
+            background-color: rgba(33, 150, 243, 0.1);
+        }
+        
+        .alert-title {
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+        
+        .alert-description {
+            font-size: 0.9rem;
+            color: #666;
+        }
+        
+        .alert-time {
+            font-size: 0.8rem;
+            color: #999;
+            margin-top: 0.25rem;
+        }
+        
+        .peer-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .peer-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            background: rgba(103, 126, 234, 0.05);
+            border-radius: 6px;
+            border: 1px solid rgba(103, 126, 234, 0.1);
+        }
+        
+        .peer-id {
+            font-family: monospace;
+            font-size: 0.9rem;
+            color: #667eea;
+        }
+        
+        .peer-latency {
+            font-size: 0.9rem;
+            color: #666;
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .refresh-button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background-color 0.2s;
+        }
+        
+        .refresh-button:hover {
+            background: #5a6fd8;
+        }
+        
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+            margin-bottom: 1rem;
+        }
+        
+        .tab {
+            padding: 0.75rem 1.5rem;
+            background: none;
+            border: none;
+            color: rgba(255, 255, 255, 0.7);
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        
+        .tab.active {
+            color: white;
+            border-bottom: 2px solid white;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .metric-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>TSN Network Monitoring</h1>
+        <div class="subtitle">
+            <span class="status-indicator status-online"></span>
+            Dashboard temps-réel - Mise à jour automatique
+        </div>
+    </div>
+    
+    <div class="container">
+        <!-- Métriques principales -->
+        <div class="grid">
+            <div class="card">
+                <h3>État du Réseau</h3>
+                <div class="metric-grid">
+                    <div class="metric">
+                        <div class="metric-value" id="peer-count">0</div>
+                        <div class="metric-label">Pairs Connectés</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="block-height">0</div>
+                        <div class="metric-label">Hauteur de Bloc</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="mempool-size">0</div>
+                        <div class="metric-label">Mempool</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="sync-status">Synchronisé</div>
+                        <div class="metric-label">État Sync</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>Performance Réseau</h3>
+                <div class="metric-grid">
+                    <div class="metric">
+                        <div class="metric-value" id="latency">0ms</div>
+                        <div class="metric-label">Latence Moyenne</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="throughput">0 KB/s</div>
+                        <div class="metric-label">Débit</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="messages-per-sec">0</div>
+                        <div class="metric-label">Messages/sec</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="uptime">0h</div>
+                        <div class="metric-label">Uptime</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Graphiques temps-réel -->
+        <div class="card">
+            <div class="tabs">
+                <button class="tab active" onclick="showTab('latency-tab')">Latence</button>
+                <button class="tab" onclick="showTab('peers-tab')">Pairs</button>
+                <button class="tab" onclick="showTab('throughput-tab')">Débit</button>
+                <button class="tab" onclick="showTab('mempool-tab')">Mempool</button>
+            </div>
+            
+            <div id="latency-tab" class="tab-content active">
+                <h3>Latence Réseau (ms)</h3>
+                <div class="chart-container">
+                    <canvas id="latency-chart"></canvas>
+                </div>
+            </div>
+            
+            <div id="peers-tab" class="tab-content">
+                <h3>Nombre de Pairs Connectés</h3>
+                <div class="chart-container">
+                    <canvas id="peers-chart"></canvas>
+                </div>
+            </div>
+            
+            <div id="throughput-tab" class="tab-content">
+                <h3>Débit Réseau (KB/s)</h3>
+                <div class="chart-container">
+                    <canvas id="throughput-chart"></canvas>
+                </div>
+            </div>
+            
+            <div id="mempool-tab" class="tab-content">
+                <h3>Taille du Mempool</h3>
+                <div class="chart-container">
+                    <canvas id="mempool-chart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Alertes et Pairs -->
+        <div class="grid">
+            <div class="card">
+                <h3>Alertes Actives</h3>
+                <div class="alerts-container" id="alerts-container">
+                    <div class="alert alert-info">
+                        <div class="alert-title">Système Initialisé</div>
+                        <div class="alert-description">Le système de monitoring est en cours de démarrage...</div>
+                        <div class="alert-time">Il y a quelques secondes</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>Pairs Connectés</h3>
+                <div class="connection-status">
+                    <span class="status-indicator status-online"></span>
+                    <span>Connexions actives: <span id="active-connections">0</span></span>
+                    <button class="refresh-button" onclick="refreshPeers()">Actualiser</button>
+                </div>
+                <div class="peer-list" id="peer-list">
+                    <div class="peer-item">
+                        <div class="peer-id">En attente de données...</div>
+                        <div class="peer-latency">-</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Configuration WebSocket
+        let ws = null;
+        let reconnectInterval = null;
+        
+        // Configuration des graphiques
+        const chartConfig = {
+            type: 'line',
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'second',
+                            displayFormats: {
+                                second: 'HH:mm:ss'
+                            }
+                        }
+                    },
+                    y: {
+                        beginAtZero: true
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    }
+                },
+                animation: {
+                    duration: 0
+                }
+            }
+        };
+        
+        // Initialisation des graphiques
+        const latencyChart = new Chart(document.getElementById('latency-chart'), {
+            ...chartConfig,
+            data: {
+                datasets: [{
+                    label: 'Latence (ms)',
+                    data: [],
+                    borderColor: '#667eea',
+                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                    fill: true
+                }]
+            }
+        });
+        
+        const peersChart = new Chart(document.getElementById('peers-chart'), {
+            ...chartConfig,
+            data: {
+                datasets: [{
+                    label: 'Pairs Connectés',
+                    data: [],
+                    borderColor: '#4CAF50',
+                    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                    fill: true
+                }]
+            }
+        });
+        
+        const throughputChart = new Chart(document.getElementById('throughput-chart'), {
+            ...chartConfig,
+            data: {
+                datasets: [{
+                    label: 'Débit (KB/s)',
+                    data: [],
+                    borderColor: '#FF9800',
+                    backgroundColor: 'rgba(255, 152, 0, 0.1)',
+                    fill: true
+                }]
+            }
+        });
+        
+        const mempoolChart = new Chart(document.getElementById('mempool-chart'), {
+            ...chartConfig,
+            data: {
+                datasets: [{
+                    label: 'Taille Mempool',
+                    data: [],
+                    borderColor: '#9C27B0',
+                    backgroundColor: 'rgba(156, 39, 176, 0.1)',
+                    fill: true
+                }]
+            }
+        });
+        
+        // Fonctions utilitaires
+        function showTab(tabId) {
+            // Masquer tous les onglets
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Afficher l'onglet sélectionné
+            document.getElementById(tabId).classList.add('active');
+            event.target.classList.add('active');
+        }
+        
+        function formatTime(timestamp) {
+            const date = new Date(timestamp * 1000);
+            const now = new Date();
+            const diff = Math.floor((now - date) / 1000);
+            
+            if (diff < 60) return `Il y a ${diff}s`;
+            if (diff < 3600) return `Il y a ${Math.floor(diff / 60)}min`;
+            if (diff < 86400) return `Il y a ${Math.floor(diff / 3600)}h`;
+            return date.toLocaleDateString();
+        }
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        // Gestion WebSocket
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = function() {
+                console.log('WebSocket connecté');
+                if (reconnectInterval) {
+                    clearInterval(reconnectInterval);
+                    reconnectInterval = null;
+                }
+            };
+            
+            ws.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleWebSocketMessage(data);
+                } catch (e) {
+                    console.error('Erreur parsing WebSocket:', e);
+                }
+            };
+            
+            ws.onclose = function() {
+                console.log('WebSocket fermé, tentative de reconnexion...');
+                if (!reconnectInterval) {
+                    reconnectInterval = setInterval(connectWebSocket, 5000);
+                }
+            };
+            
+            ws.onerror = function(error) {
+                console.error('Erreur WebSocket:', error);
+            };
+        }
+        
+        function handleWebSocketMessage(data) {
+            switch (data.type) {
+                case 'MetricsUpdate':
+                    updateMetrics(data.metrics);
+                    updateCharts(data.timestamp, data.metrics);
+                    break;
+                case 'AlertUpdate':
+                    addAlert(data.alert);
+                    break;
+                case 'SystemStatus':
+                    updateSystemStatus(data.status);
+                    break;
+            }
+        }
+        
+        function updateMetrics(metrics) {
+            document.getElementById('peer-count').textContent = metrics.connected_peers || 0;
+            document.getElementById('block-height').textContent = metrics.current_block_height || 0;
+            document.getElementById('mempool-size').textContent = metrics.mempool_size || 0;
+            document.getElementById('latency').textContent = '50ms'; // Placeholder
+            document.getElementById('throughput').textContent = '1.2 MB/s'; // Placeholder
+            document.getElementById('messages-per-sec').textContent = metrics.messages_received_per_second || 0;
+            document.getElementById('active-connections').textContent = metrics.connected_peers || 0;
+        }
+        
+        function updateCharts(timestamp, metrics) {
+            const time = new Date(timestamp * 1000);
+            
+            // Mettre à jour le graphique de latence
+            latencyChart.data.datasets[0].data.push({
+                x: time,
+                y: 50 // Placeholder
+            });
+            
+            // Mettre à jour le graphique des pairs
+            peersChart.data.datasets[0].data.push({
+                x: time,
+                y: metrics.connected_peers || 0
+            });
+            
+            // Mettre à jour le graphique de débit
+            throughputChart.data.datasets[0].data.push({
+                x: time,
+                y: 1200 // Placeholder
+            });
+            
+            // Mettre à jour le graphique du mempool
+            mempoolChart.data.datasets[0].data.push({
+                x: time,
+                y: metrics.mempool_size || 0
+            });
+            
+            // Limiter le nombre de points (garder les 100 derniers)
+            [latencyChart, peersChart, throughputChart, mempoolChart].forEach(chart => {
+                if (chart.data.datasets[0].data.length > 100) {
+                    chart.data.datasets[0].data.shift();
+                }
+                chart.update('none');
+            });
+        }
+        
+        function addAlert(alert) {
+            const container = document.getElementById('alerts-container');
+            const alertElement = document.createElement('div');
+            
+            let alertClass = 'alert-info';
+            if (alert.severity === 'Critical') alertClass = 'alert-critical';
+            else if (alert.severity === 'Warning') alertClass = 'alert-warning';
+            
+            alertElement.className = `alert ${alertClass}`;
+            alertElement.innerHTML = `
+                <div class="alert-title">${alert.title}</div>
+                <div class="alert-description">${alert.description}</div>
+                <div class="alert-time">${formatTime(alert.timestamp)}</div>
+            `;
+            
+            container.insertBefore(alertElement, container.firstChild);
+            
+            // Limiter à 10 alertes affichées
+            while (container.children.length > 10) {
+                container.removeChild(container.lastChild);
+            }
+        }
+        
+        function refreshPeers() {
+            // Actualiser la liste des pairs
+            fetch('/api/peers')
+                .then(response => response.json())
+                .then(data => {
+                    updatePeerList(data.peer_list || []);
+                })
+                .catch(error => {
+                    console.error('Erreur lors du rafraîchissement des pairs:', error);
+                });
+        }
+        
+        function updatePeerList(peers) {
+            const container = document.getElementById('peer-list');
+            container.innerHTML = '';
+            
+            if (peers.length === 0) {
+                container.innerHTML = '<div class="peer-item"><div class="peer-id">Aucun pair connecté</div><div class="peer-latency">-</div></div>';
+                return;
+            }
+            
+            peers.forEach(peer => {
+                const peerElement = document.createElement('div');
+                peerElement.className = 'peer-item';
+                peerElement.innerHTML = `
+                    <div class="peer-id">${peer.id.substring(0, 16)}...</div>
+                    <div class="peer-latency">${peer.latency_ms.toFixed(1)}ms</div>
+                `;
+                container.appendChild(peerElement);
+            });
+        }
+        
+        // Initialisation
+        document.addEventListener('DOMContentLoaded', function() {
+            connectWebSocket();
+            
+            // Actualiser les données toutes les 30 secondes
+            setInterval(() => {
+                refreshPeers();
+            }, 30000);
+        });
+    </script>
+</body>
+</html>

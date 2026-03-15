@@ -1,0 +1,13 @@
+# Sécurité des primitives cryptographiques
+
+## Menaces
+
+* Attaques de timing
+* Attaques par canaux auxiliaires
+* Utilisation incorrecte des primitives cryptographiques
+
+## Mitigations
+
+* Utilisation de fonctions cryptographiques constant-time
+* Implémentation de mécanismes de protection contre les canaux auxiliaires
+* Révision régulière du code pour détecter les mauvais usages des primitives cryptographiques

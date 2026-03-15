@@ -1,0 +1,146 @@
+groups:
+  - name: tsn_node_alerts
+    rules:
+      # Node Health Alerts
+      - alert: TSNNodeDown
+        expr: up{job="tsn-node"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TSN Node is down"
+          description: "TSN node {{ $labels.instance }} has been down for more than 1 minute."
+
+      - alert: TSNHighMemoryUsage
+        expr: tsn_memory_usage_bytes / (1024 * 1024 * 1024) > 8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on TSN node"
+          description: "TSN node {{ $labels.instance }} is using {{ $value }}GB of memory."
+
+      # Network Alerts
+      - alert: TSNLowPeerCount
+        expr: tsn_connected_peers < 3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low peer count"
+          description: "TSN node {{ $labels.instance }} has only {{ $value }} connected peers."
+
+      - alert: TSNNoPeers
+        expr: tsn_connected_peers == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "No peers connected"
+          description: "TSN node {{ $labels.instance }} has no connected peers."
+
+      - alert: TSNHighNetworkLatency
+        expr: tsn_network_latency_ms > 1000
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High network latency"
+          description: "TSN node {{ $labels.instance }} has network latency of {{ $value }}ms."
+
+      # Sync Alerts
+      - alert: TSNSyncLag
+        expr: tsn_block_sync_lag > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Block sync lag detected"
+          description: "TSN node {{ $labels.instance }} is {{ $value }} blocks behind."
+
+      - alert: TSNSyncStalled
+        expr: increase(tsn_block_height[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Block sync stalled"
+          description: "TSN node {{ $labels.instance }} hasn't processed new blocks in 10 minutes."
+
+      # Transaction Processing Alerts
+      - alert: TSNHighTransactionRejectionRate
+        expr: rate(tsn_transactions_rejected_total[5m]) / rate(tsn_transactions_received_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High transaction rejection rate"
+          description: "TSN node {{ $labels.instance }} is rejecting {{ $value | humanizePercentage }} of transactions."
+
+      - alert: TSNMempoolFull
+        expr: tsn_mempool_size_bytes > 100 * 1024 * 1024  # 100MB
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mempool is getting full"
+          description: "TSN node {{ $labels.instance }} mempool size is {{ $value | humanizeBytes }}."
+
+      # Mining/Consensus Alerts
+      - alert: TSNLowHashrate
+        expr: tsn_network_hashrate_hashes_per_second < 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low network hashrate"
+          description: "TSN network hashrate is {{ $value }} H/s, which is below expected threshold."
+
+      # Error Rate Alerts
+      - alert: TSNHighErrorRate
+        expr: rate(tsn_network_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High network error rate"
+          description: "TSN node {{ $labels.instance }} is experiencing {{ $value }} network errors per second."
+
+      - alert: TSNRateLimitHits
+        expr: rate(tsn_rate_limit_hits_total[5m]) > 50
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Rate limiting active"
+          description: "TSN node {{ $labels.instance }} is rate limiting {{ $value }} requests per second."
+
+  - name: tsn_system_alerts
+    rules:
+      # System Resource Alerts
+      - alert: TSNHighCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage on {{ $labels.instance }} is {{ $value }}%."
+
+      - alert: TSNHighDiskUsage
+        expr: (node_filesystem_size_bytes - node_filesystem_avail_bytes) / node_filesystem_size_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High disk usage"
+          description: "Disk usage on {{ $labels.instance }} is {{ $value }}%."
+
+      - alert: TSNDiskSpaceCritical
+        expr: (node_filesystem_size_bytes - node_filesystem_avail_bytes) / node_filesystem_size_bytes * 100 > 95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical disk space"
+          description: "Disk usage on {{ $labels.instance }} is {{ $value }}%. Immediate action required."

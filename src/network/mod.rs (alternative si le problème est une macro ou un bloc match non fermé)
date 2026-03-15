@@ -1,0 +1,42 @@
+//! Network module for handling TCP connections and message serialization
+
+pub mod message;
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use tokio::sync::mpsc;
+
+pub type ConnectionId = u64;
+
+pub struct Network {
+    connections: HashMap<ConnectionId, mpsc::Sender<message::Message>>,
+    next_id: ConnectionId,
+}
+
+impl Network {
+    pub fn new() -> Self {
+        Self {
+            connections: HashMap::new(),
+            next_id: 0,
+        }
+    }
+
+    pub fn register(&mut self, tx: mpsc::Sender<message::Message>) -> ConnectionId {
+        let id = self.next_id;
+        self.connections.insert(id, tx);
+        self.next_id += 1;
+        id
+    }
+
+    pub fn broadcast(&self, msg: message::Message) {
+        for (_, tx) in &self.connections {
+            let _ = tx.try_send(msg.clone());
+        }
+    }
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self::new()
+    }
+}

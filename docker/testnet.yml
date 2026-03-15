@@ -1,0 +1,21 @@
+# Config par défaut pour un testnet local à 3 validators
+network:
+  name: "tsn-testnet"
+  bootnodes:
+    - "/dns/bootnode-0/tcp/30333/p2p/12D3KooWExample..."
+    - "/dns/bootnode-1/tcp/30333/p2p/12D3KooWExample..."
+
+rpc:
+  addr: "0.0.0.0:9944"
+  cors: ["*"]
+
+p2p:
+  addr: "0.0.0.0:30333"
+  node_key_file: "/data/node-key"
+
+consensus:
+  slot_duration_ms: 6000
+  epoch_length: 30
+
+storage:
+  path: "/data/db"

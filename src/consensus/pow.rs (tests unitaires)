@@ -1,0 +1,30 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{Block, Transaction};
+    use crate::crypto::{SLHDSASignature, SLHDSAPublicKey, SLHDSAPrivateKey};
+
+    #[test]
+    fn test_validate_block_signature() {
+        // Création d'une clé privée SLH-DSA
+        let private_key = SLHDSAPrivateKey::new();
+
+        // Création d'un bloc
+        let block = Block::new("header".to_string(), vec![], &private_key).unwrap();
+
+        // Validation de la signature du bloc
+        assert!(validate_block_signature(&block).is_ok());
+    }
+
+    #[test]
+    fn test_validate_transaction_signature() {
+        // Création d'une clé privée SLH-DSA
+        let private_key = SLHDSAPrivateKey::new();
+
+        // Création d'une transaction
+        let transaction = Transaction::new("data".to_string(), &private_key).unwrap();
+
+        // Validation de la signature de la transaction
+        assert!(validate_transaction_signature(&transaction).is_ok());
+    }
+}

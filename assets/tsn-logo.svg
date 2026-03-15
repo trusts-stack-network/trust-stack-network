@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="800" height="800">
+  <defs>
+    <linearGradient id="d1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00ffcc"/>
+      <stop offset="50%" stop-color="#00c8ff"/>
+      <stop offset="100%" stop-color="#7b61ff"/>
+    </linearGradient>
+    <linearGradient id="d2" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00ffcc"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <filter id="dg">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="dg2">
+      <feGaussianBlur stdDeviation="20" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="80" fill="#0a0a1a"/>
+
+  <!-- Ambient glow -->
+  <circle cx="256" cy="256" r="160" fill="#00ffcc" opacity="0.025" filter="url(#dg2)"/>
+  <circle cx="256" cy="256" r="120" fill="#7b61ff" opacity="0.03" filter="url(#dg2)"/>
+
+  <!-- Outer ring -->
+  <circle cx="256" cy="256" r="210" fill="none" stroke="url(#d1)" stroke-width="1" opacity="0.15"/>
+
+  <!-- Rotating dashes ring -->
+  <circle cx="256" cy="256" r="195" fill="none" stroke="url(#d1)" stroke-width="2"
+          stroke-dasharray="20 15 8 15" opacity="0.3"/>
+
+  <!-- Main hexagon -->
+  <polygon points="256,72 428,171 428,341 256,440 84,341 84,171"
+           fill="url(#d1)" opacity="0.04"/>
+  <polygon points="256,72 428,171 428,341 256,440 84,341 84,171"
+           fill="none" stroke="url(#d1)" stroke-width="2" opacity="0.6" filter="url(#dg)"/>
+
+  <!-- Faceted diamond T shape -->
+  <g filter="url(#dg)">
+    <!-- T top - faceted -->
+    <polygon points="170,170 342,170 330,200 182,200" fill="url(#d1)" opacity="0.85"/>
+    <polygon points="170,170 182,200 176,200 164,170" fill="#00ffcc" opacity="0.3"/>
+    <polygon points="342,170 348,170 340,200 330,200" fill="#7b61ff" opacity="0.3"/>
+
+    <!-- T pillar - faceted -->
+    <polygon points="232,200 280,200 272,375 240,375" fill="url(#d2)" opacity="0.8"/>
+    <polygon points="232,200 240,375 236,375 228,200" fill="#00ffcc" opacity="0.15"/>
+    <polygon points="280,200 284,200 276,375 272,375" fill="#7b61ff" opacity="0.15"/>
+
+    <!-- Light reflection on T -->
+    <polygon points="182,172 320,172 316,178 186,178" fill="#fff" opacity="0.15"/>
+    <polygon points="238,205 270,205 268,240 240,240" fill="#fff" opacity="0.06"/>
+  </g>
+
+  <!-- Corner accents -->
+  <g fill="url(#d1)" filter="url(#dg)">
+    <!-- Top -->
+    <polygon points="256,72 264,80 256,88 248,80" opacity="0.8"/>
+    <!-- Right top -->
+    <polygon points="428,171 420,179 412,171 420,163" opacity="0.7"/>
+    <!-- Right bottom -->
+    <polygon points="428,341 420,349 412,341 420,333" opacity="0.6"/>
+    <!-- Bottom -->
+    <polygon points="256,440 264,432 256,424 248,432" opacity="0.8"/>
+    <!-- Left bottom -->
+    <polygon points="84,341 92,349 100,341 92,333" opacity="0.6"/>
+    <!-- Left top -->
+    <polygon points="84,171 92,179 100,171 92,163" opacity="0.7"/>
+  </g>
+
+  <!-- Subtle particle dots -->
+  <circle cx="140" cy="100" r="1.5" fill="#00ffcc" opacity="0.4"/>
+  <circle cx="390" cy="110" r="1" fill="#7b61ff" opacity="0.3"/>
+  <circle cx="410" cy="400" r="1.5" fill="#7b61ff" opacity="0.4"/>
+  <circle cx="100" cy="420" r="1" fill="#00ffcc" opacity="0.3"/>
+  <circle cx="460" cy="256" r="1" fill="#00c8ff" opacity="0.35"/>
+  <circle cx="52" cy="256" r="1" fill="#00c8ff" opacity="0.35"/>
+</svg>

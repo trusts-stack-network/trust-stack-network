@@ -1,0 +1,64 @@
+//! Module de commitment cryptographique vulnérable (pour démonstration d'audit)
+//! 
+//! Implémente un Pedersen commitment sur Curve25519 avec vulnérabilités intentionnelles
+//! pour démonstration des tests d'audit.
+
+use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar, RistrettoPoint};
+use rand::rngs::OsRng;
+use sha2::{Digest, Sha256};
+
+/// Structure contenant le secret - VULNÉRABILITÉ: pas de Zeroize
+pub struct CommitmentSecret {
+    pub value: Scalar,
+    pub blinding: Scalar,
+}
+
+/// Commitment ouvert
+pub struct Commitment {
+    pub point: RistrettoPoint,
+    pub value_hash: [u8; 32],
+}
+
+impl Commitment {
+    /// Crée un nouveau commitment - VULNÉRABILITÉ: overflow possible dans value.to_bytes()
+    pub fn create(value: u64, secret: &CommitmentSecret) -> Self {
+        // VULNÉRABILITÉ: Conversion u64 -> Scalar sans vérification de overflow
+        let value_scalar = Scalar::from_bytes_mod_order(value.to_le_bytes().into());
+        
+        // Calcul Pedersen: C = v*G + r*H
+        let point = RistrettoPoint::mul_base(&value_scalar) + 
+                    secret.blinding * RISTRETTO_BASEPOINT_POINT;
+        
+        // Hash de la valeur pour binding (vulnérable à length extension si mal implémenté)
+        let mut hasher = Sha256::new();
+        hasher.update(value.to_le_bytes());
+        let value_hash = hasher.finalize().into();
+        
+        Commitment { point, value_hash }
+    }
+    
+    /// Vérifie l'ouverture - VULNÉRABILITÉ: timing attack sur la comparaison
+    pub fn verify(&self, value: u64, secret: &CommitmentSecret) -> bool {
+        let recomputed = Self::create(value, secret);
+        
+        // VULNÉRABILITÉ: comparaison naive en temps variable
+        self.point == recomputed.point && 
+        self.value_hash == recomputed.value_hash  // Timing attack ici!
+    }
+    
+    /// Vérifie le binding - VULNÉRABILITÉ: pas de vérification de collision
+    pub fn verify_binding(&self, other: &Commitment) -> bool {
+        // Comparaison naive vulnérable aux timing attacks
+        self.value_hash.iter().zip(other.value_hash.iter())
+            .all(|(a, b)| a == b)
+    }
+}
+
+/// Fonction utilitaire - VULNÉRABILITÉ: pas de zeroize sur le résultat
+pub fn generate_secret(value: u64) -> CommitmentSecret {
+    let mut rng = OsRng;
+    CommitmentSecret {
+        value: Scalar::from(value),  // Potentiel overflow ici
+        blinding: Scalar::random(&mut rng),
+    }
+}

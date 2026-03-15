@@ -1,0 +1,9 @@
+[node]
+name = "tsn-node-1"
+p2p_port = 30333
+rpc_port = 9944
+bootnodes = ["/ip4/127.0.0.1/tcp/30334/p2p/16Uiu2HAm6SDXhez2v7P7rHuqYjF3i5tB6t1r3sX2q4r5s6t7u8v9w0x1y2z3"]
+
+[consensus]
+mine = true
+miner_threads = 2

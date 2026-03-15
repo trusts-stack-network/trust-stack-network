@@ -1,0 +1,89 @@
+# Règles d'alerte Prometheus pour consensus TSN
+# Détection proactive des problèmes de performance et "Invalid commitment root"
+
+groups:
+  - name: tsn_consensus_critical
+    interval: 5s
+    rules:
+      # Alerte critique : taux de rejet élevé
+      - alert: HighBlockRejectionRate
+        expr: rate(tsn_consensus_blocks_rejected_total[1m]) > 0.1
+        for: 30s
+        labels:
+          severity: critical
+          component: consensus
+        annotations:
+          summary: "Taux de rejet de blocs élevé sur {{ $labels.instance }}"
+          description: "Le nœud {{ $labels.instance }} rejette {{ $value | humanizePercentage }} des blocs. Possible problème de synchronisation ou corruption de state."
+
+      # Alerte critique : erreurs de commitment root
+      - alert: InvalidCommitmentRootErrors
+        expr: rate(tsn_consensus_commitment_errors_total[5m]) > 0
+        for: 10s
+        labels:
+          severity: critical
+          component: consensus
+          bug: invalid_commitment_root
+        annotations:
+          summary: "Erreurs 'Invalid commitment root' détectées"
+          description: "{{ $value }} erreurs de commitment root par seconde sur {{ $labels.instance }}. Bug critique en cours."
+
+      # Alerte critique : latence de validation excessive
+      - alert: HighBlockValidationLatency
+        expr: histogram_quantile(0.95, rate(tsn_consensus_block_validation_duration_seconds_bucket[2m])) > 5.0
+        for: 1m
+        labels:
+          severity: critical
+          component: consensus
+        annotations:
+          summary: "Latence de validation de blocs excessive"
+          description: "95% des validations prennent plus de {{ $value }}s sur {{ $labels.instance }}"
+
+  - name: tsn_consensus_warning
+    interval: 10s
+    rules:
+      # Alerte warning : latence modérée
+      - alert: ModerateBlockValidationLatency
+        expr: histogram_quantile(0.90, rate(tsn_consensus_block_validation_duration_seconds_bucket[5m])) > 2.0
+        for: 2m
+        labels:
+          severity: warning
+          component: consensus
+        annotations:
+          summary: "Latence de validation modérément élevée"
+          description: "90% des validations prennent plus de {{ $value }}s sur {{ $labels.instance }}"
+
+      # Alerte warning : dérive de difficulté
+      - alert: DifficultyAdjustmentDrift
+        expr: abs(rate(tsn_consensus_difficulty_adjustments_total[10m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: consensus
+        annotations:
+          summary: "Ajustements de difficulté fréquents"
+          description: "Difficulté ajustée {{ $value }} fois par minute sur {{ $labels.instance }}"
+
+      # Alerte warning : mempool saturée
+      - alert: MempoolSaturation
+        expr: tsn_mempool_pending_transactions > 1000
+        for: 2m
+        labels:
+          severity: warning
+          component: mempool
+        annotations:
+          summary: "Mempool saturée"
+          description: "{{ $value }} transactions en attente sur {{ $labels.instance }}"
+
+  - name: tsn_consensus_performance
+    interval: 30s
+    rules:
+      # Métriques de performance pour monitoring
+      - record: tsn:consensus_throughput_tps
+        expr: rate(tsn_consensus_blocks_processed_total[1m]) * rate(tsn_consensus_transactions_per_block[1m])
+
+      - record: tsn:consensus_efficiency_ratio
+        expr: rate(tsn_consensus_blocks_accepted_total[5m]) / rate(tsn_consensus_blocks_received_total[5m])
+
+      - record: tsn:consensus_avg_validation_time
+        expr: histogram_quantile(0.50, rate(tsn_consensus_block_validation_duration_seconds_bucket[5m]))

@@ -1,0 +1,14 @@
+# Config minimal pour testnet local (node-1)
+
+[node]
+name = "node-1"
+p2p_port = 9944
+rpc_port = 9933
+metrics_port = 9615
+data_dir = "/app/data"
+
+[consensus]
+initial_difficulty = 1000
+
+[chain]
+genesis_path = "/app/genesis.json"

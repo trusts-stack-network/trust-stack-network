@@ -1,0 +1,48 @@
+# Configuration Clippy pour TSN - Sécurité
+# Ce fichier configure les lints pour interdire les unwraps/expects dangereux
+
+# Interdiction des unwraps dans le code de production
+# Note: les unwraps dans les tests sont autorisés via #[cfg(test)]
+
+# Niveau de lint pour unwrap_used
+# deny = erreur de compilation
+# warn = avertissement
+# allow = autorisé
+
+# Pour l'instant en warn pendant la migration
+unwrap_used = "warn"
+
+# Interdiction des expects non justifiés
+expect_used = "warn"
+
+# Interdiction des panic dans le code non-test
+panic = "warn"
+
+# Autres lints de sécurité importants
+# Vérification des dépassements arithmétiques
+arithmetic_side_effects = "warn"
+
+# Vérification des indexations potentiellement dangereuses
+indexing_slicing = "warn"
+
+# Vérification des conversions de types
+as_conversions = "allow"
+
+# Vérification des unwraps sur Option/Result
+option_unwrap_used = "warn"
+result_unwrap_used = "warn"
+
+# Vérification des expects sur Option/Result
+option_expect_used = "warn"
+result_expect_used = "warn"
+
+# Lints de performance et sécurité
+inefficient_to_string = "warn"
+
+# Lints de style liés à la sécurité
+shadow_unrelated = "warn"
+shadow_reuse = "warn"
+shadow_same = "allow"
+
+# Documentation
+missing_docs_in_private_items = "allow"

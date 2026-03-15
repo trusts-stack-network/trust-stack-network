@@ -1,0 +1,190 @@
+# =============================================================================
+# TSN (Trust Stack Network) - cargo-deny configuration
+# Dependency auditing and license compliance
+# =============================================================================
+
+# =============================================================================
+# General Configuration
+# =============================================================================
+
+[graph]
+# The graph target to use for dependency resolution
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+
+# =============================================================================
+# Advisory Database
+# =============================================================================
+
+[advisories]
+# The URL of the advisory database
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# The path where the advisory database will be cloned
+db-path = "~/.cargo/advisory-db"
+
+# The lint level for crates that have been yanked from their source registry
+yanked = "deny"
+
+# The lint level for crates with security advisories
+vulnerability = "deny"
+
+# The lint level for crates with unmaintained status
+unmaintained = "warn"
+
+# The lint level for crates with deprecated status
+deprecated = "warn"
+
+# The lint level for crates with notices
+notice = "warn"
+
+# A list of advisory IDs to ignore
+ignore = []
+
+# =============================================================================
+# License Configuration
+# =============================================================================
+
+[licenses]
+# The lint level for crates that do not have a detectable license
+unlicensed = "deny"
+
+# The lint level for crates whose license cannot be determined
+copyleft = "warn"
+
+# The lint level for crates with licenses that are not explicitly allowed
+# We use "deny" to ensure only explicitly allowed licenses are used
+default = "deny"
+
+# List of explicitly allowed licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "Unlicense",
+    "MPL-2.0",
+    "OpenSSL",
+    "Zlib",
+]
+
+# List of explicitly denied licenses
+deny = [
+    "GPL-1.0",
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-1.0",
+    "AGPL-3.0",
+    "LGPL-2.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+]
+
+# List of licenses to consider as FSF Free/Libre
+fsf-free-and-os-approved = true
+
+# =============================================================================
+# Bans (Forbidden Dependencies)
+# =============================================================================
+
+[bans]
+# Lint level for multiple versions of the same crate
+multiple-versions = "warn"
+
+# Lint level for wildcard dependencies
+wildcards = "warn"
+
+# Lint level for dependencies that are only used as build dependencies
+build-override = "allow"
+
+# Lint level for dependencies that are only used as dev dependencies
+dev-override = "allow"
+
+# List of crates that are not allowed to be used
+# These are typically crates with known security issues or that we want to avoid
+deny = [
+    # Avoid outdated crypto libraries
+    { name = "rust-crypto", reason = "Use rustcrypto crates instead" },
+    { name = "openssl", reason = "Use rustls instead" },
+    { name = "native-tls", reason = "Use rustls instead" },
+    
+    # Avoid unmaintained crates
+    { name = "term", reason = "Unmaintained, use termcolor instead" },
+    { name = "time", version = "<0.3", reason = "Use time 0.3+" },
+]
+
+# List of crates that are allowed to have multiple versions
+skip = [
+    # Common transitive dependencies that often have multiple versions
+    { name = "syn", version = "1.0" },
+    { name = "quote", version = "1.0" },
+    { name = "proc-macro2", version = "1.0" },
+    { name = "bitflags", version = "1.0" },
+    { name = "hashbrown", version = "0.12" },
+    { name = "indexmap", version = "1.0" },
+]
+
+# List of crates to skip tree for (transitive dependencies)
+skip-tree = [
+    # Dev dependencies that may have their own dependency trees
+    { name = "criterion" },
+    { name = "proptest" },
+    { name = "tokio-test" },
+]
+
+# =============================================================================
+# Sources (Registry Allowlist)
+# =============================================================================
+
+[sources]
+# Lint level for unknown registries
+unknown-registry = "deny"
+
+# Lint level for unknown git sources
+unknown-git = "deny"
+
+# List of allowed registries
+allow-registry = [
+    "https://github.com/rust-lang/crates.io-index",
+]
+
+# List of allowed git sources
+allow-git = [
+    # Plonky2 and related crates
+    "https://github.com/0xPolygonZero/plonky2",
+    "https://github.com/mir-protocol/plonky2",
+    
+    # Halo2
+    "https://github.com/zcash/halo2",
+    
+    # Other trusted sources
+    "https://github.com/rust-lang",
+    "https://github.com/rust-random",
+    "https://github.com/tokio-rs",
+    "https://github.com/hyperium",
+]
+
+# =============================================================================
+# Output Configuration
+# =============================================================================
+
+[output]
+# The output format for the report
+format = "human"
+
+# Show statistics about the crate graph
+graph = true
+
+# Show the crate with the largest feature set
+features = true
+
+# Show the crate with the largest dependency tree
+no-crate-downloads = false

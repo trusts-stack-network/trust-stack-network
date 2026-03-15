@@ -1,0 +1,7 @@
+[dependencies]
+pqcrypto-sphincsplus = { version = "0.2", features = ["shake128s-simple"] }
+zeroize = { version = "1.7", features = ["derive"] }
+rand = "0.8"
+rand_core = "0.6"
+thiserror = "1.0"
+use crate::crypto::pq::slh_dsa::{KeyPair

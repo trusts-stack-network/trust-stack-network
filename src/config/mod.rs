@@ -1,0 +1,227 @@
+/// Network configuration constants
+///
+/// IMPORTANT: All nodes must use the same GENESIS_DIFFICULTY
+/// to have compatible genesis blocks and sync properly.
+
+/// The difficulty used for the genesis block.
+/// This MUST be the same for all nodes on the network.
+/// Changing this creates an incompatible chain.
+pub const GENESIS_DIFFICULTY: u64 = 12;
+
+/// Activation height for Poseidon Goldilocks PoW hash.
+/// Blocks at height >= this value use Poseidon over GoldilocksField (plonky2).
+/// Blocks below this height use legacy BN254 Poseidon (light-poseidon).
+///
+/// Currently 0 because v0.3.0 was deployed as a fresh chain (testnet phase).
+/// For a future mainnet hard fork, set this to the fork height and add `height`
+/// to BlockHeader so validation can route to the correct hash function.
+pub const POSEIDON2_ACTIVATION_HEIGHT: u64 = 0;
+
+/// Activation height for Poseidon2 (plonky3) PoW hash.
+/// Blocks at height >= this value use Poseidon2 over GoldilocksField (p3-poseidon2).
+/// Blocks between POSEIDON2_ACTIVATION_HEIGHT and this value use Poseidon v1 (plonky2).
+///
+/// Set to current chain height + ~200 blocks to give all nodes time to upgrade.
+/// All nodes MUST upgrade to v0.4.0 before this height is reached.
+pub const POSEIDON2_V2_ACTIVATION_HEIGHT: u64 = 1100;
+
+/// Default seed nodes for the TSN network.
+/// These are the initial nodes that new nodes connect to.
+/// Add your deployed node URLs here.
+pub const SEED_NODES: &[&str] = &[
+    "http://151.240.19.253:9333",
+    "http://45.145.164.76:9333",
+    "http://146.19.168.71:9333",
+    "http://45.132.96.141:9333",
+];
+
+/// Network name for identification
+pub const NETWORK_NAME: &str = "tsn-mainnet";
+
+/// Default port for nodes
+pub const DEFAULT_PORT: u16 = 8333;
+
+/// Initial block reward in base units (50 coins)
+pub const BLOCK_REWARD: u64 = 50_000_000_000;
+
+/// Coin decimals (1 coin = 10^9 base units)
+pub const COIN_DECIMALS: u32 = 9;
+
+/// Halving interval in blocks.
+/// At ~10s/block: 210_000 blocks ≈ 24.3 days per halving era.
+/// Schedule: 50 → 25 → 12.5 → 6.25 → ... TSN/block (like Bitcoin).
+pub const HALVING_INTERVAL: u64 = 210_000;
+
+/// Calculate the block reward at a given height, accounting for halving.
+/// Reward halves every HALVING_INTERVAL blocks.
+/// Returns 0 once all halvings reduce the reward below 1 base unit.
+pub fn block_reward_at_height(height: u64) -> u64 {
+    let halvings = height / HALVING_INTERVAL;
+    if halvings >= 64 {
+        return 0;
+    }
+    BLOCK_REWARD >> halvings
+}
+
+// ============================================================================
+// Dev Fee Configuration (5% of block reward to treasury)
+// ============================================================================
+
+/// Dev fee percentage (5% of block reward).
+/// Applied to every block reward: 95% goes to miner, 5% to dev treasury.
+/// NO PREMINE — the treasury only accumulates through mining.
+pub const DEV_FEE_PERCENT: u64 = 5;
+
+/// Dev treasury pk_hash (Poseidon2 hash of SLH-DSA public key).
+/// This is the PUBLIC hash — safe to include in code.
+/// Private keys stored offline at /root/tsn-treasury/ (NEVER in git).
+///
+/// TODO: Replace with actual Poseidon2 hash of the treasury SLH-DSA public key
+/// once keys are generated. For now, using a deterministic placeholder derived
+/// from "TSN_DEV_TREASURY" so all nodes agree on the treasury address.
+pub const DEV_TREASURY_PK_HASH: [u8; 32] = [
+    0x54, 0x53, 0x4e, 0x5f, 0x44, 0x45, 0x56, 0x5f,  // "TSN_DEV_"
+    0x54, 0x52, 0x45, 0x41, 0x53, 0x55, 0x52, 0x59,  // "TREASURY"
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Calculate miner reward from total reward (95%).
+/// Uses integer division: miner gets reward * 95 / 100.
+pub fn miner_reward(total_reward: u64) -> u64 {
+    total_reward * (100 - DEV_FEE_PERCENT) / 100
+}
+
+/// Calculate dev fee from total reward (5%).
+/// Uses: total_reward - miner_reward to avoid rounding issues.
+pub fn dev_fee(total_reward: u64) -> u64 {
+    total_reward - miner_reward(total_reward)
+}
+
+/// Get seed nodes from environment or use defaults
+pub fn get_seed_nodes() -> Vec<String> {
+    // Check for TSN_SEEDS environment variable (comma-separated URLs)
+    if let Ok(seeds) = std::env::var("TSN_SEEDS") {
+        seeds
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        SEED_NODES.iter().map(|s| s.to_string()).collect()
+    }
+}
+
+/// Get the port from environment or use default
+pub fn get_port() -> u16 {
+    std::env::var("TSN_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(DEFAULT_PORT)
+}
+
+/// Get the data directory from environment or use default
+pub fn get_data_dir() -> String {
+    std::env::var("TSN_DATA_DIR").unwrap_or_else(|_| "./data".to_string())
+}
+
+/// Get mining address from environment (optional)
+pub fn get_mining_address() -> Option<String> {
+    std::env::var("TSN_MINE_ADDRESS").ok()
+}
+
+// ============================================================================
+// Assume-Valid Checkpoints
+// ============================================================================
+//
+// Assume-valid allows faster initial sync by skipping ZK proof verification
+// for blocks before a known-good checkpoint. The block structure, PoW, and
+// state transitions are still fully validated - only the expensive STARK/Groth16
+// proof verification is skipped.
+//
+// This is the same approach used by Bitcoin Core since 0.14.0.
+//
+// To update: Set ASSUME_VALID_HEIGHT to a recent block height and
+// ASSUME_VALID_HASH to that block's hash. Nodes will skip proof verification
+// for blocks at or below this height.
+
+/// Height of the assume-valid checkpoint.
+/// Blocks at or below this height skip ZK proof verification during sync.
+/// Set to 0 to disable assume-valid (verify all proofs).
+pub const ASSUME_VALID_HEIGHT: u64 = 0;
+
+/// Block hash at the assume-valid height (hex string).
+/// Used to verify we're on the correct chain before trusting the checkpoint.
+/// Only relevant when ASSUME_VALID_HEIGHT > 0.
+pub const ASSUME_VALID_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Check if assume-valid is enabled.
+pub fn is_assume_valid_enabled() -> bool {
+    ASSUME_VALID_HEIGHT > 0 && !is_assume_valid_disabled_by_env()
+}
+
+/// Check if assume-valid is disabled via environment variable.
+/// Set TSN_FULL_VERIFY=1 to force full verification of all proofs.
+pub fn is_assume_valid_disabled_by_env() -> bool {
+    std::env::var("TSN_FULL_VERIFY")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+}
+
+/// Get the assume-valid configuration.
+pub fn get_assume_valid_config() -> (u64, String) {
+    (ASSUME_VALID_HEIGHT, ASSUME_VALID_HASH.to_string())
+}
+
+// ============================================================================
+// Faucet Configuration
+// ============================================================================
+
+/// Daily faucet limit in base units (50 TSN = 50 * 10^9)
+pub const FAUCET_DAILY_LIMIT: u64 = 50_000_000_000;
+
+/// Faucet cooldown period in seconds (24 hours)
+pub const FAUCET_COOLDOWN_SECONDS: u64 = 86400;
+
+/// Transaction fee for faucet distributions (0.001 TSN)
+pub const FAUCET_TX_FEE: u64 = 1_000_000;
+
+/// Balance threshold for low balance warning (1000 TSN)
+pub const FAUCET_LOW_BALANCE_THRESHOLD: u64 = 1_000_000_000_000;
+
+/// Token value for game-based faucet (5 TSN per token)
+pub const FAUCET_TOKEN_VALUE: u64 = 5_000_000_000;
+
+/// Maximum tokens collectible in faucet game
+pub const FAUCET_MAX_TOKENS: u8 = 10;
+
+/// Minimum tokens required to claim from game (at least 1 token)
+pub const FAUCET_MIN_TOKENS: u8 = 1;
+
+// ============================================================================
+// Checkpoint Finality Configuration
+// ============================================================================
+
+/// Checkpoint interval in blocks. Every CHECKPOINT_INTERVAL blocks, a checkpoint
+/// is created that prevents chain reorganizations below that height.
+/// This provides economic finality and protects against deep reorgs.
+pub const CHECKPOINT_INTERVAL: u64 = 100;
+
+/// Whether checkpoint finality is enabled.
+/// When enabled, reorgs that would go below the last checkpoint height are rejected.
+pub const CHECKPOINT_ENABLED: bool = true;
+
+/// Maximum reorg depth allowed. Any reorg deeper than this is rejected outright.
+/// Inspired by Dilithion's MAX_REORG_DEPTH = 100.
+pub const MAX_REORG_DEPTH: u64 = 100;
+
+// ============================================================================
+// Genesis Verification
+// ============================================================================
+
+/// Expected genesis block hash (hex). All nodes MUST produce this exact genesis.
+/// If a node's genesis hash differs, it means incompatible parameters and the node
+/// must not start. This prevents silent chain forks from misconfigured genesis.
+///
+/// Set to empty string to disable verification (first launch / testnet reset).
+pub const EXPECTED_GENESIS_HASH: &str = "";

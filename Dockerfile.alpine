@@ -1,0 +1,22 @@
+# Alternative avec Alpine (pour debugging)
+ARG ALPINE_VERSION=3.19
+
+FROM alpine:${ALPINE_VERSION}
+
+RUN apk add --no-cache ca-certificates curl jq
+
+COPY --from=builder /build/tsn-node /usr/local/bin/
+
+RUN adduser -D -s /bin/sh tsn && \
+    mkdir -p /home/tsn/.tsn && \
+    chown -R tsn:tsn /home/tsn
+
+USER tsn
+WORKDIR /home/tsn
+
+EXPOSE 26656 26657 1317 9090 9091
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD tsn-node status || exit 1
+
+ENTRYPOINT ["tsn-node"]

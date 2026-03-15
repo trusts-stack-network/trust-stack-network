@@ -1,0 +1,61 @@
+# Configuration Prometheus pour métriques de consensus TSN
+# Optimisée pour traquer les performances et debugger "Invalid commitment root"
+
+global:
+  scrape_interval: 5s      # Fréquence élevée pour consensus
+  evaluation_interval: 5s  # Évaluation des règles
+  external_labels:
+    cluster: 'tsn-mainnet'
+    environment: 'production'
+
+# Configuration des règles d'alerte
+rule_files:
+  - "consensus_alerts.yml"
+
+# Configuration de scraping
+scrape_configs:
+  # Nœuds TSN principaux
+  - job_name: 'tsn-consensus'
+    scrape_interval: 2s  # Très fréquent pour consensus
+    metrics_path: '/metrics'
+    static_configs:
+      - targets:
+          - 'localhost:9944'    # Nœud local
+          - 'tsn-node-0:9944'   # Nœud 0
+          - 'tsn-node-1:9944'   # Nœud 1
+          - 'tsn-node-2:9944'   # Nœud 2
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+      - source_labels: [__address__]
+        regex: '([^:]+):(.*)'
+        target_label: node_name
+        replacement: '${1}'
+
+  # Métriques système des nœuds
+  - job_name: 'tsn-system'
+    scrape_interval: 10s
+    static_configs:
+      - targets:
+          - 'localhost:9100'    # Node exporter local
+          - 'tsn-node-0:9100'   # Node exporter 0
+          - 'tsn-node-1:9100'   # Node exporter 1
+          - 'tsn-node-2:9100'   # Node exporter 2
+
+  # Métriques réseau et P2P
+  - job_name: 'tsn-network'
+    scrape_interval: 5s
+    metrics_path: '/network/metrics'
+    static_configs:
+      - targets:
+          - 'localhost:9944'
+          - 'tsn-node-0:9944'
+          - 'tsn-node-1:9944'
+          - 'tsn-node-2:9944'
+
+# Configuration d'alerting (optionnel)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - 'localhost:9093'  # Alertmanager local

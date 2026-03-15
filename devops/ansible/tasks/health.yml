@@ -1,0 +1,160 @@
+---
+# Vérifications de santé pour TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Test de connectivité HTTP"
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ tsn_http_port | default(8080) }}/health"
+    method: GET
+    timeout: 10
+    return_content: yes
+  register: http_health
+  retries: 3
+  delay: 5
+  
+- name: "Analyse de la réponse santé"
+  set_fact:
+    health_data: "{{ http_health.content | from_json }}"
+  when: http_health.status == 200
+  
+- name: "Test de connectivité P2P"
+  wait_for:
+    port: "{{ tsn_p2p_port | default(9000) }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    timeout: 10
+  register: p2p_connectivity
+  
+- name: "Test de connectivité RPC"
+  wait_for:
+    port: "{{ tsn_rpc_port | default(9001) }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    timeout: 10
+  register: rpc_connectivity
+  
+- name: "Test de connectivité Metrics"
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ tsn_metrics_port | default(9090) }}/metrics"
+    method: GET
+    timeout: 10
+  register: metrics_health
+  ignore_errors: yes
+  
+- name: "Vérification du conteneur Docker"
+  docker_container_info:
+    name: tsn-node
+  register: container_info
+  
+- name: "Vérification des logs récents"
+  command: docker logs tsn-node --tail 20
+  register: recent_logs
+  changed_when: false
+  
+- name: "Analyse des erreurs dans les logs"
+  set_fact:
+    log_errors: "{{ recent_logs.stdout_lines | select('search', 'ERROR|FATAL|PANIC') | list }}"
+    
+- name: "Test de performance basique"
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ tsn_http_port | default(8080) }}/api/v1/blocks/latest"
+    method: GET
+    timeout: 5
+  register: perf_test
+  ignore_errors: yes
+  
+- name: "Collecte des métriques système"
+  setup:
+    filter: ansible_memory_mb,ansible_mounts
+  register: system_metrics
+  
+- name: "Vérification de l'utilisation des ressources"
+  command: docker stats tsn-node --no-stream --format "{{.CPUPerc}},{{.MemUsage}}"
+  register: resource_usage
+  changed_when: false
+  
+- name: "Analyse de l'utilisation des ressources"
+  set_fact:
+    cpu_usage: "{{ resource_usage.stdout.split(',')[0] | regex_replace('%', '') | float }}"
+    memory_usage: "{{ resource_usage.stdout.split(',')[1].split('/')[0].strip() }}"
+  when: resource_usage.stdout != ""
+  
+- name: "Test de connectivité inter-nœuds"
+  uri:
+    url: "http://{{ hostvars[item]['ansible_host'] }}:{{ hostvars[item]['tsn_http_port'] | default(8080) }}/health"
+    method: GET
+    timeout: 5
+  register: peer_connectivity
+  loop: "{{ groups['tsn_nodes'] }}"
+  when: item != inventory_hostname
+  ignore_errors: yes
+  
+- name: "Compilation du rapport de santé"
+  set_fact:
+    health_report:
+      timestamp: "{{ ansible_date_time.iso8601 }}"
+      node_id: "{{ node_id }}"
+      node_role: "{{ node_role }}"
+      status:
+        http_api: "{{ 'OK' if http_health.status == 200 else 'FAILED' }}"
+        p2p_port: "{{ 'OK' if p2p_connectivity is succeeded else 'FAILED' }}"
+        rpc_port: "{{ 'OK' if rpc_connectivity is succeeded else 'FAILED' }}"
+        metrics: "{{ 'OK' if metrics_health.status == 200 else 'FAILED' }}"
+        container: "{{ 'OK' if container_info.container.State.Status == 'running' else 'FAILED' }}"
+      performance:
+        cpu_usage: "{{ cpu_usage | default('N/A') }}"
+        memory_usage: "{{ memory_usage | default('N/A') }}"
+        api_response_time: "{{ perf_test.elapsed | default('N/A') }}"
+      health_data: "{{ health_data | default({}) }}"
+      log_errors: "{{ log_errors | default([]) }}"
+      peer_connectivity: "{{ peer_connectivity.results | default([]) | selectattr('status', 'defined') | selectattr('status', 'equalto', 200) | list | length }}/{{ groups['tsn_nodes'] | length - 1 }}"
+      
+- name: "Sauvegarde du rapport de santé"
+  copy:
+    content: "{{ health_report | to_nice_json }}"
+    dest: "{{ tsn_base_dir }}/health_report.json"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0644'
+    
+- name: "Affichage du rapport de santé"
+  debug:
+    msg: |
+      === RAPPORT DE SANTÉ TSN ===
+      Nœud: {{ inventory_hostname }} (ID: {{ node_id }}, Rôle: {{ node_role }})
+      
+      Services:
+      - API HTTP: {{ health_report.status.http_api }}
+      - Port P2P: {{ health_report.status.p2p_port }}
+      - Port RPC: {{ health_report.status.rpc_port }}
+      - Métriques: {{ health_report.status.metrics }}
+      - Conteneur: {{ health_report.status.container }}
+      
+      Performance:
+      - CPU: {{ health_report.performance.cpu_usage }}
+      - Mémoire: {{ health_report.performance.memory_usage }}
+      - Temps réponse API: {{ health_report.performance.api_response_time }}s
+      
+      Connectivité:
+      - Peers accessibles: {{ health_report.peer_connectivity }}
+      
+      {% if health_report.log_errors | length > 0 %}
+      Erreurs récentes:
+      {% for error in health_report.log_errors %}
+      - {{ error }}
+      {% endfor %}
+      {% endif %}
+      
+- name: "Échec si santé critique"
+  fail:
+    msg: "Santé critique détectée sur {{ inventory_hostname }}"
+  when: 
+    - health_report.status.http_api == 'FAILED'
+    - health_report.status.container == 'FAILED'
+  ignore_errors: "{{ ignore_health_failures | default(false) }}"
+  
+- name: "Avertissement si problèmes mineurs"
+  debug:
+    msg: "ATTENTION: Problèmes mineurs détectés sur {{ inventory_hostname }}"
+  when: 
+    - health_report.status.http_api == 'OK'
+    - health_report.status.container == 'OK'
+    - (health_report.status.metrics == 'FAILED' or health_report.log_errors | length > 0)
