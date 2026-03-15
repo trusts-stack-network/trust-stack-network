@@ -6,6 +6,7 @@ use tsn::config::{self, GENESIS_DIFFICULTY};
 use tsn::consensus::{MiningPool, SimdMode};
 use tsn::core::{ShieldedBlock, ShieldedBlockchain};
 use tsn::network::{create_router, Mempool};
+use tsn::node::NodeRole;
 use tsn::wallet::ShieldedWallet;
 
 #[derive(Parser)]
@@ -237,6 +238,9 @@ enum Commands {
     },
     /// Run a full node
     Node {
+        /// Node role: miner, relay, prover, light (default: miner)
+        #[arg(long, default_value = "miner")]
+        role: String,
         /// Port to listen on (or set TSN_PORT env var)
         #[arg(short, long)]
         port: Option<u16>,
@@ -333,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
             )?;
         }
         Commands::Node {
+            role,
             port,
             peer,
             data_dir,
@@ -347,6 +352,12 @@ async fn main() -> anyhow::Result<()> {
             faucet_daily_limit,
             fast_sync,
         } => {
+            // Parse node role
+            let node_role = NodeRole::from_str(&role).unwrap_or_else(|| {
+                eprintln!("Unknown node role '{}'. Valid roles: miner, relay, prover, light", role);
+                std::process::exit(1);
+            });
+
             // Use config defaults, with CLI/env overrides
             let port = port.unwrap_or_else(config::get_port);
             let data_dir = data_dir.unwrap_or_else(config::get_data_dir);
@@ -384,6 +395,7 @@ async fn main() -> anyhow::Result<()> {
                 faucet_wallet,
                 faucet_daily_limit,
                 fast_sync,
+                node_role,
             )
             .await?;
         }
@@ -524,6 +536,7 @@ async fn cmd_node(
     faucet_wallet: Option<String>,
     faucet_daily_limit: Option<u64>,
     fast_sync: bool,
+    node_role: NodeRole,
 ) -> anyhow::Result<()> {
     use tsn::network::{AppState, MinerStats, sync_from_peer, sync_loop, broadcast_block, discovery_loop};
     use tsn::crypto::proof::CircomVerifyingParams;
@@ -534,6 +547,14 @@ async fn cmd_node(
 
     let simd = require_simd_support(simd);
 
+    // Validate role vs flags
+    if !node_role.can_mine() && mine_wallet.is_some() {
+        tracing::warn!(
+            "Node role '{}' cannot mine — ignoring --mine wallet flag",
+            node_role
+        );
+    }
+
     // Create data directory if needed
     std::fs::create_dir_all(data_dir)?;
 
@@ -541,20 +562,27 @@ async fn cmd_node(
     println!("      TSN Shielded Node v0.4.0");
     println!("===========================================");
     println!();
+    println!("Role:           {} ({})", node_role, node_role.description());
     println!("Network:        {}", config::NETWORK_NAME);
     println!("Genesis diff:   {} leading zero bits", GENESIS_DIFFICULTY);
     println!("Data directory: {}", data_dir);
     println!("API endpoint:   http://0.0.0.0:{}", port);
-    println!("Explorer:       http://localhost:{}/explorer", port);
+    if node_role.stores_full_chain() {
+        println!("Explorer:       http://localhost:{}/explorer", port);
+    }
     println!("Wallet:         http://localhost:{}/wallet", port);
 
-    // Load miner wallet if provided
-    let miner_info = if let Some(wallet_path) = &mine_wallet {
-        let wallet = ShieldedWallet::load(wallet_path)?;
-        let pk_hash = wallet.pk_hash();
-        let viewing_key = wallet.viewing_key().clone();
-        println!("Mining to:      {} (pk_hash)", hex::encode(pk_hash));
-        Some((pk_hash, viewing_key))
+    // Load miner wallet if provided and role allows mining
+    let miner_info = if node_role.can_mine() {
+        if let Some(wallet_path) = &mine_wallet {
+            let wallet = ShieldedWallet::load(wallet_path)?;
+            let pk_hash = wallet.pk_hash();
+            let viewing_key = wallet.viewing_key().clone();
+            println!("Mining to:      {} (pk_hash)", hex::encode(pk_hash));
+            Some((pk_hash, viewing_key))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -892,6 +920,30 @@ async fn cmd_node(
                 }).await;
             }
         });
+    }
+
+    // Role-specific behavior summary
+    let mining_active = miner_info.is_some();
+    match node_role {
+        NodeRole::LightClient => {
+            tracing::info!("Light client mode: syncing headers only, skipping full block storage");
+            println!("Mode: LIGHT CLIENT — header-only sync, minimal storage");
+        }
+        NodeRole::Relay => {
+            tracing::info!("Relay mode: storing and relaying full blocks, mining disabled");
+            println!("Mode: RELAY — full block relay, no mining");
+        }
+        NodeRole::Prover => {
+            tracing::info!("Prover mode: ZK proof generation service active, mining disabled");
+            println!("Mode: PROVER — ZK proof service endpoint, no mining");
+        }
+        NodeRole::Miner => {
+            if !mining_active {
+                tracing::info!("Miner mode: full node (no --mine wallet provided, mining inactive)");
+            } else {
+                tracing::info!("Miner mode: full node with active mining");
+            }
+        }
     }
 
     // Start integrated miner if requested

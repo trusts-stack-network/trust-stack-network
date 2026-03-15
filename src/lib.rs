@@ -5,5 +5,6 @@ pub mod crypto;
 pub mod explorer;
 pub mod faucet;
 pub mod network;
+pub mod node;
 pub mod storage;
 pub mod wallet;
