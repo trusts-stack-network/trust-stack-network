@@ -13,6 +13,7 @@ import Wallet from './Wallet.tsx'
 import Explorer from './Explorer.tsx'
 import Landing from './Landing.tsx'
 import PlonkyTest from './PlonkyTest.tsx'
+import Docs from './Docs.tsx'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -20,6 +21,7 @@ createRoot(document.getElementById('root')!).render(
       <Routes>
         <Route path="/wallet/*" element={<Wallet />} />
         <Route path="/explorer/*" element={<Explorer />} />
+        <Route path="/docs/:section?" element={<Docs />} />
         <Route path="/plonky-test" element={<PlonkyTest />} />
         <Route path="/" element={<Landing />} />
       </Routes>

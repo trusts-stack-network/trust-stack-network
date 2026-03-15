@@ -738,6 +738,7 @@ async fn cmd_node(
         miner_stats: RwLock::new(MinerStats::default()),
         faucet: faucet_service,
         sync_gate: tsn::network::SyncGate::new(),
+        public_url: public_url.clone(),
     });
 
     // Create router with API (wallet and explorer are served from static React app)
