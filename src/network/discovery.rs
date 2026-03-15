@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
-use tokio::time::{interval, sleep, Duration, Instant};
+use tokio::time::interval;
+use std::time::{Duration, Instant};
 use tracing::{info, debug, warn};
 
 use crate::network::api::AppState;
@@ -14,6 +15,7 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 
 /// Limite maximale de peers à découvrir
+#[allow(dead_code)]
 const MAX_PEERS: usize = 50;
 
 /// Durée minimum avant de réessayer quand le circuit breaker est ouvert
@@ -21,6 +23,7 @@ const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(300); // 5 minute
 
 /// État du circuit breaker
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum CircuitState {
     Closed,   // Normal operation
     Open,     // Blocking requests due to failures
@@ -29,6 +32,7 @@ enum CircuitState {
 
 /// Circuit breaker pour éviter les retry loops infinis
 #[derive(Debug)]
+#[allow(dead_code)]
 struct CircuitBreaker {
     state: CircuitState,
     failure_count: u32,
@@ -68,6 +72,7 @@ impl CircuitBreaker {
         }
     }
 
+    #[allow(dead_code)]
     fn record_success(&mut self) {
         match self.state {
             CircuitState::HalfOpen => {
@@ -83,6 +88,7 @@ impl CircuitBreaker {
         }
     }
 
+    #[allow(dead_code)]
     fn record_failure(&mut self) {
         self.failure_count += 1;
         self.last_failure_time = Some(Instant::now());
@@ -100,11 +106,11 @@ pub async fn discovery_loop(state: Arc<AppState>) {
     let client = reqwest::Client::builder()
         .timeout(DISCOVERY_TIMEOUT)
         .build()
-        .unwrap_or_default();
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     let circuit_breaker = Arc::new(Mutex::new(CircuitBreaker::new()));
-    let mut backoff_delay = Duration::from_secs(1);
-    let max_backoff = Duration::from_secs(300); // 5 minutes max
+    let _backoff_delay = Duration::from_secs(1);
+    let _max_backoff = Duration::from_secs(300); // 5 minutes max
 
     loop {
         ticker.tick().await;

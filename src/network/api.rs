@@ -23,7 +23,7 @@ use tokio::sync::RwLock as TokioRwLock;
 use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction, ShieldedTransactionV2, Transaction};
 use crate::crypto::nullifier::Nullifier;
 use crate::faucet::{FaucetService, FaucetStatus, ClaimResult, FaucetStats, FaucetError};
-use crate::wallet::ShieldedWallet;
+use crate::wallet::wallet::ShieldedWallet;
 use tracing::{info, warn};
 
 use super::Mempool;

@@ -1,3 +1,5 @@
+pub mod role_validator;
+
 use serde::{Deserialize, Serialize};
 
 /// Defines the role a TSN node plays in the network.
