@@ -23,7 +23,7 @@ use tokio::sync::RwLock as TokioRwLock;
 use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction, ShieldedTransactionV2, Transaction};
 use crate::crypto::nullifier::Nullifier;
 use crate::faucet::{FaucetService, FaucetStatus, ClaimResult, FaucetStats, FaucetError};
-use crate::wallet::wallet::ShieldedWallet;
+use crate::wallet::ShieldedWallet;
 use tracing::{info, warn};
 
 use super::Mempool;
@@ -50,6 +50,8 @@ pub struct AppState {
     pub faucet: Option<TokioRwLock<FaucetService>>,
     /// Sync gate for anti-fork protection
     pub sync_gate: SyncGate,
+    /// Our own public URL (to avoid adding ourselves as peer)
+    pub public_url: Option<String>,
 }
 
 /// Create the API router with rate limiting and request size limits.

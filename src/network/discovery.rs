@@ -142,6 +142,8 @@ pub async fn discovery_loop(state: Arc<AppState>) {
             // Fetch their peer list for discovery
             match discover_peers(&client, peer).await {
                 Ok(new_peers) => {
+                    let our_port = crate::config::get_port();
+                    let public_url = state.public_url.as_deref().unwrap_or("");
                     let mut peers_guard = state.peers.write().unwrap();
                     for new_peer in new_peers {
                         // Avoid adding localhost/self and duplicates
@@ -151,7 +153,25 @@ pub async fn discovery_loop(state: Arc<AppState>) {
                         {
                             continue;
                         }
+                        // Skip our own public URL
                         let normalized = normalize_url(&new_peer);
+                        if !public_url.is_empty() && normalized == normalize_url(public_url) {
+                            debug!("Skipping self (public_url): {}", new_peer);
+                            continue;
+                        }
+                        // Skip if the peer URL contains our own port on our own IP
+                        // (catches cases where our IP was announced back to us)
+                        if let Some(ref pub_url) = state.public_url {
+                            let pub_norm = normalize_url(pub_url);
+                            if normalized == pub_norm {
+                                continue;
+                            }
+                        }
+                        // Also skip if peer matches our announced port on 0.0.0.0
+                        let self_announce = format!("://0.0.0.0:{}", our_port);
+                        if new_peer.contains(&self_announce) {
+                            continue;
+                        }
                         if !peers_guard.iter().any(|p| normalize_url(p) == normalized) {
                             info!("Discovered new peer: {}", new_peer);
                             peers_guard.push(new_peer);
