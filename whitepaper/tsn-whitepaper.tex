@@ -59,7 +59,7 @@
 \maketitle
 
 \begin{abstract}
-We present Postera v2, a cryptocurrency providing strong privacy guarantees that remain secure against both classical and quantum adversaries. Unlike previous versions that used quantum-vulnerable pairing-based proofs for privacy, Postera v2 achieves \textbf{full post-quantum security} by combining NIST-standardized signatures (ML-DSA-65, FIPS 204) with hash-based STARK proofs (Plonky2 over the Goldilocks field). This eliminates all reliance on elliptic curve discrete logarithm assumptions, providing complete protection against Shor's algorithm. The protocol maintains a note-based UTXO model similar to Zcash's Sapling but replaces all quantum-vulnerable components with lattice-based and hash-based alternatives. This paper describes the cryptographic foundations, V2 transaction model, migration path from V1, and security properties of the fully quantum-resistant Postera protocol.
+We present TSN v2, a cryptocurrency providing strong privacy guarantees that remain secure against both classical and quantum adversaries. Unlike previous versions that used quantum-vulnerable pairing-based proofs for privacy, TSN v2 achieves \textbf{full post-quantum security} by combining NIST-standardized signatures (ML-DSA-65, FIPS 204) with hash-based STARK proofs (Plonky3 over the Goldilocks field). This eliminates all reliance on elliptic curve discrete logarithm assumptions, providing complete protection against Shor's algorithm. The protocol maintains a note-based UTXO model similar to Zcash's Sapling but replaces all quantum-vulnerable components with lattice-based and hash-based alternatives. This paper describes the cryptographic foundations, V2 transaction model, migration path from V1, and security properties of the fully quantum-resistant TSN protocol.
 \end{abstract}
 
 \tableofcontents
@@ -79,11 +79,11 @@ The development of practical quantum computers poses an existential threat to cu
     \item \textbf{Pedersen commitments}: Used for hiding transaction amounts
 \end{itemize}
 
-While Postera v1 addressed signature security with ML-DSA-65, the privacy layer remained vulnerable due to its use of BN254-based Groth16 proofs and Pedersen commitments.
+While TSN v1 addressed signature security with ML-DSA-65, the privacy layer remained vulnerable due to its use of BN254-based Groth16 proofs and Pedersen commitments.
 
-\subsection{Postera v2: Full Quantum Resistance}
+\subsection{TSN v2: Full Quantum Resistance}
 
-Postera v2 eliminates all quantum-vulnerable components:
+TSN v2 eliminates all quantum-vulnerable components:
 
 \begin{table}[h]
 \centering
@@ -92,7 +92,7 @@ Postera v2 eliminates all quantum-vulnerable components:
 Component & V1 & V2 & Quantum Safe \\
 \midrule
 Signatures & ML-DSA-65 & ML-DSA-65 & \textcolor{quantumgreen}{\checkmark} \\
-ZK Proofs & Groth16/BN254 & Plonky2 STARKs & \textcolor{quantumgreen}{\checkmark} \\
+ZK Proofs & Groth16/BN254 & Plonky3 STARKs & \textcolor{quantumgreen}{\checkmark} \\
 Commitments & Pedersen/BN254 & Poseidon/Goldilocks & \textcolor{quantumgreen}{\checkmark} \\
 Merkle Tree & Poseidon/BN254 & Poseidon/Goldilocks & \textcolor{quantumgreen}{\checkmark} \\
 Binding Sig & Schnorr/BN254 & Included in STARK & \textcolor{quantumgreen}{\checkmark} \\
@@ -135,7 +135,7 @@ No adversary, even with quantum computing capabilities, can link the sender and 
 
 \subsection{Post-Quantum Digital Signatures: ML-DSA-65}
 
-Postera uses ML-DSA-65 (Module-Lattice Digital Signature Algorithm), standardized as FIPS 204 by NIST.
+TSN uses ML-DSA-65 (Module-Lattice Digital Signature Algorithm), standardized as FIPS 204 by NIST.
 
 \begin{table}[h]
 \centering
@@ -154,9 +154,9 @@ Signature Size & 3,309 bytes & Digital signature \\
 
 The security of ML-DSA relies on the hardness of Module-LWE and Module-SIS problems, which are believed hard for both classical and quantum computers.
 
-\subsection{Post-Quantum Zero-Knowledge Proofs: Plonky2 STARKs}
+\subsection{Post-Quantum Zero-Knowledge Proofs: Plonky3 STARKs}
 
-Postera v2 replaces Groth16 with Plonky2, a STARK-based proving system that relies only on hash function security.
+TSN v2 replaces Groth16 with Plonky3, a STARK-based proving system that relies only on hash function security.
 
 \begin{definition}[STARK]
 A Scalable Transparent ARgument of Knowledge is a proof system where:
@@ -167,7 +167,7 @@ A Scalable Transparent ARgument of Knowledge is a proof system where:
 \end{itemize}
 \end{definition}
 
-\subsubsection{Plonky2 Parameters}
+\subsubsection{Plonky3 Parameters}
 
 \begin{table}[h]
 \centering
@@ -182,10 +182,10 @@ Security Level & $\geq 100$ bits post-quantum \\
 Proof Size & $\approx 50$ KB \\
 \bottomrule
 \end{tabular}
-\caption{Plonky2 configuration in Postera v2}
+\caption{Plonky3 configuration in TSN v2}
 \end{table}
 
-\subsubsection{Why Plonky2?}
+\subsubsection{Why Plonky3?}
 
 \begin{enumerate}
     \item \textbf{Hash-based security}: No reliance on discrete log or pairings
@@ -206,7 +206,7 @@ H_{\text{Poseidon}}: \mathbb{F}_p^n \rightarrow \mathbb{F}_p^4
 
 where $p = 2^{64} - 2^{32} + 1$ (Goldilocks prime).
 
-The hash outputs 4 field elements (256 bits total), matching Plonky2's internal representation.
+The hash outputs 4 field elements (256 bits total), matching Plonky3's internal representation.
 
 \begin{table}[h]
 \centering
@@ -312,7 +312,7 @@ ShieldedTransactionV2 {
     }],
     fee: u64,
     transaction_proof: {
-        proof_bytes: Vec<u8>,  // Plonky2 STARK (~50KB)
+        proof_bytes: Vec<u8>,  // Plonky3 STARK (~50KB)
         public_inputs: {
             merkle_roots: [[u8; 32]],
             nullifiers: [[u8; 32]],
@@ -396,7 +396,7 @@ Users with V1 notes can migrate to V2:
 \subsection{Full Post-Quantum Security}
 
 \begin{theorem}[V2 Quantum Resistance]
-Postera V2 transactions are secure against adversaries with access to cryptographically-relevant quantum computers.
+TSN V2 transactions are secure against adversaries with access to cryptographically-relevant quantum computers.
 \end{theorem}
 
 \begin{proof}
@@ -404,7 +404,7 @@ V2 relies only on:
 \begin{enumerate}
     \item \textbf{ML-DSA-65}: Based on Module-LWE/SIS, no known quantum speedup beyond Grover's $O(\sqrt{N})$
     \item \textbf{Poseidon hash}: Collision resistance reduced to $2^{128}$ operations with Grover
-    \item \textbf{Plonky2 STARKs}: Security reduces to hash collision resistance
+    \item \textbf{Plonky3 STARKs}: Security reduces to hash collision resistance
 \end{enumerate}
 No component relies on discrete log or factoring, which Shor's algorithm breaks.
 \end{proof}
@@ -457,7 +457,7 @@ Circuit warmup (5$\times$2) & N/A & 30s & One-time \\
 \caption{Performance comparison}
 \end{table}
 
-The larger proof size is an acceptable trade-off for quantum resistance. Proof generation is actually \textit{faster} in V2 due to Plonky2's optimized WASM implementation.
+The larger proof size is an acceptable trade-off for quantum resistance. Proof generation is actually \textit{faster} in V2 due to Plonky3's optimized WASM implementation.
 
 %==============================================================================
 \section{Implementation}
@@ -465,7 +465,7 @@ The larger proof size is an acceptable trade-off for quantum resistance. Proof g
 
 \subsection{Browser-Based WASM Prover}
 
-The Plonky2 prover is compiled to WebAssembly for client-side execution:
+The Plonky3 prover is compiled to WebAssembly for client-side execution:
 
 \begin{lstlisting}
 // TypeScript interface
@@ -484,7 +484,7 @@ Key features:
 
 \subsection{Server-Side Verification}
 
-Proof verification uses native Rust Plonky2:
+Proof verification uses native Rust Plonky3:
 
 \begin{lstlisting}
 let circuit = CircuitCache::get_or_build(n_spends, n_outputs);
@@ -508,11 +508,11 @@ The circuit cache uses thread-safe \texttt{Arc<RwLock>} for concurrent access.
 \section{Conclusion}
 %==============================================================================
 
-Postera v2 achieves \textbf{complete post-quantum security} for private cryptocurrency transactions. By replacing all elliptic curve-based components with hash-based alternatives:
+TSN v2 achieves \textbf{complete post-quantum security} for private cryptocurrency transactions. By replacing all elliptic curve-based components with hash-based alternatives:
 
 \begin{itemize}
     \item \textbf{Signatures}: ML-DSA-65 (lattice-based, NIST standardized)
-    \item \textbf{ZK Proofs}: Plonky2 STARKs (hash-based, no trusted setup)
+    \item \textbf{ZK Proofs}: Plonky3 STARKs (hash-based, no trusted setup)
     \item \textbf{Commitments}: Poseidon/Goldilocks (hash-based)
 \end{itemize}
 
@@ -522,7 +522,7 @@ Users can transact privately today with confidence that their transactions will 
 \section*{Acknowledgments}
 %==============================================================================
 
-We thank the developers of Plonky2 (Polygon Zero), the NIST PQC standardization team, and the Zcash protocol designers whose work inspired Postera's privacy model.
+We thank the developers of Plonky3 (Polygon Labs), the NIST PQC standardization team, and the Zcash protocol designers whose work inspired TSN's privacy model.
 
 %==============================================================================
 \begin{thebibliography}{99}
@@ -533,9 +533,9 @@ National Institute of Standards and Technology.
 2024.
 
 \bibitem{plonky2}
-Polygon Zero Team.
-\textit{Plonky2: Fast Recursive Arguments with PLONK and FRI}.
-2022.
+Polygon Labs Team.
+\textit{Plonky3: A Toolkit for Succinct Proof Systems}.
+2024.
 
 \bibitem{stark}
 Ben-Sasson, E., Bentov, I., Horesh, Y., Riabzev, M.
