@@ -115,12 +115,26 @@ Merkle Node     = Poseidon(domain=5, left, right)
 
 ## Node Types
 
-| Type | Role | Reward |
-|------|------|--------|
-| **Miner** | Produces blocks, earns block reward | 85% of block reward |
-| **Relay/Seed** | Stores chain, relays blocks & transactions | 8% relay pool |
-| **Prover** | Generates ZK proofs on demand | Proving fees |
-| **Light Client** | Wallet-only, verifies via proofs | — |
+TSN supports 4 distinct node roles, selectable via `--role` at startup:
+
+### Miner Node (`--role miner`)
+Full node that validates, stores the entire blockchain, relays transactions/blocks, **and mines new blocks**. Miners must register a [Mining Identity Key (MIK)](#mining-identity-key-mik) before participating. They earn **85% of the block reward** (42.5 TSN per block). This is the default role.
+
+### Relay Node (`--role relay`)
+Full node that stores the complete chain and relays blocks/transactions to peers, but **does not mine**. Relays are the backbone of the network — they ensure fast block propagation via gossip protocol and serve snapshots to new nodes joining via fast-sync. They earn from the **8% relay reward pool** distributed proportionally to uptime and bandwidth contributed.
+
+### Prover Node (`--role prover`)
+Specialized node that generates **Plonky3 zero-knowledge proofs** on demand for wallets and light clients that lack the computational power to prove transactions locally. Provers expose a `/prover/prove` endpoint and earn **proving fees** paid by users per transaction. Ideal for GPU-equipped servers.
+
+### Light Client (`--role light`)
+Minimal node that **does not store the full chain** — it syncs only block headers and verifies transactions using ZK proofs. Designed for mobile wallets and resource-constrained devices. Light clients connect to relay/miner nodes to submit transactions and fetch Merkle witnesses.
+
+| Type | Stores Full Chain | Mines | Relays | Proves | Reward |
+|------|:-:|:-:|:-:|:-:|--------|
+| **Miner** | ✅ | ✅ | ✅ | ✅ | 85% block reward |
+| **Relay** | ✅ | — | ✅ | — | 8% relay pool |
+| **Prover** | ✅ | — | ✅ | ✅ | Proving fees |
+| **Light Client** | — | — | — | — | — |
 
 ## Network
 
