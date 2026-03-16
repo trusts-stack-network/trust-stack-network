@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::{ShieldedState, ShieldedTransaction, Transaction};
+use crate::contract::{ContractDeployTransaction, ContractCallTransaction};
 
 /// The mempool holds pending shielded transactions waiting to be mined.
 #[derive(Debug, Default)]
@@ -13,6 +14,10 @@ pub struct Mempool {
     v1_transactions: HashMap<[u8; 32], ShieldedTransaction>,
     /// Pending V2/Migration transactions by hash.
     v2_transactions: HashMap<[u8; 32], Transaction>,
+    /// Pending contract deploy transactions by hash.
+    contract_deploys: HashMap<[u8; 32], ContractDeployTransaction>,
+    /// Pending contract call transactions by hash.
+    contract_calls: HashMap<[u8; 32], ContractCallTransaction>,
     /// Pending nullifiers (to detect double-spends before confirmation).
     pending_nullifiers: HashSet<[u8; 32]>,
 }
@@ -22,6 +27,8 @@ impl Mempool {
         Self {
             v1_transactions: HashMap::new(),
             v2_transactions: HashMap::new(),
+            contract_deploys: HashMap::new(),
+            contract_calls: HashMap::new(),
             pending_nullifiers: HashSet::new(),
         }
     }
@@ -153,11 +160,13 @@ impl Mempool {
     /// Number of transactions in the mempool.
     pub fn len(&self) -> usize {
         self.v1_transactions.len() + self.v2_transactions.len()
+            + self.contract_deploys.len() + self.contract_calls.len()
     }
 
     /// Check if the mempool is empty.
     pub fn is_empty(&self) -> bool {
         self.v1_transactions.is_empty() && self.v2_transactions.is_empty()
+            && self.contract_deploys.is_empty() && self.contract_calls.is_empty()
     }
 
     /// Remove transactions that are now in a block.
@@ -165,6 +174,7 @@ impl Mempool {
         for hash in tx_hashes {
             self.remove(hash);
             self.remove_v2(hash);
+            self.remove_contract_tx(hash);
         }
     }
 
@@ -199,10 +209,54 @@ impl Mempool {
         }
     }
 
+    /// Add a contract deploy transaction.
+    pub fn add_contract_deploy(&mut self, tx: ContractDeployTransaction) -> bool {
+        let hash = tx.hash();
+        if self.contract_deploys.contains_key(&hash) {
+            return false;
+        }
+        self.contract_deploys.insert(hash, tx);
+        true
+    }
+
+    /// Add a contract call transaction.
+    pub fn add_contract_call(&mut self, tx: ContractCallTransaction) -> bool {
+        let hash = tx.hash();
+        if self.contract_calls.contains_key(&hash) {
+            return false;
+        }
+        self.contract_calls.insert(hash, tx);
+        true
+    }
+
+    /// Get pending contract deploy transactions sorted by fee (highest first).
+    pub fn get_contract_deploys(&self, limit: usize) -> Vec<ContractDeployTransaction> {
+        let mut txs: Vec<_> = self.contract_deploys.values().cloned().collect();
+        txs.sort_by(|a, b| b.fee.cmp(&a.fee));
+        txs.truncate(limit);
+        txs
+    }
+
+    /// Get pending contract call transactions sorted by fee (highest first).
+    pub fn get_contract_calls(&self, limit: usize) -> Vec<ContractCallTransaction> {
+        let mut txs: Vec<_> = self.contract_calls.values().cloned().collect();
+        txs.sort_by(|a, b| b.fee.cmp(&a.fee));
+        txs.truncate(limit);
+        txs
+    }
+
+    /// Remove a confirmed contract transaction by hash.
+    pub fn remove_contract_tx(&mut self, hash: &[u8; 32]) {
+        self.contract_deploys.remove(hash);
+        self.contract_calls.remove(hash);
+    }
+
     /// Clear all transactions.
     pub fn clear(&mut self) {
         self.v1_transactions.clear();
         self.v2_transactions.clear();
+        self.contract_deploys.clear();
+        self.contract_calls.clear();
         self.pending_nullifiers.clear();
     }
 
@@ -241,6 +295,8 @@ impl Mempool {
     pub fn get_hashes(&self) -> Vec<[u8; 32]> {
         let mut hashes: Vec<_> = self.v1_transactions.keys().cloned().collect();
         hashes.extend(self.v2_transactions.keys().cloned());
+        hashes.extend(self.contract_deploys.keys().cloned());
+        hashes.extend(self.contract_calls.keys().cloned());
         hashes
     }
 
@@ -248,7 +304,9 @@ impl Mempool {
     pub fn total_fees(&self) -> u64 {
         let v1_fees: u64 = self.v1_transactions.values().map(|tx| tx.fee).sum();
         let v2_fees: u64 = self.v2_transactions.values().map(|tx| tx.fee()).sum();
-        v1_fees + v2_fees
+        let deploy_fees: u64 = self.contract_deploys.values().map(|tx| tx.fee).sum();
+        let call_fees: u64 = self.contract_calls.values().map(|tx| tx.fee).sum();
+        v1_fees + v2_fees + deploy_fees + call_fees
     }
 
     /// Get the pending nullifiers set (for conflict checking).

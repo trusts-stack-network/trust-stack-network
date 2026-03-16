@@ -235,6 +235,12 @@ impl Database {
         }
     }
 
+    /// Get a reference to the underlying Sled database.
+    /// Used by subsystems like ContractExecutor that need their own trees.
+    pub fn sled_db(&self) -> &sled::Db {
+        &self.db
+    }
+
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), DatabaseError> {
         self.db.flush()?;

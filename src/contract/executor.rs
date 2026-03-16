@@ -1,7 +1,6 @@
 //! Contract executor — deploys and calls contracts using the zkVM.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use crate::vm::{Vm, ExecContext, ExecResult, CONTRACT_MAX_SIZE};
 use super::types::*;
 use super::storage::{ContractRegistry, ContractStorage, EventStore};
@@ -122,7 +121,7 @@ impl ContractExecutor {
             .map_err(|e| ContractError::StorageError(e.to_string()))?;
 
         // Store events
-        let event_logs: Vec<ContractEventLog> = result.events.iter().enumerate().map(|(i, ev)| {
+        let event_logs: Vec<ContractEventLog> = result.events.iter().map(|ev| {
             ContractEventLog {
                 contract_address: contract_addr,
                 height: block_height,

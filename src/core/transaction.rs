@@ -786,7 +786,7 @@ impl MigrationTransaction {
     }
 }
 
-/// Enum for all transaction types (V1, V2, Migration).
+/// Enum for all transaction types (V1, V2, Migration, Contracts).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Transaction {
@@ -798,6 +798,12 @@ pub enum Transaction {
 
     /// Migration transaction (V1 inputs -> V2 outputs).
     Migration(MigrationTransaction),
+
+    /// Smart contract deployment.
+    ContractDeploy(crate::contract::ContractDeployTransaction),
+
+    /// Smart contract call.
+    ContractCall(crate::contract::ContractCallTransaction),
 }
 
 impl Transaction {
@@ -807,6 +813,8 @@ impl Transaction {
             Transaction::V1(tx) => tx.hash(),
             Transaction::V2(tx) => tx.hash(),
             Transaction::Migration(tx) => tx.hash(),
+            Transaction::ContractDeploy(tx) => tx.hash(),
+            Transaction::ContractCall(tx) => tx.hash(),
         }
     }
 
@@ -816,6 +824,8 @@ impl Transaction {
             Transaction::V1(tx) => tx.fee,
             Transaction::V2(tx) => tx.fee,
             Transaction::Migration(tx) => tx.fee,
+            Transaction::ContractDeploy(tx) => tx.fee,
+            Transaction::ContractCall(tx) => tx.fee,
         }
     }
 
@@ -829,12 +839,19 @@ impl Transaction {
         matches!(self, Transaction::Migration(_))
     }
 
+    /// Check if this is a smart contract transaction.
+    pub fn is_contract(&self) -> bool {
+        matches!(self, Transaction::ContractDeploy(_) | Transaction::ContractCall(_))
+    }
+
     /// Get all nullifiers as raw bytes.
     pub fn nullifiers(&self) -> Vec<[u8; 32]> {
         match self {
             Transaction::V1(tx) => tx.nullifiers().iter().map(|n| n.0).collect(),
             Transaction::V2(tx) => tx.nullifiers(),
             Transaction::Migration(tx) => tx.legacy_nullifiers().iter().map(|n| n.0).collect(),
+            // Contract transactions don't have nullifiers
+            Transaction::ContractDeploy(_) | Transaction::ContractCall(_) => vec![],
         }
     }
 
@@ -844,6 +861,8 @@ impl Transaction {
             Transaction::V1(tx) => tx.anchors().iter().map(|a| **a).collect(),
             Transaction::V2(tx) => tx.spends.iter().map(|s| s.anchor).collect(),
             Transaction::Migration(tx) => tx.legacy_spends.iter().map(|s| s.anchor).collect(),
+            // Contract transactions don't use anchors
+            Transaction::ContractDeploy(_) | Transaction::ContractCall(_) => vec![],
         }
     }
 }

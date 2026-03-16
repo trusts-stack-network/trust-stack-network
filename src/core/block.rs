@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::transaction::{CoinbaseTransaction, ShieldedTransaction, ShieldedTransactionV2};
 use crate::consensus::poseidon_pow;
+use crate::contract::{ContractDeployTransaction, ContractCallTransaction, ContractReceipt};
 
 pub const BLOCK_HASH_SIZE: usize = 32;
 
@@ -161,6 +162,15 @@ pub struct ShieldedBlock {
     pub header: BlockHeader,
     pub transactions: Vec<ShieldedTransaction>,
     pub transactions_v2: Vec<ShieldedTransactionV2>,
+    /// Smart contract deployment transactions.
+    #[serde(default)]
+    pub contract_deploys: Vec<ContractDeployTransaction>,
+    /// Smart contract call transactions.
+    #[serde(default)]
+    pub contract_calls: Vec<ContractCallTransaction>,
+    /// Contract execution receipts (one per contract tx, in order: deploys then calls).
+    #[serde(default)]
+    pub contract_receipts: Vec<ContractReceipt>,
     pub coinbase: CoinbaseTransaction,
 }
 
@@ -197,6 +207,9 @@ impl ShieldedBlock {
             header,
             transactions,
             transactions_v2: Vec::new(),
+            contract_deploys: Vec::new(),
+            contract_calls: Vec::new(),
+            contract_receipts: Vec::new(),
             coinbase,
         }
     }
@@ -235,6 +248,9 @@ impl ShieldedBlock {
             header,
             transactions,
             transactions_v2,
+            contract_deploys: Vec::new(),
+            contract_calls: Vec::new(),
+            contract_receipts: Vec::new(),
             coinbase,
         }
     }
@@ -278,6 +294,9 @@ impl ShieldedBlock {
             header,
             transactions: Vec::new(),
             transactions_v2: Vec::new(),
+            contract_deploys: Vec::new(),
+            contract_calls: Vec::new(),
+            contract_receipts: Vec::new(),
             coinbase,
         }
     }
@@ -287,6 +306,8 @@ impl ShieldedBlock {
         // Verify merkle root
         let mut tx_hashes: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.hash()).collect();
         tx_hashes.extend(self.transactions_v2.iter().map(|tx| tx.hash()));
+        tx_hashes.extend(self.contract_deploys.iter().map(|tx| tx.hash()));
+        tx_hashes.extend(self.contract_calls.iter().map(|tx| tx.hash()));
         tx_hashes.push(self.coinbase.hash());
         let computed_root = compute_merkle_root(&tx_hashes);
         if computed_root != self.header.merkle_root {
@@ -305,7 +326,9 @@ impl ShieldedBlock {
     pub fn total_fees(&self) -> u64 {
         let v1_fees: u64 = self.transactions.iter().map(|tx| tx.fee).sum();
         let v2_fees: u64 = self.transactions_v2.iter().map(|tx| tx.fee).sum();
-        v1_fees + v2_fees
+        let deploy_fees: u64 = self.contract_deploys.iter().map(|tx| tx.fee).sum();
+        let call_fees: u64 = self.contract_calls.iter().map(|tx| tx.fee).sum();
+        v1_fees + v2_fees + deploy_fees + call_fees
     }
 
     /// Get all nullifiers introduced by this block.
@@ -354,6 +377,7 @@ impl ShieldedBlock {
     /// Get the number of transactions (excluding coinbase).
     pub fn transaction_count(&self) -> usize {
         self.transactions.len() + self.transactions_v2.len()
+            + self.contract_deploys.len() + self.contract_calls.len()
     }
 
     /// Get the block height from coinbase.

@@ -121,7 +121,7 @@ pub fn build_token_bytecode() -> Vec<u8> {
     // Store to in mem[0], amount in mem[1]
     // Actually let's restart the transfer function more cleanly:
     // (We overwrite the complex stack stuff above)
-    let transfer_offset_actual = bc.len() - (bc.len() - transfer_offset as usize); // keep the Pop
+    let _transfer_offset_actual = bc.len() - (bc.len() - transfer_offset as usize); // keep the Pop
     // We already have Pop. Stack: [to, amount]
     // Store amount in mem[1]
     bc.push(OpCode::Push as u8);

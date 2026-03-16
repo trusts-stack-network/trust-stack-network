@@ -130,6 +130,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Fast sync: download state snapshot to skip block replay
         .route("/snapshot/info", get(snapshot_info))
         .route("/snapshot/download", get(snapshot_download))
+        // Smart contract endpoints
+        .route("/contract/deploy", post(contract_deploy))
+        .route("/contract/call", post(contract_call))
+        .route("/contract/query", post(contract_query))
+        .route("/contract/:address", get(contract_info))
+        .route("/contract/:address/events", get(contract_events))
         .with_state(state)
         // Apply rate limiting (returns 429 Too Many Requests when exceeded)
         .layer(rate_limit_layer)
@@ -508,6 +514,8 @@ async fn get_recent_transactions(
                 TxEnum::V1(v1) => (v1.fee, v1.spends.len(), v1.outputs.len()),
                 TxEnum::V2(v2) => (v2.fee, v2.spends.len(), v2.outputs.len()),
                 TxEnum::Migration(m) => (m.fee, m.legacy_spends.len(), m.pq_outputs.len()),
+                TxEnum::ContractDeploy(d) => (d.fee, 0, 0),
+                TxEnum::ContractCall(c) => (c.fee, 0, 0),
             };
             transactions.push(TransactionResponse {
                 hash: hex::encode(tx.hash()),
@@ -1990,4 +1998,303 @@ async fn wallet_watch(
             })),
         )),
     }
+}
+
+// ============================================================================
+// Smart Contract Endpoints
+// ============================================================================
+
+/// Request body for deploying a contract.
+#[derive(Deserialize)]
+struct ContractDeployRequest {
+    /// Hex-encoded bytecode
+    bytecode: String,
+    /// Constructor arguments
+    #[serde(default)]
+    constructor_args: Vec<u64>,
+    /// Gas limit
+    gas_limit: u64,
+    /// Fee
+    fee: u64,
+    /// Deployer's public key hash (hex)
+    deployer_pk_hash: String,
+    /// Deployer nonce
+    nonce: u64,
+    /// Hex-encoded ML-DSA-65 signature
+    #[serde(default)]
+    signature: String,
+    /// Hex-encoded public key
+    #[serde(default)]
+    public_key: String,
+}
+
+/// Request body for calling a contract.
+#[derive(Deserialize)]
+struct ContractCallRequest {
+    /// Contract address (hex)
+    contract_address: String,
+    /// Function selector (hex, 4 bytes)
+    function_selector: String,
+    /// Call arguments
+    #[serde(default)]
+    args: Vec<u64>,
+    /// Gas limit
+    gas_limit: u64,
+    /// Fee
+    fee: u64,
+    /// Value to send
+    #[serde(default)]
+    value: u64,
+    /// Caller's public key hash (hex)
+    caller_pk_hash: String,
+    /// Caller nonce
+    nonce: u64,
+    /// Hex-encoded signature
+    #[serde(default)]
+    signature: String,
+    /// Hex-encoded public key
+    #[serde(default)]
+    public_key: String,
+}
+
+/// Request body for querying a contract (read-only).
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct ContractQueryRequest {
+    /// Contract address (hex)
+    contract_address: String,
+    /// Function selector (hex, 4 bytes)
+    function_selector: String,
+    /// Call arguments
+    #[serde(default)]
+    args: Vec<u64>,
+}
+
+/// Response for contract operations.
+#[derive(Serialize)]
+struct ContractResponse {
+    success: bool,
+    tx_hash: Option<String>,
+    gas_used: Option<u64>,
+    return_value: Option<u64>,
+    contract_address: Option<String>,
+    error: Option<String>,
+    events: Vec<ContractEventResponse>,
+}
+
+/// Contract event in response.
+#[derive(Serialize)]
+struct ContractEventResponse {
+    topic: u64,
+    data: Vec<u64>,
+}
+
+/// Contract info response.
+#[derive(Serialize)]
+struct ContractInfoResponse {
+    address: String,
+    code_hash: String,
+    creator: String,
+    created_at_height: u64,
+    balance: u64,
+    bytecode_size: usize,
+}
+
+fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {}", e))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32 bytes, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+fn parse_hex_4(s: &str) -> Result<[u8; 4], String> {
+    let bytes = hex::decode(s).map_err(|e| format!("invalid hex: {}", e))?;
+    if bytes.len() != 4 {
+        return Err(format!("expected 4 bytes, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+/// Deploy a new smart contract.
+async fn contract_deploy(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ContractDeployRequest>,
+) -> Result<Json<ContractResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let bytecode = hex::decode(&req.bytecode).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid bytecode hex: {}", e)})))
+    })?;
+
+    let deployer_pk_hash = parse_hex_32(&req.deployer_pk_hash).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+    })?;
+
+    let signature = hex::decode(&req.signature).unwrap_or_default();
+    let public_key = hex::decode(&req.public_key).unwrap_or_default();
+
+    let deploy_tx = crate::contract::ContractDeployTransaction {
+        bytecode,
+        constructor_args: req.constructor_args,
+        gas_limit: req.gas_limit,
+        fee: req.fee,
+        deployer_pk_hash,
+        nonce: req.nonce,
+        signature,
+        public_key,
+    };
+
+    // Add to mempool
+    let mut mempool = state.mempool.write().unwrap();
+    mempool.add_contract_deploy(deploy_tx.clone());
+    drop(mempool);
+
+    // Execute immediately for the response (preview)
+    let chain = state.blockchain.read().unwrap();
+    let height = chain.height();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    drop(chain);
+
+    // Create a temporary executor for preview
+    let tmp_db = sled::Config::new().temporary(true).open().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("db error: {}", e)})))
+    })?;
+    let executor = crate::contract::ContractExecutor::new(&tmp_db).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("executor error: {}", e)})))
+    })?;
+
+    match executor.deploy(&deploy_tx, height, timestamp) {
+        Ok(receipt) => Ok(Json(ContractResponse {
+            success: receipt.success,
+            tx_hash: Some(hex::encode(receipt.tx_hash)),
+            gas_used: Some(receipt.gas_used),
+            return_value: receipt.return_value,
+            contract_address: receipt.contract_address.map(|a| hex::encode(a)),
+            error: receipt.error,
+            events: receipt.events.iter().map(|e| ContractEventResponse {
+                topic: e.topic,
+                data: e.data.clone(),
+            }).collect(),
+        })),
+        Err(e) => Ok(Json(ContractResponse {
+            success: false,
+            tx_hash: Some(hex::encode(deploy_tx.hash())),
+            gas_used: None,
+            return_value: None,
+            contract_address: None,
+            error: Some(e.to_string()),
+            events: vec![],
+        })),
+    }
+}
+
+/// Call a deployed smart contract.
+async fn contract_call(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ContractCallRequest>,
+) -> Result<Json<ContractResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let contract_address = parse_hex_32(&req.contract_address).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+    })?;
+    let function_selector = parse_hex_4(&req.function_selector).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+    })?;
+    let caller_pk_hash = parse_hex_32(&req.caller_pk_hash).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+    })?;
+
+    let signature = hex::decode(&req.signature).unwrap_or_default();
+    let public_key = hex::decode(&req.public_key).unwrap_or_default();
+
+    let call_tx = crate::contract::ContractCallTransaction {
+        contract_address,
+        function_selector,
+        args: req.args,
+        gas_limit: req.gas_limit,
+        fee: req.fee,
+        value: req.value,
+        caller_pk_hash,
+        nonce: req.nonce,
+        signature,
+        public_key,
+    };
+
+    // Add to mempool
+    let mut mempool = state.mempool.write().unwrap();
+    mempool.add_contract_call(call_tx.clone());
+    drop(mempool);
+
+    Ok(Json(ContractResponse {
+        success: true,
+        tx_hash: Some(hex::encode(call_tx.hash())),
+        gas_used: None,
+        return_value: None,
+        contract_address: None,
+        error: None,
+        events: vec![],
+    }))
+}
+
+/// Query a contract (read-only, no state changes, no fee).
+async fn contract_query(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ContractQueryRequest>,
+) -> Result<Json<ContractResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let contract_address = parse_hex_32(&req.contract_address).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+    })?;
+    let _function_selector = parse_hex_4(&req.function_selector).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+    })?;
+
+    let _chain = state.blockchain.read().unwrap();
+    let _height = _chain.height();
+    drop(_chain);
+
+    // For queries, we'd need access to the contract executor with the real DB.
+    // For now, return a placeholder indicating query support is available.
+    Ok(Json(ContractResponse {
+        success: true,
+        tx_hash: None,
+        gas_used: None,
+        return_value: None,
+        contract_address: Some(hex::encode(contract_address)),
+        error: Some("Query requires node-local contract executor (coming in v0.5.1)".into()),
+        events: vec![],
+    }))
+}
+
+/// Get contract info by address.
+async fn contract_info(
+    State(_state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Result<Json<ContractInfoResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let _addr = parse_hex_32(&address).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+    })?;
+
+    // Contract registry lookup will be available when executor is integrated into AppState
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "Contract registry not yet available at this endpoint"})),
+    ))
+}
+
+/// Get events for a contract.
+async fn contract_events(
+    State(_state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Result<Json<Vec<ContractEventResponse>>, (StatusCode, Json<serde_json::Value>)> {
+    let _addr = parse_hex_32(&address).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
+    })?;
+
+    // Event store lookup will be available when executor is integrated into AppState
+    Ok(Json(vec![]))
 }

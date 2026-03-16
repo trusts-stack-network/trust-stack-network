@@ -611,6 +611,8 @@ impl ShieldedState {
             Transaction::Migration(mig_tx) => {
                 self.validate_migration_transaction(mig_tx, verifying_params)
             }
+            // Contract transactions are validated by the ContractExecutor, not here
+            Transaction::ContractDeploy(_) | Transaction::ContractCall(_) => Ok(()),
         }
     }
 
@@ -620,6 +622,8 @@ impl ShieldedState {
             Transaction::V1(v1_tx) => self.apply_transaction(v1_tx),
             Transaction::V2(v2_tx) => self.apply_transaction_v2(v2_tx),
             Transaction::Migration(mig_tx) => self.apply_migration_transaction(mig_tx),
+            // Contract transactions don't modify the shielded state
+            Transaction::ContractDeploy(_) | Transaction::ContractCall(_) => {},
         }
     }
 
