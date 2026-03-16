@@ -24,6 +24,7 @@
   <a href="https://tsnchain.com/docs.html">Docs</a> &bull;
   <a href="https://tsnchain.com/blog.html">Blog</a> &bull;
   <a href="https://explorer.tsnchain.com">Explorer</a> &bull;
+  <a href="https://discord.gg/wxxNVDVn6N">Discord</a> &bull;
   <a href="https://tsnchain.com/network-simulation.html">Network Simulation</a>
 </p>
 
@@ -161,35 +162,44 @@ The private testnet is live with **5 nodes** across Europe:
 | seed-3 | `seed3.tsnchain.com:9333` |
 | seed-4 | `seed4.tsnchain.com:9333` |
 
-### Synchronization & Anti-Fork
+## Synchronization & Anti-Fork System
 
-TSN v0.4.0 introduces a **fast-sync protocol** allowing new nodes to join the network in minutes:
+TSN implements a robust synchronization protocol designed for fast onboarding of new nodes and resilience against chain forks:
 
-1. New node downloads a **gzip-compressed state snapshot** from any peer (`/snapshot/download`)
-2. Loads the V2 Merkle tree directly into memory — no full chain replay needed
-3. Syncs only the missing blocks since the snapshot height
-4. Ready to mine in **under 5 minutes** (vs. 2+ hours full replay)
+### Fast-Sync Protocol (v0.4.0)
 
-**Anti-fork protections:**
+New nodes can join the network in **minutes instead of hours** by downloading a compressed state snapshot from any peer:
+
+```
+┌─────────────┐     GET /snapshot/info      ┌─────────────┐
+│  New Node   │ ──────────────────────────>  │  Seed Node  │
+│             │     GET /snapshot/download   │             │
+│  --fast-sync│ <────────────────────────── │  (gzip)     │
+│             │                              │             │
+│  Load state │     GET /blocks?from=N       │             │
+│  Sync rest  │ ──────────────────────────>  │             │
+└─────────────┘                              └─────────────┘
+```
+
+1. New node requests a **gzip-compressed state snapshot** from a peer
+2. Loads the snapshot directly into memory (V2 Goldilocks Merkle tree)
+3. Syncs only the **missing blocks** since the snapshot height
+4. Ready to mine in under 5 minutes (vs. 2+ hours full replay)
+
+### Heaviest Chain Fork Choice
+
+TSN uses **cumulative proof-of-work** (sum of all block difficulties) to select the canonical chain — not simply the longest chain. This prevents low-difficulty spam attacks and mirrors Bitcoin Core's proven approach.
+
+### Anti-Fork Protections
 
 | Protection | Description |
 |------------|-------------|
-| **Heaviest chain rule** | Fork choice based on cumulative proof-of-work (sum of difficulties), not longest chain |
-| **MAX_REORG_DEPTH = 100** | No reorg deeper than 100 blocks, regardless of cumulative work |
-| **Checkpoint finality** | Every 100 blocks — no reorg beyond the latest checkpoint |
+| **Heaviest chain rule** | Fork choice based on cumulative work, not height |
+| **MAX_REORG_DEPTH = 100** | Hard limit — no reorg deeper than 100 blocks regardless of work |
+| **Checkpoint finality** | Every 100 blocks, a checkpoint is created — no reorg beyond it |
 | **Anti-Fork Sync Gate** | Miners must be within 2 blocks of network tip to submit blocks |
-| **Genesis hash verification** | All nodes verify genesis block hash at startup |
-
-## Network Simulation
-
-<p align="center">
-  <img src="tsn-network-simulation.gif" alt="TSN Network Simulation — 100 nodes" width="800">
-</p>
-
-<p align="center">
-  <em>Live simulation of the TSN multi-role network: 100 nodes — Miners, Relays, Provers &amp; Light Clients</em><br>
-  <a href="https://tsnchain.com/network-simulation.html">Try the interactive version</a>
-</p>
+| **Genesis hash verification** | All nodes verify the genesis block hash at startup |
+| **Dual Merkle trees** | V1 (BN254) + V2 (Goldilocks) trees for state integrity |
 
 ## API Overview
 
