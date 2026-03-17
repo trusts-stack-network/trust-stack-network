@@ -21,6 +21,7 @@ pub const DOMAIN_VALUE_COMMITMENT_HASH: u64 = 2;
 pub const DOMAIN_NULLIFIER: u64 = 3;
 pub const DOMAIN_MERKLE_EMPTY: u64 = 4;
 pub const DOMAIN_MERKLE_NODE: u64 = 5;
+pub const DOMAIN_GOVERNANCE: u64 = 6;
 
 /// Hash multiple field elements using Poseidon with domain separation.
 ///
@@ -72,6 +73,84 @@ pub fn field_to_bytes32(fe: &Fr) -> [u8; 32] {
     let fe_bytes = bigint.to_bytes_le();
     bytes[..fe_bytes.len().min(32)].copy_from_slice(&fe_bytes[..fe_bytes.len().min(32)]);
     bytes
+}
+
+// ============================================================================
+// Unified PoseidonHash interface for governance and treasury operations
+// ============================================================================
+
+/// High-level Poseidon hash interface for governance and treasury operations.
+///
+/// Provides a simplified static interface that automatically handles domain
+/// separation and data conversion for common treasury/governance hashing needs.
+pub struct PoseidonHash;
+
+impl PoseidonHash {
+    /// Hash arbitrary bytes using Poseidon with governance domain.
+    ///
+    /// This is the primary interface used by the governance system for:
+    /// - Proposal ID generation
+    /// - Commitment calculations
+    /// - Treasury state transitions
+    ///
+    /// # Arguments
+    /// * `data` - Raw bytes to hash
+    ///
+    /// # Returns
+    /// 32-byte hash output suitable for use as identifiers or commitments
+    pub fn hash(data: &[u8]) -> [u8; 32] {
+        // Convert raw bytes to field elements for Poseidon input
+        // We need to chunk the data into 31-byte pieces to fit safely in Fr
+        let chunks: Vec<Fr> = data
+            .chunks(31)
+            .map(|chunk| {
+                let mut padded = [0u8; 32];
+                padded[..chunk.len()].copy_from_slice(chunk);
+                bytes32_to_field(&padded)
+            })
+            .collect();
+
+        // Handle empty input case
+        if chunks.is_empty() {
+            let zero = Fr::from(0u64);
+            let hash_fe = poseidon_hash(DOMAIN_GOVERNANCE, &[zero]);
+            return field_to_bytes32(&hash_fe);
+        }
+
+        // Hash the chunks with governance domain
+        let hash_fe = poseidon_hash(DOMAIN_GOVERNANCE, &chunks);
+        field_to_bytes32(&hash_fe)
+    }
+
+    /// Hash arbitrary bytes with custom domain separation.
+    ///
+    /// For specialized use cases that need specific domain separation.
+    ///
+    /// # Arguments
+    /// * `domain` - Domain separation constant
+    /// * `data` - Raw bytes to hash
+    ///
+    /// # Returns
+    /// 32-byte hash output
+    pub fn hash_with_domain(domain: u64, data: &[u8]) -> [u8; 32] {
+        let chunks: Vec<Fr> = data
+            .chunks(31)
+            .map(|chunk| {
+                let mut padded = [0u8; 32];
+                padded[..chunk.len()].copy_from_slice(chunk);
+                bytes32_to_field(&padded)
+            })
+            .collect();
+
+        if chunks.is_empty() {
+            let zero = Fr::from(0u64);
+            let hash_fe = poseidon_hash(domain, &[zero]);
+            return field_to_bytes32(&hash_fe);
+        }
+
+        let hash_fe = poseidon_hash(domain, &chunks);
+        field_to_bytes32(&hash_fe)
+    }
 }
 
 // ============================================================================
@@ -271,5 +350,94 @@ mod tests {
         assert_eq!(hash, hash2);
 
         println!("Poseidon([1,2,3,4]) = {:?}", field_to_bytes32(&hash));
+    }
+
+    #[test]
+    fn test_poseidon_hash_interface() {
+        // Test basic usage
+        let data = b"test governance proposal";
+        let hash1 = PoseidonHash::hash(data);
+        let hash2 = PoseidonHash::hash(data);
+
+        assert_eq!(hash1, hash2, "Same data should produce same hash");
+        assert_ne!(hash1, [0u8; 32], "Hash should be non-zero");
+    }
+
+    #[test]
+    fn test_poseidon_hash_different_data() {
+        let data1 = b"proposal 1";
+        let data2 = b"proposal 2";
+
+        let hash1 = PoseidonHash::hash(data1);
+        let hash2 = PoseidonHash::hash(data2);
+
+        assert_ne!(hash1, hash2, "Different data should produce different hashes");
+    }
+
+    #[test]
+    fn test_poseidon_hash_empty_data() {
+        let empty_data = b"";
+        let hash = PoseidonHash::hash(empty_data);
+
+        assert_ne!(hash, [0u8; 32], "Empty data hash should be non-zero");
+
+        // Test determinism
+        let hash2 = PoseidonHash::hash(empty_data);
+        assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn test_poseidon_hash_large_data() {
+        // Test with data larger than 31 bytes (requires chunking)
+        let large_data = b"This is a very long governance proposal description that exceeds 31 bytes";
+        let hash = PoseidonHash::hash(large_data);
+
+        assert_ne!(hash, [0u8; 32], "Large data hash should be non-zero");
+
+        // Test determinism
+        let hash2 = PoseidonHash::hash(large_data);
+        assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn test_poseidon_hash_with_domain() {
+        let data = b"test data";
+
+        let hash_gov = PoseidonHash::hash_with_domain(DOMAIN_GOVERNANCE, data);
+        let hash_note = PoseidonHash::hash_with_domain(DOMAIN_NOTE_COMMITMENT, data);
+
+        assert_ne!(hash_gov, hash_note, "Different domains should produce different hashes");
+
+        // Default hash() should use governance domain
+        let hash_default = PoseidonHash::hash(data);
+        assert_eq!(hash_gov, hash_default, "Default hash should use governance domain");
+    }
+
+    #[test]
+    fn test_governance_proposal_simulation() {
+        // Simulate the exact usage pattern from governance.rs
+        let proposal_data = (
+            "SignatureTransitionPeriod(15000)",
+            100u64, // current_height
+            1u64,   // nonce
+        );
+
+        let serialized = bincode::serialize(&proposal_data).unwrap();
+        let proposal_id = PoseidonHash::hash(&serialized);
+
+        // Should be deterministic
+        let proposal_id2 = PoseidonHash::hash(&serialized);
+        assert_eq!(proposal_id, proposal_id2);
+
+        // Different data should give different ID
+        let proposal_data2 = (
+            "SignatureTransitionPeriod(15000)",
+            100u64, // same height
+            2u64,   // different nonce
+        );
+        let serialized2 = bincode::serialize(&proposal_data2).unwrap();
+        let proposal_id2 = PoseidonHash::hash(&serialized2);
+
+        assert_ne!(proposal_id, proposal_id2);
     }
 }
