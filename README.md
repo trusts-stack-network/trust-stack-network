@@ -6,25 +6,26 @@
 
 <p align="center">
   <strong>Post-quantum privacy blockchain</strong><br>
-  Plonky3 STARKs &bull; ML-DSA-65 &bull; Poseidon2 &bull; Shielded Transactions
+  Plonky3 STARKs &bull; ML-DSA-65 &bull; Poseidon2 &bull; zkVM Smart Contracts
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.0-blue">
-  <img alt="Rust" src="https://img.shields.io/badge/rust-81k+_lines-orange">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-766-brightgreen">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.0-blue">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-70k+_lines-orange">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-800+-brightgreen">
   <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
-  <img alt="License" src="https://img.shields.io/badge/license-proprietary-lightgrey">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
 <p align="center">
   <a href="https://tsnchain.com">Website</a> &bull;
   <a href="https://tsnchain.com/whitepaper.html">Whitepaper</a> &bull;
-  <a href="https://tsnchain.com/tsn-whitepaper-v0.4.pdf">Whitepaper PDF</a> &bull;
   <a href="https://tsnchain.com/docs.html">Docs</a> &bull;
   <a href="https://tsnchain.com/blog.html">Blog</a> &bull;
   <a href="https://explorer.tsnchain.com">Explorer</a> &bull;
-  <a href="https://tsnchain.com/network-simulation.html">Network Simulation</a>
+  <a href="https://tsnchain.com/testnet.html">Testnet</a> &bull;
+  <a href="https://tsnchain.com/run-node.html">Run a Node</a> &bull;
+  <a href="https://discord.gg/wxxNVDVn6N">Discord</a>
 </p>
 
 ---
@@ -37,56 +38,18 @@ Trust Stack Network is a **Layer 1 blockchain** designed from the ground up for 
 
 | Feature | Description |
 |---------|-------------|
-| **Plonky3 STARKs** | Next-gen AIR-based zero-knowledge proofs — no trusted setup, truly post-quantum |
+| **Plonky3 STARKs** | AIR-based zero-knowledge proofs — no trusted setup, truly post-quantum |
 | **ML-DSA-65 (FIPS 204)** | NIST post-quantum digital signatures for all transactions and blocks |
 | **SLH-DSA (FIPS 205)** | Stateless hash-based signatures as secondary post-quantum layer |
-| **Poseidon2** | ZK-friendly hash function over the Goldilocks field, 3x faster than Poseidon |
+| **Poseidon2** | ZK-friendly hash function over the Goldilocks field (p = 2⁶⁴ - 2³² + 1) |
 | **Shielded Transactions** | Amounts and addresses hidden by default via ZK commitments and nullifiers |
-| **UTXO Model** | Bitcoin-inspired unspent transaction outputs with privacy |
+| **zkVM Smart Contracts** | Stack-based VM with 30+ opcodes, gas metering, and ZK execution traces |
 | **MIK Consensus** | Mining Identity Key — Proof of Work with anti-Sybil protection |
-| **Kademlia DHT** | Decentralized peer discovery with gossip-based block propagation |
+| **4 Node Roles** | Miner, Relay, Prover, Light Client — each contributes uniquely |
 
 ## Security Model
 
-TSN is designed to be **fully quantum-safe** — not just signatures, but the entire transaction privacy stack:
-
-| Attack Vector | Protection |
-|---------------|------------|
-| Forge signatures | ML-DSA-65 (NIST PQ standard) |
-| Break ZK proofs | Plonky3 STARKs (hash-based, no elliptic curves) |
-| Crack commitments | Poseidon over Goldilocks field |
-| Brute force hashes | Poseidon2 (256-bit security) |
-| Sybil mining | MIK identity bound to blockchain |
-
-### Mining Identity Key (MIK)
-
-Every miner must register a **Mining Identity Key** before mining:
-
-- Derived from their ML-DSA-65 public key: `MIK_ID = SHA-256("TSN_MIK_ID_v1" || pubkey || block_height)`
-- One active MIK per public key — prevents Sybil attacks
-- Lifecycle: registration → activation delay (10 blocks) → active → optional expiry/revocation
-- Block signatures verified against the miner's registered MIK
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                           TSN Node v0.4.0                            │
-├──────────────┬──────────────┬──────────────┬─────────────────────────┤
-│    Core      │    Crypto    │  Consensus   │        Network          │
-│  Block       │  Poseidon2   │  PoW Mining  │  P2P Protocol           │
-│  Transaction │  ML-DSA-65   │  MIK Anti-   │  Kademlia DHT           │
-│  UTXO State  │  Plonky3 ZK  │    Sybil     │  Gossip & Sync          │
-│  Validation  │  SLH-DSA     │  Difficulty   │  Rate Limiting          │
-│              │  Nullifiers  │    Adjust    │  Anti-Eclipse            │
-├──────────────┴──────────────┴──────────────┴─────────────────────────┤
-│  Storage (SledDB)  │  Wallet (Shielded ZK)  │  RPC (REST + JSON-RPC) │
-├────────────────────┼────────────────────────┼────────────────────────┤
-│  Explorer          │  Faucet (Testnet)      │  Metrics & Health      │
-└────────────────────┴────────────────────────┴────────────────────────┘
-```
-
-### Cryptography Stack
+TSN is designed to be **fully quantum-safe** — not just signatures, but the entire stack:
 
 | Layer | Primitive | Standard | Purpose |
 |-------|-----------|----------|---------|
@@ -96,189 +59,127 @@ Every miner must register a **Mining Identity Key** before mining:
 | Hash Function | Poseidon2 | — | PoW mining, Merkle trees, commitments |
 | Field | Goldilocks | p = 2⁶⁴ - 2³² + 1 | ZK-friendly arithmetic |
 | Encryption | ChaCha20-Poly1305 | RFC 8439 | Note payload encryption |
+| Anti-Sybil | MIK | — | One identity per miner |
 
-### Signature Sizes
-
-| Parameter | ML-DSA-65 |
-|-----------|-----------|
-| Public Key | 1,952 bytes |
-| Secret Key | 4,032 bytes |
-| Signature | 3,309 bytes |
-
-### Commitment Scheme
+## Architecture
 
 ```
-Note Commitment = Poseidon(domain=1, value, pk_hash, randomness)
-Nullifier       = Poseidon(domain=3, nullifier_key, commitment, position)
-Merkle Node     = Poseidon(domain=5, left, right)
+┌──────────────────────────────────────────────────────────────────────┐
+│                         TSN Node v0.5.0                              │
+├──────────────┬──────────────┬──────────────┬─────────────────────────┤
+│    Core      │    Crypto    │  Consensus   │        Network          │
+│  Block       │  Poseidon2   │  PoW Mining  │  P2P Protocol           │
+│  Transaction │  ML-DSA-65   │  MIK Anti-   │  Kademlia DHT           │
+│  UTXO State  │  Plonky3 ZK  │    Sybil     │  Gossip & Sync          │
+│  Validation  │  SLH-DSA     │  Difficulty   │  Rate Limiting          │
+│              │  Nullifiers  │    Adjust    │  Anti-Eclipse            │
+├──────────────┴──────────────┴──────────────┴─────────────────────────┤
+│  VM (zkVM)   │  Contracts (Escrow, Multisig)  │  WASM Prover          │
+├──────────────┼────────────────────────────────┼───────────────────────┤
+│  Storage     │  Wallet (Shielded ZK)          │  RPC (REST + JSON-RPC)│
+├──────────────┼────────────────────────────────┼───────────────────────┤
+│  Explorer    │  Faucet (Testnet)              │  Metrics & Health     │
+└──────────────┴────────────────────────────────┴───────────────────────┘
 ```
+
+## Smart Contracts (v0.5.0)
+
+TSN includes a **stack-based zkVM** that executes smart contracts with gas metering and produces execution traces for ZK proof generation.
+
+- **30+ opcodes**: arithmetic, storage, memory, crypto (Poseidon hash, signature verify), control flow, inter-contract calls, events
+- **Contract templates**: Escrow (with arbitration & timeout), Multisig (N-of-M), Governance
+- **Transaction types**: `ContractDeploy` + `ContractCall` with ML-DSA-65 signatures
+- **Gas model**: per-opcode costs, block gas limit 1M, max 64KB bytecode, 100K storage slots
 
 ## Node Types
 
-TSN supports 4 distinct node roles, selectable via `--role` at startup:
-
-### Miner Node (`--role miner`)
-Full node that validates, stores the entire blockchain, relays transactions/blocks, **and mines new blocks**. Miners must register a [Mining Identity Key (MIK)](#mining-identity-key-mik) before participating. They earn **85% of the block reward** (42.5 TSN per block). This is the default role.
-
-### Relay Node (`--role relay`)
-Full node that stores the complete chain and relays blocks/transactions to peers, but **does not mine**. Relays are the backbone of the network — they ensure fast block propagation via gossip protocol and serve snapshots to new nodes joining via fast-sync. They earn from the **8% relay reward pool** distributed proportionally to uptime and bandwidth contributed.
-
-### Prover Node (`--role prover`)
-Specialized node that generates **Plonky3 zero-knowledge proofs** on demand for wallets and light clients that lack the computational power to prove transactions locally. Provers expose a `/prover/prove` endpoint and earn **proving fees** paid by users per transaction. Ideal for GPU-equipped servers.
-
-### Light Client (`--role light`)
-Minimal node that **does not store the full chain** — it syncs only block headers and verifies transactions using ZK proofs. Designed for mobile wallets and resource-constrained devices. Light clients connect to relay/miner nodes to submit transactions and fetch Merkle witnesses.
-
 | Type | Stores Full Chain | Mines | Relays | Proves | Reward |
 |------|:-:|:-:|:-:|:-:|--------|
-| **Miner** | ✅ | ✅ | ✅ | ✅ | 85% block reward |
-| **Relay** | ✅ | — | ✅ | — | 8% relay pool |
-| **Prover** | ✅ | — | ✅ | ✅ | Proving fees |
-| **Light Client** | — | — | — | — | — |
+| **Miner** `--role miner` | ✅ | ✅ | ✅ | ✅ | 85% block reward |
+| **Relay** `--role relay` | ✅ | — | ✅ | — | 8% relay pool |
+| **Prover** `--role prover` | ✅ | — | ✅ | ✅ | Proving fees |
+| **Light Client** `--role light` | — | — | — | — | — |
+
+## Quick Start
+
+```bash
+# Clone and build
+git clone https://github.com/trusts-stack-network/trust-stack-network.git
+cd trust-stack-network
+cargo build --release
+
+# Run a miner node
+./target/release/tsn --role miner --port 9333
+
+# Run a relay node
+./target/release/tsn --role relay --port 9333 --seeds "seed1.tsnchain.com:9333"
+
+# Run a light client
+./target/release/tsn --role light --port 9333
+```
+
+See the full [Run a Node guide](https://tsnchain.com/run-node.html) for requirements and configuration.
 
 ## Network
 
 | Parameter | Value |
 |-----------|-------|
-| Default Port | 8333 |
-| Block Reward | 50 TSN |
-| Target Block Time | 10 seconds |
+| Default Port | 9333 |
+| Block Reward | 50 TSN (85% miner, 8% relay, 7% dev) |
+| Target Block Time | ~10 seconds |
 | Difficulty Adjustment | Every 10 blocks |
-| Coin Decimals | 9 (1 TSN = 10⁹ base units) |
-| Max Spends per Tx | 10 |
-| Max Outputs per Tx | 4 |
-| Peer Discovery | Kademlia DHT |
-| Block Propagation | Gossip protocol |
+| Max Reorg Depth | 100 blocks |
+| Checkpoint Interval | Every 100 blocks |
 
-### Testnet
+## Testnet Status
 
-The private testnet is live with **5 nodes** across Europe:
+The private testnet is live with **6 nodes** and **39,000+ blocks** mined.
 
-| Node | Address |
-|------|---------|
-| seed-1 | `seed1.tsnchain.com:9333` |
-| seed-2 | `seed2.tsnchain.com:9333` |
-| seed-3 | `seed3.tsnchain.com:9333` |
-| seed-4 | `seed4.tsnchain.com:9333` |
+**Roadmap:**
+1. **Private Testnet** — Active now. Internal testing.
+2. **Open Testnet** — Code released on GitHub. Anyone can run a node. No rewards.
+3. **Incentivized Testnet** — Multi-week. Rewards for miners and node operators.
+4. **Mainnet** — Genesis block. Fair launch. No premine.
 
-## Synchronization & Anti-Fork System
+See [tsnchain.com/testnet.html](https://tsnchain.com/testnet.html) for details.
 
-TSN implements a robust synchronization protocol designed for fast onboarding of new nodes and resilience against chain forks:
-
-### Fast-Sync Protocol (v0.4.0)
-
-New nodes can join the network in **minutes instead of hours** by downloading a compressed state snapshot from any peer:
-
-```
-┌─────────────┐     GET /snapshot/info      ┌─────────────┐
-│  New Node   │ ──────────────────────────>  │  Seed Node  │
-│             │     GET /snapshot/download   │             │
-│  --fast-sync│ <────────────────────────── │  (gzip)     │
-│             │                              │             │
-│  Load state │     GET /blocks?from=N       │             │
-│  Sync rest  │ ──────────────────────────>  │             │
-└─────────────┘                              └─────────────┘
-```
-
-1. New node requests a **gzip-compressed state snapshot** from a peer
-2. Loads the snapshot directly into memory (V2 Goldilocks Merkle tree)
-3. Syncs only the **missing blocks** since the snapshot height
-4. Ready to mine in under 5 minutes (vs. 2+ hours full replay)
-
-### Heaviest Chain Fork Choice
-
-TSN uses **cumulative proof-of-work** (sum of all block difficulties) to select the canonical chain — not simply the longest chain. This prevents low-difficulty spam attacks and mirrors Bitcoin Core's proven approach.
-
-### Anti-Fork Protections
-
-| Protection | Description |
-|------------|-------------|
-| **Heaviest chain rule** | Fork choice based on cumulative work, not height |
-| **MAX_REORG_DEPTH = 100** | Hard limit — no reorg deeper than 100 blocks regardless of work |
-| **Checkpoint finality** | Every 100 blocks, a checkpoint is created — no reorg beyond it |
-| **Anti-Fork Sync Gate** | Miners must be within 2 blocks of network tip to submit blocks |
-| **Genesis hash verification** | All nodes verify the genesis block hash at startup |
-| **Dual Merkle trees** | V1 (BN254) + V2 (Goldilocks) trees for state integrity |
-
-## API Overview
-
-Each TSN node exposes a REST API:
+## API
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /chain/info` | Blockchain height, latest hash |
-| `GET /block/:hash` | Get block by hash |
+| `GET /chain/info` | Block height, difficulty, latest hash |
+| `GET /peers` | Connected peers |
+| `GET /sync/status` | Sync progress and peer count |
 | `GET /block/height/:n` | Get block by height |
-| `POST /tx/v2` | Submit shielded V2 transaction |
-| `GET /mempool` | View pending transactions |
-| `GET /peers` | List connected peers |
-| `POST /nullifiers/check` | Verify spent nullifiers |
-| `GET /witness/v2/position/:n` | Get Merkle witness for ZK proof |
+| `POST /tx/submit` | Submit transaction |
 | `POST /faucet/claim` | Claim testnet tokens |
-| `GET /sync/status` | Node sync progress |
 | `GET /explorer` | Built-in block explorer |
 | `GET /wallet` | Built-in web wallet |
 
 ## Codebase
 
-- **81,000+ lines** of Rust
-- **766 unit tests** across 99 test executables
-- **270+ source files** across 20+ modules
-- **694 commits** of active development
-- **5 nodes** running on private testnet
-- Written in Rust 2021 edition
+- **70,000+ lines** of Rust
+- **800+ tests** across 20+ modules
+- **280+ source files**
+- **700+ commits** of active development
+- **6 nodes** running on private testnet
+- Written in Rust 2021 edition, zero unsafe code
 
-## Roadmap
+## Comparison
 
-### Phase 1 — Foundations ✅
-
-Core blockchain engine: blocks, transactions, UTXO, Poseidon2 hashing, ML-DSA-65 signatures, Proof of Work consensus with MIK anti-Sybil, P2P networking with Kademlia DHT, SledDB storage, shielded wallet, JSON-RPC API, block explorer, and testnet faucet.
-
-### Phase 2 — Advanced Features ✅
-
-Multi-role nodes ✅ (Miner, Relay, Prover, Light Client with `--role` CLI flag), Plonky3 STARK migration ✅ (Halo2 removed, AIR-based proofs via p3-uni-stark), browser-based WASM prover ✅ (plonky3-wasm crate), enhanced shielded wallet with viewing keys ✅ (export/import viewing keys, watch-only wallets), and hardened fast-sync with multi-peer snapshot verification.
-
-### Phase 3 — Smart Contracts
-
-zkVM (zero-knowledge virtual machine) for executing smart contracts inside ZK proofs. Multi-asset UTXO support, TSN-20 token standard, and Ethereum bridge via light client verification.
-
-### Phase 4 — Launch
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                                                                  │
-│  APRIL 2026          MAY — JULY 2026            Q3 2026          │
-│  ───────────         ──────────────────         ────────         │
-│                                                                  │
-│  ┌──────────┐        ┌──────────────────┐       ┌────────────┐  │
-│  │ PRIVATE  │───────>│   INCENTIVIZED   │──────>│  MAINNET   │  │
-│  │ TESTNET  │        │  PUBLIC TESTNET  │       │  LAUNCH    │  │
-│  └──────────┘        └──────────────────┘       └────────────┘  │
-│                                                                  │
-│  • 5 internal nodes   • Open to everyone        • Genesis block  │
-│  • Stress testing     • Bug bounty program      • Fair launch    │
-│  • Bug hunting        • Node operator rewards   • No premine     │
-│  • Core validation    • Smart contract testing  • Full privacy   │
-│  • ZK proof testing   • Security audit          • zkVM live      │
-│                       • 2-3 months duration                      │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-### Phase 5 — Post-Mainnet
-
-Gold-backed stablecoin **ZST** (1 ZST = 1g gold) as an independent Layer 2, with decentralized oracle price feeds and 150% over-collateralization in TSN.
+See how TSN compares to other blockchains: [tsnchain.com/comparison.html](https://tsnchain.com/comparison.html)
 
 ## Links
 
 - **Website**: [tsnchain.com](https://tsnchain.com)
+- **Testnet**: [tsnchain.com/testnet.html](https://tsnchain.com/testnet.html)
+- **Run a Node**: [tsnchain.com/run-node.html](https://tsnchain.com/run-node.html)
 - **Whitepaper**: [tsnchain.com/whitepaper.html](https://tsnchain.com/whitepaper.html)
-- **Whitepaper PDF**: [Download v0.4](https://tsnchain.com/tsn-whitepaper-v0.4.pdf)
 - **Documentation**: [tsnchain.com/docs.html](https://tsnchain.com/docs.html)
 - **Blog**: [tsnchain.com/blog.html](https://tsnchain.com/blog.html)
 - **Explorer**: [explorer.tsnchain.com](https://explorer.tsnchain.com)
-- **Network Simulation**: [tsnchain.com/network-simulation.html](https://tsnchain.com/network-simulation.html)
+- **Discord**: [discord.gg/wxxNVDVn6N](https://discord.gg/wxxNVDVn6N)
 
 ## License
 
-Proprietary — source code is not yet public. Open-source release planned for mainnet.
+MIT — Open source.
