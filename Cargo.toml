@@ -105,6 +105,10 @@ path = "src/bin/miner_monitor.rs"
 name = "fuzz_runner"
 path = "fuzz/fuzz_targets/runner.rs"
 
+[[bench]]
+name = "timing_bench"
+harness = false
+
 [profile.release]
 debug = true
 lto = true
@@ -116,6 +120,7 @@ opt-level = 3
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 # Feature pour activer les modules de démonstration vulnérables (TESTS UNIQUEMENT)
@@ -124,3 +129,6 @@ tempfile = "3"
 vulnerable-demo = []
 # Feature pour utiliser pqcrypto-sphincsplus (implémentation C optimisée)
 pqcrypto-sphincsplus = []
+# Feature pour désactiver certains tests (timing, sécurité, etc.)
+# Utilisation : cargo test --features disabled_test
+disabled_test = []
