@@ -67,58 +67,60 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         local_height
     };
 
-    // Fetch blocks from common ancestor
-    let blocks_url = format!("{}/blocks/since/{}", peer_url, sync_from_height);
-    let response = client
-        .get(&blocks_url)
-        .send()
-        .await?;
-
-    // Check for rate limiting or other HTTP errors
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(SyncError::HttpError(format!("HTTP {}: {}", status, body)));
-    }
-
-    let blocks: Vec<ShieldedBlock> = response.json().await?;
-
+    // Fetch blocks in paginated batches (50 blocks per request)
     let mut synced = 0u64;
     let mut reorged = false;
-    let total_blocks = blocks.len() as u64;
-    let show_progress = total_blocks > 0;
+    let mut current_sync_height = sync_from_height;
 
-    for (idx, block) in blocks.into_iter().enumerate() {
-        // SECURITY FIX: Gestion sécurisée du RwLock poisoning
-        let mut chain = state.blockchain.write()
-            .map_err(|e| SyncError::LockPoisoned(format!("Blockchain write lock poisoned: {}", e)))?;
-        match chain.try_add_block(block) {
-            Ok(true) => {
-                synced += 1;
-                if is_fork && !reorged {
-                    reorged = true;
-                    info!("Chain reorganization triggered from peer {}", peer_url);
+    loop {
+        let blocks_url = format!("{}/blocks/since/{}", peer_url, current_sync_height);
+        let response = client
+            .get(&blocks_url)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(SyncError::HttpError(format!("HTTP {}: {}", status, body)));
+        }
+
+        let blocks: Vec<ShieldedBlock> = response.json().await?;
+        let batch_size = blocks.len();
+
+        if batch_size == 0 {
+            break; // No more blocks to sync
+        }
+
+        for block in blocks.into_iter() {
+            let mut chain = state.blockchain.write()
+                .map_err(|e| SyncError::LockPoisoned(format!("Blockchain write lock poisoned: {}", e)))?;
+            match chain.try_add_block(block) {
+                Ok(true) => {
+                    synced += 1;
+                    current_sync_height = chain.height();
+                    if is_fork && !reorged {
+                        reorged = true;
+                        info!("Chain reorganization triggered from peer {}", peer_url);
+                    }
                 }
-            }
-            Ok(false) => {
-                // Block was duplicate or stored as side chain - continue
-            }
-            Err(e) => {
-                warn!("Failed to add block during sync: {}", e);
-                break;
+                Ok(false) => {
+                    // Block was duplicate or stored as side chain - continue
+                }
+                Err(e) => {
+                    warn!("Failed to add block during sync: {}", e);
+                    break;
+                }
             }
         }
 
-        if show_progress {
-            let current = (idx as u64) + 1;
-            if current == total_blocks || current % 100 == 0 {
-                use std::io::{self, Write};
-                print!("\rSyncing blocks: {}/{}", current, total_blocks);
-                let _ = io::stdout().flush();
-                if current == total_blocks {
-                    println!();
-                }
-            }
+        if synced > 0 && synced % 50 == 0 {
+            info!("Synced {} blocks from {} (height: {})", synced, peer_url, current_sync_height);
+        }
+
+        // If we got fewer blocks than the default batch, we're caught up
+        if batch_size < 50 {
+            break;
         }
     }
 

@@ -118,7 +118,7 @@ impl ShieldedBlockchain {
             tracing::info!("Loading blockchain from disk (height: {})", height);
 
             let mut blocks = HashMap::new();
-            let mut height_index = Vec::new();
+            let height_index;
             let mut state = ShieldedState::new();
 
             // Try to load state snapshot for fast startup
@@ -153,54 +153,42 @@ impl ShieldedBlockchain {
             let start_height = snapshot_height.map(|h| h + 1).unwrap_or(0);
             let blocks_to_replay = height - start_height + 1;
 
-            if start_height > 0 {
-                // Load block hashes for heights we're skipping (needed for height_index)
-                for h in 0..start_height {
+            // Load full height index via sequential scan (much faster than N individual lookups)
+            tracing::info!("Loading height index...");
+            height_index = db.load_all_block_hashes()
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+            tracing::info!("Height index loaded ({} entries)", height_index.len());
+
+            // Replay blocks from snapshot to current height to rebuild state
+            // With snapshots every 10 blocks, this replays at most ~9 blocks
+            if blocks_to_replay > 0 && start_height <= height {
+                tracing::info!("Replaying {} blocks from height {} to {}...", blocks_to_replay, start_height, height);
+                for h in start_height..=height {
+                    let hash = height_index.get(h as usize).copied()
+                        .or_else(|| db.get_block_hash_by_height(h).ok().flatten())
+                        .ok_or_else(|| {
+                            BlockchainError::StorageError(format!("Missing block hash at height {}", h))
+                        })?;
                     let block = db
-                        .load_block_by_height(h)
+                        .load_block(&hash)
                         .map_err(|e| BlockchainError::StorageError(e.to_string()))?
                         .ok_or_else(|| {
-                            BlockchainError::StorageError(format!("Missing block at height {}", h))
+                            BlockchainError::StorageError(format!("Missing block data at height {}", h))
                         })?;
-                    let hash = block.hash();
+
+                    for tx in &block.transactions {
+                        state.apply_transaction(tx);
+                    }
+                    for tx in &block.transactions_v2 {
+                        state.apply_transaction_v2(tx);
+                    }
+                    state.apply_coinbase(&block.coinbase);
+
                     blocks.insert(hash, block);
-                    height_index.push(hash);
                 }
-            }
-
-            // Replay blocks from start_height to rebuild/verify state
-            for h in start_height..=height {
-                let block = db
-                    .load_block_by_height(h)
-                    .map_err(|e| BlockchainError::StorageError(e.to_string()))?
-                    .ok_or_else(|| {
-                        BlockchainError::StorageError(format!("Missing block at height {}", h))
-                    })?;
-
-                let hash = block.hash();
-
-                // Apply transactions to state
-                for tx in &block.transactions {
-                    state.apply_transaction(tx);
-                }
-                // Apply V2 transactions to state
-                for tx in &block.transactions_v2 {
-                    state.apply_transaction_v2(tx);
-                }
-                state.apply_coinbase(&block.coinbase);
-
-                blocks.insert(hash, block);
-                height_index.push(hash);
-
-                let progress = h - start_height + 1;
-                if h == height || progress % 500 == 0 {
-                    tracing::info!(
-                        "Replaying blocks: {}/{} ({:.1}%)",
-                        progress,
-                        blocks_to_replay,
-                        progress as f64 / blocks_to_replay as f64 * 100.0
-                    );
-                }
+                tracing::info!("Replay complete ({} blocks)", blocks_to_replay);
+            } else {
+                tracing::info!("Snapshot is up-to-date, no replay needed");
             }
 
             // Save updated snapshot for faster future startups
@@ -245,15 +233,25 @@ impl ShieldedBlockchain {
                 (0, None)
             };
 
-            // Calculate cumulative work (sum of all block difficulties)
-            let mut cumulative_work: u128 = 0;
-            for h in 0..=height {
-                if let Some(hash) = height_index.get(h as usize) {
-                    if let Some(block) = blocks.get(hash) {
-                        cumulative_work += block.header.difficulty as u128;
+            // Load cumulative work from metadata (persisted at each snapshot)
+            // Falls back to recalculating from blocks if not found
+            let cumulative_work: u128 = db
+                .get_metadata("cumulative_work")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse::<u128>().ok())
+                .unwrap_or_else(|| {
+                    tracing::info!("cumulative_work not in metadata, recalculating...");
+                    let mut work: u128 = 0;
+                    for h in 0..=height {
+                        if let Some(hash) = height_index.get(h as usize) {
+                            if let Some(block) = blocks.get(hash) {
+                                work += block.header.difficulty as u128;
+                            }
+                        }
                     }
-                }
-            }
+                    work
+                });
 
             // Verify genesis hash if configured
             let expected_genesis = crate::config::EXPECTED_GENESIS_HASH;
@@ -436,20 +434,36 @@ impl ShieldedBlockchain {
     }
 
     /// Get the latest block.
-    pub fn latest_block(&self) -> &ShieldedBlock {
-        self.blocks.get(&self.latest_hash()).unwrap()
+    pub fn latest_block(&self) -> ShieldedBlock {
+        self.get_block(&self.latest_hash()).expect("latest block must exist")
     }
 
-    /// Get a block by hash.
-    pub fn get_block(&self, hash: &[u8; 32]) -> Option<&ShieldedBlock> {
-        self.blocks.get(hash)
+    /// Get a block by hash. Checks in-memory cache first, falls back to DB.
+    pub fn get_block(&self, hash: &[u8; 32]) -> Option<ShieldedBlock> {
+        if let Some(block) = self.blocks.get(hash) {
+            return Some(block.clone());
+        }
+        // Fallback: load from database
+        if let Some(ref db) = self.db {
+            db.load_block(hash).ok().flatten()
+        } else {
+            None
+        }
     }
 
-    /// Get a block by height.
-    pub fn get_block_by_height(&self, height: u64) -> Option<&ShieldedBlock> {
-        self.height_index
-            .get(height as usize)
-            .and_then(|hash| self.blocks.get(hash))
+    /// Get a block by height. Checks in-memory cache first, falls back to DB.
+    pub fn get_block_by_height(&self, height: u64) -> Option<ShieldedBlock> {
+        if let Some(hash) = self.height_index.get(height as usize) {
+            if let Some(block) = self.blocks.get(hash) {
+                return Some(block.clone());
+            }
+        }
+        // Fallback: load from database
+        if let Some(ref db) = self.db {
+            db.load_block_by_height(height).ok().flatten()
+        } else {
+            None
+        }
     }
 
     /// Get the current shielded state.
@@ -653,18 +667,33 @@ impl ShieldedBlockchain {
             );
         }
 
-        // Save state snapshot every 1000 blocks for fast startup recovery
-        if new_height > 0 && new_height % 1000 == 0 {
+        // Save state snapshot every 10 blocks for fast startup recovery
+        // Previously every 1000 blocks — caused 25+ min startup replays after updates
+        if new_height > 0 && new_height % 10 == 0 {
             if let Some(ref db) = self.db {
-                tracing::info!("Saving state snapshot at height {}", new_height);
                 let snapshot = self.state.snapshot_pq();
                 if let Err(e) = db.save_state_snapshot(&snapshot, new_height) {
                     tracing::warn!("Failed to save state snapshot at height {}: {}", new_height, e);
                 }
+                // Persist cumulative_work to avoid O(n) recalculation on startup
+                let _ = db.set_metadata("cumulative_work", &self.cumulative_work.to_string());
             }
         }
 
         Ok(())
+    }
+
+    /// Check if a block exists in RAM cache or in the database.
+    fn has_block(&self, hash: &[u8; 32]) -> bool {
+        if self.blocks.contains_key(hash) {
+            return true;
+        }
+        if let Some(ref db) = self.db {
+            db.get_block_hash_by_height(0).is_ok() // just check DB is alive
+                && db.load_block(hash).ok().flatten().is_some()
+        } else {
+            false
+        }
     }
 
     /// Try to add a block, handling orphans and potential reorgs.
@@ -672,7 +701,7 @@ impl ShieldedBlockchain {
         let block_hash = block.hash();
 
         // Already have this block?
-        if self.blocks.contains_key(&block_hash) {
+        if self.has_block(&block_hash) {
             return Ok(false);
         }
 
@@ -683,8 +712,8 @@ impl ShieldedBlockchain {
             return Ok(true);
         }
 
-        // Do we have the parent block?
-        if !self.blocks.contains_key(&block.header.prev_hash) {
+        // Do we have the parent block? Check RAM + DB
+        if !self.has_block(&block.header.prev_hash) {
             // Store as orphan
             self.orphans.insert(block_hash, block);
             return Ok(false);
@@ -728,7 +757,7 @@ impl ShieldedBlockchain {
         let mut height = 1u64;
         let mut prev_hash = block.header.prev_hash;
 
-        while let Some(parent) = self.blocks.get(&prev_hash) {
+        while let Some(parent) = self.get_block(&prev_hash) {
             height += 1;
             if parent.header.prev_hash == [0u8; BLOCK_HASH_SIZE] {
                 break;
@@ -745,7 +774,7 @@ impl ShieldedBlockchain {
         let mut work = block.header.difficulty as u128;
         let mut prev_hash = block.header.prev_hash;
 
-        while let Some(parent) = self.blocks.get(&prev_hash) {
+        while let Some(parent) = self.get_block(&prev_hash) {
             work += parent.header.difficulty as u128;
             if parent.header.prev_hash == [0u8; BLOCK_HASH_SIZE] {
                 break;

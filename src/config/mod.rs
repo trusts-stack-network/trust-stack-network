@@ -72,18 +72,15 @@ pub fn block_reward_at_height(height: u64) -> u64 {
 /// NO PREMINE — the treasury only accumulates through mining.
 pub const DEV_FEE_PERCENT: u64 = 5;
 
-/// Dev treasury pk_hash (Poseidon2 hash of SLH-DSA public key).
+/// Dev treasury pk_hash (Blake2s256 hash of ML-DSA-65 public key).
 /// This is the PUBLIC hash — safe to include in code.
-/// Private keys stored offline at /root/tsn-treasury/ (NEVER in git).
-///
-/// TODO: Replace with actual Poseidon2 hash of the treasury SLH-DSA public key
-/// once keys are generated. For now, using a deterministic placeholder derived
-/// from "TSN_DEV_TREASURY" so all nodes agree on the treasury address.
+/// Private keys stored offline at /root/tsn-treasury/treasury_wallet.json (NEVER in git).
+/// Address: 1d923ecba7891a3c4bce0c65da2e1036099a4c52
 pub const DEV_TREASURY_PK_HASH: [u8; 32] = [
-    0x54, 0x53, 0x4e, 0x5f, 0x44, 0x45, 0x56, 0x5f,  // "TSN_DEV_"
-    0x54, 0x52, 0x45, 0x41, 0x53, 0x55, 0x52, 0x59,  // "TREASURY"
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x06, 0xde, 0x72, 0xf4, 0xe7, 0x28, 0xaf, 0x0c,
+    0x71, 0x8b, 0xeb, 0x01, 0x31, 0x3c, 0x70, 0xe9,
+    0xb3, 0xa4, 0x10, 0xf4, 0x45, 0x43, 0x89, 0xce,
+    0x22, 0xb7, 0xbe, 0x2a, 0xfd, 0x88, 0xa0, 0x01,
 ];
 
 /// Calculate miner reward from total reward (95%).
@@ -224,4 +221,4 @@ pub const MAX_REORG_DEPTH: u64 = 100;
 /// must not start. This prevents silent chain forks from misconfigured genesis.
 ///
 /// Set to empty string to disable verification (first launch / testnet reset).
-pub const EXPECTED_GENESIS_HASH: &str = "";
+pub const EXPECTED_GENESIS_HASH: &str = "87f69eaa9d6fe1d23bf4e2ced253b62cc782fc18f0d4c225374c27ffa304e2ee";

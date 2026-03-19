@@ -861,7 +861,7 @@ async fn cmd_node(
 
             // Collect blocks into a vec to avoid borrowing issues
             let blocks: Vec<_> = (0..=current_height)
-                .filter_map(|h| blockchain.get_block_by_height(h).cloned())
+                .filter_map(|h| blockchain.get_block_by_height(h))
                 .collect();
             drop(blockchain);
 
@@ -906,7 +906,7 @@ async fn cmd_node(
                         if current_height > last_scanned {
                             // Collect only new blocks
                             let blocks: Vec<_> = ((last_scanned + 1)..=current_height)
-                                .filter_map(|h| blockchain.get_block_by_height(h).cloned())
+                                .filter_map(|h| blockchain.get_block_by_height(h))
                                 .collect();
                             drop(blockchain);
 

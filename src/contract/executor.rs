@@ -1,6 +1,7 @@
 //! Contract executor — deploys and calls contracts using the zkVM.
 
 use std::collections::HashMap;
+use blake2::{Blake2s256, Digest};
 use crate::vm::{Vm, ExecContext, ExecResult, CONTRACT_MAX_SIZE};
 use super::types::*;
 use super::storage::{ContractRegistry, ContractStorage, EventStore};
@@ -36,6 +37,23 @@ impl std::fmt::Display for ContractError {
             Self::InsufficientFee => write!(f, "insufficient fee"),
         }
     }
+}
+
+/// Compute a deterministic storage root from key-value writes.
+/// Uses Blake2s256 over sorted (key, value) pairs for a unique commitment.
+fn compute_storage_root(storage_writes: &HashMap<u64, u64>) -> [u8; 32] {
+    let mut hasher = Blake2s256::new();
+    hasher.update(b"TSN_StorageRoot");
+    let mut sorted: Vec<_> = storage_writes.iter().collect();
+    sorted.sort_by_key(|(&k, _)| k);
+    for (&key, &value) in &sorted {
+        hasher.update(key.to_le_bytes());
+        hasher.update(value.to_le_bytes());
+    }
+    let hash = hasher.finalize();
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&hash);
+    result
 }
 
 impl ContractExecutor {
@@ -114,7 +132,7 @@ impl ContractExecutor {
             bytecode: tx.bytecode.clone(),
             creator: tx.deployer_pk_hash,
             created_at_height: block_height,
-            storage_root: [0u8; 32], // TODO: compute SMT root
+            storage_root: compute_storage_root(&result.storage_writes),
             balance: 0,
         };
         self.registry.put(&contract)
@@ -206,12 +224,15 @@ impl ContractExecutor {
         self.storage.apply_writes(&tx.contract_address, &result.storage_writes)
             .map_err(|e| ContractError::StorageError(e.to_string()))?;
 
-        // Update contract balance if value was transferred
-        if tx.value > 0 {
-            let new_balance = contract.balance + tx.value;
-            self.registry.update_state(&tx.contract_address, contract.storage_root, new_balance)
-                .map_err(|e| ContractError::StorageError(e.to_string()))?;
-        }
+        // Recompute storage root from full snapshot + new writes
+        let updated_snapshot = self.storage.load_snapshot(&tx.contract_address)
+            .map_err(|e| ContractError::StorageError(e.to_string()))?;
+        let new_root = compute_storage_root(&updated_snapshot);
+
+        // Update contract state (root + balance)
+        let new_balance = contract.balance + tx.value;
+        self.registry.update_state(&tx.contract_address, new_root, new_balance)
+            .map_err(|e| ContractError::StorageError(e.to_string()))?;
 
         // Store events
         let event_logs: Vec<ContractEventLog> = result.events.iter().map(|ev| {
@@ -227,11 +248,26 @@ impl ContractExecutor {
             let _ = self.events.put(ev);
         }
 
-        // Process transfers
+        // Process transfers: deduct from contract balance
         for transfer in &result.transfers {
-            // Transfer from contract balance to recipient
-            // This would be handled by the blockchain state in production
-            let _ = transfer; // TODO: integrate with shielded state
+            let current = self.registry.get(&tx.contract_address)
+                .map_err(|e| ContractError::StorageError(e.to_string()))?
+                .ok_or(ContractError::ContractNotFound(tx.contract_address))?;
+
+            if current.balance < transfer.amount {
+                return Err(ContractError::ExecutionFailed(format!(
+                    "insufficient contract balance for transfer: {} < {}",
+                    current.balance, transfer.amount
+                )));
+            }
+
+            // Deduct from contract balance (recipient crediting happens
+            // at the blockchain level when the block is applied to state)
+            self.registry.update_state(
+                &tx.contract_address,
+                current.storage_root,
+                current.balance - transfer.amount,
+            ).map_err(|e| ContractError::StorageError(e.to_string()))?;
         }
 
         Ok(ContractReceipt {

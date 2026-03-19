@@ -250,10 +250,14 @@ impl SlhDsaSigner {
         }
     }
     
-    /// Signe un message avec le compteur actuel
+    /// Signe un message avec le compteur actuel.
+    /// Le compteur est concaténé au message avant signature pour garantir
+    /// qu'une même clé ne signe jamais deux fois le même input.
     pub fn sign_with_counter(&mut self, message: &[u8]) -> (Signature, u64) {
-        let sig = sign(&self.secret_key, message);
         let counter = self.counter;
+        let mut message_with_counter = message.to_vec();
+        message_with_counter.extend_from_slice(&counter.to_le_bytes());
+        let sig = sign(&self.secret_key, &message_with_counter);
         self.counter += 1;
         (sig, counter)
     }
@@ -410,11 +414,177 @@ mod tests {
         let (sk, pk) = SecretKey::generate();
         let mut signer = SlhDsaSigner::new(sk);
         let verifier = SlhDsaVerifier::new(pk);
-        
+
         let message = b"Test message";
         let (sig, counter) = signer.sign_with_counter(message);
-        
+
         // La vérification doit réussir avec le bon compteur
         assert!(verifier.verify(message, &sig.to_bytes(), counter).is_ok());
+    }
+
+    // ========================================================================
+    // Security tests — SLH-DSA robustness
+    // ========================================================================
+
+    #[test]
+    fn test_wrong_message_rejected() {
+        let (sk, pk) = SecretKey::generate();
+        let sig = sign(&sk, b"correct message");
+        assert!(!verify(&pk, b"wrong message", &sig));
+    }
+
+    #[test]
+    fn test_wrong_key_rejected() {
+        let (sk, _pk) = SecretKey::generate();
+        let (_, other_pk) = SecretKey::generate();
+        let sig = sign(&sk, b"test");
+        assert!(!verify(&other_pk, b"test", &sig));
+    }
+
+    #[test]
+    fn test_truncated_signature_rejected() {
+        let (sk, pk) = SecretKey::generate();
+        let sig = sign(&sk, b"test");
+        // Tronquer la signature
+        let truncated = Signature::from_bytes(&sig.bytes[..SLH_SIGNATURE_SIZE - 1]);
+        assert!(truncated.is_none());
+    }
+
+    #[test]
+    fn test_empty_signature_rejected() {
+        let (_, pk) = SecretKey::generate();
+        let empty_sig = Signature::from_bytes(&[]);
+        assert!(empty_sig.is_none());
+    }
+
+    #[test]
+    fn test_corrupted_signature_rejected() {
+        let (sk, pk) = SecretKey::generate();
+        let sig = sign(&sk, b"test message");
+        // Corrompre chaque section critique de la signature
+        for corrupt_pos in [0, 16, 31, 32, 48, 63] {
+            let mut bad = sig.bytes.clone();
+            bad[corrupt_pos] ^= 0xFF;
+            let bad_sig = Signature { bytes: bad };
+            assert!(!verify(&pk, b"test message", &bad_sig),
+                "should reject signature corrupted at byte {}", corrupt_pos);
+        }
+    }
+
+    #[test]
+    fn test_zero_signature_rejected() {
+        let (_, pk) = SecretKey::generate();
+        let zero_sig = Signature { bytes: vec![0u8; SLH_SIGNATURE_SIZE] };
+        assert!(!verify(&pk, b"test", &zero_sig));
+    }
+
+    #[test]
+    fn test_empty_message_signs_and_verifies() {
+        let (sk, pk) = SecretKey::generate();
+        let sig = sign(&sk, b"");
+        assert!(verify(&pk, b"", &sig));
+        assert!(!verify(&pk, b"not empty", &sig));
+    }
+
+    #[test]
+    fn test_large_message_signs_and_verifies() {
+        let (sk, pk) = SecretKey::generate();
+        let big_msg = vec![0xABu8; 1_000_000]; // 1MB
+        let sig = sign(&sk, &big_msg);
+        assert!(verify(&pk, &big_msg, &sig));
+    }
+
+    #[test]
+    fn test_deterministic_signatures() {
+        let (sk, pk) = SecretKey::generate();
+        let msg = b"deterministic check";
+        let sig1 = sign(&sk, msg);
+        let sig2 = sign(&sk, msg);
+        // SLH-DSA simplifié est déterministe (R = HASH(SK || message))
+        assert_eq!(sig1.bytes, sig2.bytes);
+    }
+
+    #[test]
+    fn test_different_messages_different_signatures() {
+        let (sk, _) = SecretKey::generate();
+        let sig1 = sign(&sk, b"message A");
+        let sig2 = sign(&sk, b"message B");
+        assert_ne!(sig1.bytes, sig2.bytes);
+    }
+
+    #[test]
+    fn test_different_keys_different_signatures() {
+        let (sk1, _) = SecretKey::generate();
+        let (sk2, _) = SecretKey::generate();
+        let msg = b"same message";
+        let sig1 = sign(&sk1, msg);
+        let sig2 = sign(&sk2, msg);
+        assert_ne!(sig1.bytes, sig2.bytes);
+    }
+
+    #[test]
+    fn test_public_key_from_invalid_bytes() {
+        assert!(PublicKey::from_bytes(&[0u8; 31]).is_none()); // too short
+        assert!(PublicKey::from_bytes(&[0u8; 33]).is_none()); // too long
+        assert!(PublicKey::from_bytes(&[]).is_none());          // empty
+        assert!(PublicKey::from_bytes(&[0u8; 32]).is_some());  // exact
+    }
+
+    #[test]
+    fn test_secret_key_from_invalid_bytes() {
+        assert!(SecretKey::from_bytes(&[0u8; 63]).is_none());
+        assert!(SecretKey::from_bytes(&[0u8; 65]).is_none());
+        assert!(SecretKey::from_bytes(&[]).is_none());
+        assert!(SecretKey::from_bytes(&[0u8; 64]).is_some());
+    }
+
+    #[test]
+    fn test_key_derivation_deterministic() {
+        let sk_bytes = [42u8; SLH_SECRET_KEY_SIZE];
+        let sk1 = SecretKey::from_bytes(&sk_bytes).unwrap();
+        let sk2 = SecretKey::from_bytes(&sk_bytes).unwrap();
+        let pk1 = sk1.derive_public_key();
+        let pk2 = sk2.derive_public_key();
+        assert_eq!(pk1.bytes, pk2.bytes);
+    }
+
+    #[test]
+    fn test_constant_time_eq_works() {
+        let a = [1u8, 2, 3, 4];
+        let b = [1u8, 2, 3, 4];
+        let c = [1u8, 2, 3, 5];
+        assert!(constant_time_eq(&a, &b));
+        assert!(!constant_time_eq(&a, &c));
+        assert!(!constant_time_eq(&a, &[1, 2, 3])); // different length
+    }
+
+    #[test]
+    fn test_verify_signature_api() {
+        let (sk, pk) = SecretKey::generate();
+        let msg = b"high-level API test";
+        let sig = sign(&sk, msg);
+        // API haut niveau
+        assert!(verify_signature(msg, &sig.bytes, &pk.bytes).unwrap());
+        // Mauvais message
+        assert!(!verify_signature(b"wrong", &sig.bytes, &pk.bytes).unwrap());
+        // Mauvaise taille clé
+        assert!(verify_signature(msg, &sig.bytes, &[0u8; 16]).is_err());
+        // Mauvaise taille signature
+        assert!(verify_signature(msg, &[0u8; 100], &pk.bytes).is_err());
+    }
+
+    #[test]
+    fn test_verifier_wrong_counter_rejected() {
+        let (sk, pk) = SecretKey::generate();
+        let mut signer = SlhDsaSigner::new(sk);
+        let verifier = SlhDsaVerifier::new(pk);
+
+        let message = b"counter test";
+        let (sig, counter) = signer.sign_with_counter(message);
+
+        // Bon compteur → OK
+        assert!(verifier.verify(message, &sig.to_bytes(), counter).is_ok());
+        // Mauvais compteur → rejeté
+        assert!(verifier.verify(message, &sig.to_bytes(), counter + 1).is_err());
     }
 }

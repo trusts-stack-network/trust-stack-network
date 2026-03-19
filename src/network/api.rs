@@ -396,7 +396,7 @@ async fn get_block(
         .find(|h| chain.get_block_by_height(*h).map(|b| b.hash()) == Some(hash_bytes))
         .unwrap_or(0);
 
-    Ok(Json(block_to_response(block, height)))
+    Ok(Json(block_to_response(&block, height)))
 }
 
 async fn get_block_by_height(
@@ -408,7 +408,7 @@ async fn get_block_by_height(
         .get_block_by_height(height)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(block_to_response(block, height)))
+    Ok(Json(block_to_response(&block, height)))
 }
 
 fn block_to_response(block: &ShieldedBlock, height: u64) -> BlockResponse {
@@ -809,17 +809,16 @@ async fn get_blocks_since(
 ) -> Json<Vec<ShieldedBlock>> {
     let chain = state.blockchain.read().unwrap();
     let current_height = chain.height();
-    let end_height = match params.limit {
-        Some(0) | None => current_height,
-        Some(limit) => current_height.min(since_height.saturating_add(limit as u64)),
-    };
+    // Default limit of 50 blocks per request to avoid HTTP timeouts
+    let max_blocks: u64 = params.limit.unwrap_or(50).min(200) as u64;
+    let end_height = current_height.min(since_height.saturating_add(max_blocks));
 
     let mut blocks = Vec::new();
 
     // Return blocks from since_height+1 to end_height
     for h in (since_height + 1)..=end_height {
         if let Some(block) = chain.get_block_by_height(h) {
-            blocks.push(block.clone());
+            blocks.push(block);
         }
     }
 

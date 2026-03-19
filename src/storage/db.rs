@@ -117,6 +117,35 @@ impl Database {
         }
     }
 
+    /// Load all block hashes in order (sequential scan, no deserialization).
+    /// Returns a Vec of (height, hash) pairs sorted by height.
+    pub fn load_all_block_hashes(&self) -> Result<Vec<[u8; 32]>, DatabaseError> {
+        let mut hashes = Vec::new();
+        for entry in self.block_heights.iter() {
+            let (_, hash_bytes) = entry.map_err(DatabaseError::Sled)?;
+            let hash: [u8; 32] = hash_bytes
+                .as_ref()
+                .try_into()
+                .map_err(|_| DatabaseError::InvalidData("invalid hash length".into()))?;
+            hashes.push(hash);
+        }
+        Ok(hashes)
+    }
+
+    /// Get block hash by height without loading the full block.
+    pub fn get_block_hash_by_height(&self, height: u64) -> Result<Option<[u8; 32]>, DatabaseError> {
+        match self.block_heights.get(&height.to_be_bytes())? {
+            Some(hash_bytes) => {
+                let hash: [u8; 32] = hash_bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| DatabaseError::InvalidData("invalid hash length".into()))?;
+                Ok(Some(hash))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Load a block by height.
     pub fn load_block_by_height(&self, height: u64) -> Result<Option<ShieldedBlock>, DatabaseError> {
         match self.block_heights.get(&height.to_be_bytes())? {
