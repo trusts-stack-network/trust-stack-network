@@ -12,11 +12,12 @@
 use crate::config::environment::Environment;
 use thiserror::Error;
 
-/// Minimum safe genesis difficulty (prevents instant mining)
-pub const MIN_GENESIS_DIFFICULTY: u64 = 8;
+/// Minimum safe genesis difficulty (prevents instant mining).
+/// Numeric difficulty: hash_prefix (u64 big-endian) must be < u64::MAX / difficulty.
+pub const MIN_GENESIS_DIFFICULTY: u64 = 100;
 
 /// Maximum genesis difficulty (prevents impossible mining)
-pub const MAX_GENESIS_DIFFICULTY: u64 = 32;
+pub const MAX_GENESIS_DIFFICULTY: u64 = 1_000_000_000_000;
 
 /// Minimum block time in seconds (prevents spam)
 pub const MIN_BLOCK_TIME: u64 = 10;
@@ -91,7 +92,7 @@ pub type ValidationResult<T> = Result<T, CryptoValidationError>;
 /// Must be within safe bounds to prevent both instant mining and impossible mining
 pub fn validate_genesis_difficulty(difficulty: u64, env: Environment) -> ValidationResult<()> {
     // In dev mode, allow lower difficulty for testing
-    let min = if env.debug_enabled() { 4 } else { MIN_GENESIS_DIFFICULTY };
+    let min = if env.debug_enabled() { 1 } else { MIN_GENESIS_DIFFICULTY };
 
     if difficulty < min || difficulty > MAX_GENESIS_DIFFICULTY {
         return Err(CryptoValidationError::InvalidGenesisDifficulty(
@@ -325,10 +326,10 @@ mod tests {
 
     #[test]
     fn test_validate_genesis_difficulty() {
-        assert!(validate_genesis_difficulty(12, Environment::Mainnet).is_ok());
-        assert!(validate_genesis_difficulty(4, Environment::Dev).is_ok());
-        assert!(validate_genesis_difficulty(4, Environment::Mainnet).is_err());
-        assert!(validate_genesis_difficulty(100, Environment::Mainnet).is_err());
+        assert!(validate_genesis_difficulty(10000, Environment::Mainnet).is_ok());
+        assert!(validate_genesis_difficulty(100, Environment::Dev).is_ok());
+        assert!(validate_genesis_difficulty(50, Environment::Mainnet).is_err());
+        assert!(validate_genesis_difficulty(2_000_000_000_000, Environment::Mainnet).is_err());
     }
 
     #[test]

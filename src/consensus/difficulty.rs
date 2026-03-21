@@ -1,7 +1,7 @@
 /// Difficulty adjustment algorithm for dynamic proof-of-work.
 ///
-/// This implements a simple difficulty adjustment that targets a specific
-/// block time by adjusting difficulty based on actual vs expected block times.
+/// Uses numeric difficulty where the hash prefix (first 8 bytes as u64 big-endian)
+/// must be less than u64::MAX / difficulty. Higher difficulty = harder mining.
 
 /// Target time between blocks in seconds (default: 10 seconds for fast testing).
 pub const TARGET_BLOCK_TIME_SECS: u64 = 10;
@@ -9,20 +9,23 @@ pub const TARGET_BLOCK_TIME_SECS: u64 = 10;
 /// Number of blocks between difficulty adjustments.
 pub const ADJUSTMENT_INTERVAL: u64 = 72;
 
-/// Minimum difficulty (must have at least this many leading zero bits).
-pub const MIN_DIFFICULTY: u64 = 4;
+/// Minimum numeric difficulty (prevents instant mining).
+pub const MIN_DIFFICULTY: u64 = 1000;
 
-/// Maximum difficulty (prevents runaway difficulty).
-pub const MAX_DIFFICULTY: u64 = 32;
+/// Maximum numeric difficulty (prevents impossible mining).
+pub const MAX_DIFFICULTY: u64 = u64::MAX / 2;
 
 /// Maximum adjustment factor per interval (prevents wild swings).
-/// Difficulty can at most double or halve per adjustment.
-pub const MAX_ADJUSTMENT_FACTOR: f64 = 2.0;
+/// Difficulty can change by at most ±25% per adjustment.
+pub const MAX_ADJUSTMENT_RATIO: f64 = 1.25;
 
 /// Calculate the next difficulty based on the last adjustment window.
 ///
+/// Uses a multiplicative ratio clamped to ±25% per adjustment window.
+/// If blocks are too fast, difficulty increases; if too slow, it decreases.
+///
 /// # Arguments
-/// * `current_difficulty` - The current difficulty target
+/// * `current_difficulty` - The current numeric difficulty target
 /// * `first_block_time` - Timestamp of the first block in the adjustment window
 /// * `last_block_time` - Timestamp of the last block in the adjustment window
 /// * `blocks_in_window` - Number of blocks in this window (usually ADJUSTMENT_INTERVAL)
@@ -43,27 +46,24 @@ pub fn calculate_next_difficulty(
 
     // Avoid division by zero
     if actual_time == 0 {
-        return (current_difficulty + 1).min(MAX_DIFFICULTY);
+        // Blocks are instant — increase difficulty by max ratio
+        let new_diff = (current_difficulty as f64 * MAX_ADJUSTMENT_RATIO) as u64;
+        return new_diff.clamp(MIN_DIFFICULTY, MAX_DIFFICULTY);
     }
 
     // Calculate adjustment ratio
-    // If blocks are too fast, ratio > 1, difficulty should increase
-    // If blocks are too slow, ratio < 1, difficulty should decrease
+    // If blocks are too fast (actual < expected), ratio > 1 → increase difficulty
+    // If blocks are too slow (actual > expected), ratio < 1 → decrease difficulty
     let ratio = expected_time as f64 / actual_time as f64;
 
-    // Clamp the adjustment factor
-    let clamped_ratio = ratio.clamp(1.0 / MAX_ADJUSTMENT_FACTOR, MAX_ADJUSTMENT_FACTOR);
+    // Clamp the ratio to ±25%
+    let clamped_ratio = ratio.clamp(1.0 / MAX_ADJUSTMENT_RATIO, MAX_ADJUSTMENT_RATIO);
 
-    // Calculate new difficulty
-    // Since difficulty is in bits (leading zeros), we need to adjust differently
-    // Each additional bit of difficulty doubles the work required
-    // So we use log2 of the ratio to adjust bits
-    let adjustment_bits = clamped_ratio.log2();
-
-    let new_difficulty = (current_difficulty as f64 + adjustment_bits).round() as i64;
+    // Apply multiplicative adjustment
+    let new_difficulty = (current_difficulty as f64 * clamped_ratio) as u64;
 
     // Clamp to valid range
-    new_difficulty.clamp(MIN_DIFFICULTY as i64, MAX_DIFFICULTY as i64) as u64
+    new_difficulty.clamp(MIN_DIFFICULTY, MAX_DIFFICULTY)
 }
 
 /// Check if a difficulty adjustment is needed at this height.
@@ -97,9 +97,10 @@ pub fn calculate_stats(
         TARGET_BLOCK_TIME_SECS as f64
     };
 
-    // Estimate hash rate: 2^difficulty / average_block_time
+    // Estimate hash rate: difficulty / average_block_time
+    // (on average, `difficulty` hashes are needed to find a valid one)
     let hash_rate_estimate = if average_block_time > 0.0 {
-        2_f64.powi(current_difficulty as i32) / average_block_time
+        current_difficulty as f64 / average_block_time
     } else {
         0.0
     };
@@ -120,7 +121,7 @@ mod tests {
     #[test]
     fn test_difficulty_increase_when_blocks_too_fast() {
         // Blocks are coming twice as fast as expected
-        let current_difficulty = 16;
+        let current_difficulty = 10000;
         let first_time = 1000;
         let last_time = 1360; // 360 seconds for 72 blocks = 5s per block (target is 10s)
 
@@ -132,13 +133,13 @@ mod tests {
         );
 
         assert!(new_difficulty > current_difficulty,
-            "Difficulty should increase when blocks are too fast");
+            "Difficulty should increase when blocks are too fast: {} vs {}", new_difficulty, current_difficulty);
     }
 
     #[test]
     fn test_difficulty_decrease_when_blocks_too_slow() {
         // Blocks are coming twice as slow as expected
-        let current_difficulty = 16;
+        let current_difficulty = 10000;
         let first_time = 1000;
         let last_time = 2440; // 1440 seconds for 72 blocks = 20s per block (target is 10s)
 
@@ -150,12 +151,12 @@ mod tests {
         );
 
         assert!(new_difficulty < current_difficulty,
-            "Difficulty should decrease when blocks are too slow");
+            "Difficulty should decrease when blocks are too slow: {} vs {}", new_difficulty, current_difficulty);
     }
 
     #[test]
     fn test_difficulty_stable_when_on_target() {
-        let current_difficulty = 16;
+        let current_difficulty = 10000;
         let first_time = 1000;
         let last_time = 1720; // 720 seconds for 72 blocks = 10s per block (exactly on target)
 
@@ -174,7 +175,7 @@ mod tests {
     fn test_difficulty_respects_minimum() {
         let current_difficulty = MIN_DIFFICULTY;
         let first_time = 1000;
-        let last_time = 10000; // Very slow blocks
+        let last_time = 100000; // Very slow blocks
 
         let new_difficulty = calculate_next_difficulty(
             current_difficulty,
@@ -216,8 +217,8 @@ mod tests {
 
     #[test]
     fn test_max_adjustment_factor() {
-        // Even with extremely fast blocks, difficulty can only double
-        let current_difficulty = 16;
+        // Even with extremely fast blocks, difficulty can only increase by 25%
+        let current_difficulty = 10000;
         let first_time = 1000;
         let last_time = 1001; // Nearly instant blocks
 
@@ -228,8 +229,8 @@ mod tests {
             ADJUSTMENT_INTERVAL,
         );
 
-        // Should increase by at most 1 bit (log2(2) = 1)
-        assert!(new_difficulty <= current_difficulty + 1,
-            "Adjustment should be limited by MAX_ADJUSTMENT_FACTOR");
+        let max_allowed = (current_difficulty as f64 * MAX_ADJUSTMENT_RATIO) as u64;
+        assert!(new_difficulty <= max_allowed,
+            "Adjustment should be limited by MAX_ADJUSTMENT_RATIO: {} vs max {}", new_difficulty, max_allowed);
     }
 }

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tracing::{info, debug, warn};
 
 use crate::network::api::AppState;
+use crate::network::peer_id;
 
 /// Intervalle entre les tentatives de découverte
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
@@ -173,7 +174,7 @@ pub async fn discovery_loop(state: Arc<AppState>) {
                             continue;
                         }
                         if !peers_guard.iter().any(|p| normalize_url(p) == normalized) {
-                            info!("Discovered new peer: {}", new_peer);
+                            info!("Discovered new peer: {}", peer_id(&new_peer));
                             peers_guard.push(new_peer);
                         }
                     }

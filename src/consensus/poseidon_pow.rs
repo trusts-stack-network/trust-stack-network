@@ -6,7 +6,7 @@
 //!
 //! The header bytes are packed into Goldilocks field elements (7 bytes each),
 //! then hashed via Poseidon sponge. The output (4 field elements = 32 bytes)
-//! is used for leading-zeros difficulty check.
+//! is used for numeric difficulty check (hash_prefix < u64::MAX / difficulty).
 //!
 //! Advantages over BN254 Poseidon:
 //! - Native compatibility with plonky2 STARK proving (no field conversion)
@@ -42,10 +42,10 @@ const DOMAIN_POW: u64 = 42;
 
 /// Maximum number of field elements for a block header.
 /// Header = version(4) + prev_hash(32) + merkle_root(32) + commitment_root(32)
-///        + nullifier_root(32) + timestamp(8) + difficulty(8) + nonce(8) = 156 bytes
-/// At 7 bytes per Goldilocks field element: ceil(156/7) = 23 elements + 1 domain = 24 total
+///        + nullifier_root(32) + timestamp(8) + difficulty(8) + nonce(64) = 212 bytes
+/// At 7 bytes per Goldilocks field element: ceil(212/7) = 31 elements + 1 domain = 32 total
 #[allow(dead_code)]
-const MAX_HEADER_ELEMENTS: usize = 24;
+const MAX_HEADER_ELEMENTS: usize = 32;
 
 // =============================================================================
 // Goldilocks Poseidon (current implementation)
@@ -97,6 +97,7 @@ pub fn poseidon_hash_header(header_bytes: &[u8]) -> [u8; 32] {
 ///
 /// The prefix (version + roots) is constant during mining, only timestamp/difficulty/nonce change.
 /// This avoids re-serializing the full header on each attempt.
+/// The nonce is 64 bytes (512 bits).
 pub fn poseidon_hash_header_parts(
     version: u32,
     prev_hash: &[u8; 32],
@@ -105,9 +106,9 @@ pub fn poseidon_hash_header_parts(
     nullifier_root: &[u8; 32],
     timestamp: u64,
     difficulty: u64,
-    nonce: u64,
+    nonce: &[u8; 64],
 ) -> [u8; 32] {
-    let mut header_bytes = Vec::with_capacity(156);
+    let mut header_bytes = Vec::with_capacity(212);
     header_bytes.extend_from_slice(&version.to_le_bytes());
     header_bytes.extend_from_slice(prev_hash);
     header_bytes.extend_from_slice(merkle_root);
@@ -115,7 +116,7 @@ pub fn poseidon_hash_header_parts(
     header_bytes.extend_from_slice(nullifier_root);
     header_bytes.extend_from_slice(&timestamp.to_le_bytes());
     header_bytes.extend_from_slice(&difficulty.to_le_bytes());
-    header_bytes.extend_from_slice(&nonce.to_le_bytes());
+    header_bytes.extend_from_slice(nonce);
 
     poseidon_hash_header(&header_bytes)
 }
@@ -129,10 +130,10 @@ pub fn poseidon_hash_header_parts_for_height(
     nullifier_root: &[u8; 32],
     timestamp: u64,
     difficulty: u64,
-    nonce: u64,
+    nonce: &[u8; 64],
     height: u64,
 ) -> [u8; 32] {
-    let mut header_bytes = Vec::with_capacity(156);
+    let mut header_bytes = Vec::with_capacity(212);
     header_bytes.extend_from_slice(&version.to_le_bytes());
     header_bytes.extend_from_slice(prev_hash);
     header_bytes.extend_from_slice(merkle_root);
@@ -140,7 +141,7 @@ pub fn poseidon_hash_header_parts_for_height(
     header_bytes.extend_from_slice(nullifier_root);
     header_bytes.extend_from_slice(&timestamp.to_le_bytes());
     header_bytes.extend_from_slice(&difficulty.to_le_bytes());
-    header_bytes.extend_from_slice(&nonce.to_le_bytes());
+    header_bytes.extend_from_slice(nonce);
 
     poseidon_hash_header_for_height(&header_bytes, height)
 }
@@ -215,9 +216,9 @@ pub fn poseidon_hash_header_parts_v2(
     nullifier_root: &[u8; 32],
     timestamp: u64,
     difficulty: u64,
-    nonce: u64,
+    nonce: &[u8; 64],
 ) -> [u8; 32] {
-    let mut header_bytes = Vec::with_capacity(156);
+    let mut header_bytes = Vec::with_capacity(212);
     header_bytes.extend_from_slice(&version.to_le_bytes());
     header_bytes.extend_from_slice(prev_hash);
     header_bytes.extend_from_slice(merkle_root);
@@ -225,7 +226,7 @@ pub fn poseidon_hash_header_parts_v2(
     header_bytes.extend_from_slice(nullifier_root);
     header_bytes.extend_from_slice(&timestamp.to_le_bytes());
     header_bytes.extend_from_slice(&difficulty.to_le_bytes());
-    header_bytes.extend_from_slice(&nonce.to_le_bytes());
+    header_bytes.extend_from_slice(nonce);
     poseidon_hash_header_v2(&header_bytes)
 }
 
@@ -298,26 +299,25 @@ pub fn poseidon_hash_header_legacy(header_bytes: &[u8]) -> [u8; 32] {
 }
 
 // =============================================================================
-// Difficulty checking (algorithm-independent, works on raw bytes)
+// Difficulty checking (numeric difficulty, algorithm-independent)
 // =============================================================================
 
-/// Count leading zero bits in a byte array.
-pub fn count_leading_zeros(bytes: &[u8]) -> usize {
-    let mut zeros = 0;
-    for byte in bytes {
-        if *byte == 0 {
-            zeros += 8;
-        } else {
-            zeros += byte.leading_zeros() as usize;
-            break;
-        }
+/// Check if a hash meets the numeric difficulty target.
+///
+/// Interprets the first 8 bytes of the hash as a big-endian u64 and checks
+/// that this value is less than u64::MAX / difficulty.
+/// Higher difficulty = smaller target = harder to mine.
+///
+/// For difficulty 0, always returns true.
+/// For difficulty 1, nearly all hashes pass.
+/// For difficulty 10000, roughly 1 in 10000 hashes pass.
+pub fn hash_meets_difficulty(hash: &[u8; 32], difficulty: u64) -> bool {
+    if difficulty == 0 {
+        return true;
     }
-    zeros
-}
-
-/// Check if a hash meets the difficulty target (leading zero bits >= difficulty).
-pub fn meets_difficulty(hash: &[u8; 32], difficulty: u64) -> bool {
-    count_leading_zeros(hash) >= difficulty as usize
+    let hash_prefix = u64::from_be_bytes(hash[0..8].try_into().unwrap());
+    let target = u64::MAX / difficulty;
+    hash_prefix < target
 }
 
 #[cfg(test)]
@@ -344,19 +344,31 @@ mod tests {
 
     #[test]
     fn test_poseidon_pow_parts() {
+        let nonce = [42u8; 64];
         let hash = poseidon_hash_header_parts(
             2, &[0u8; 32], &[1u8; 32], &[2u8; 32], &[3u8; 32],
-            1000, 8, 42,
+            1000, 8, &nonce,
         );
         assert_ne!(hash, [0u8; 32], "Hash should not be zero");
     }
 
     #[test]
-    fn test_leading_zeros() {
-        assert_eq!(count_leading_zeros(&[0x00, 0x00, 0xFF]), 16);
-        assert_eq!(count_leading_zeros(&[0x0F, 0x00, 0x00]), 4);
-        assert_eq!(count_leading_zeros(&[0x80, 0x00, 0x00]), 0);
-        assert_eq!(count_leading_zeros(&[0x01, 0x00, 0x00]), 7);
+    fn test_hash_meets_difficulty() {
+        // A hash starting with 0x00 should meet low difficulties
+        let mut hash = [0u8; 32];
+        hash[0] = 0x00;
+        hash[1] = 0x01;
+        // hash_prefix = 0x0001_0000_0000_0000 = 281474976710656
+        // u64::MAX / 1 = 18446744073709551615 → passes
+        assert!(hash_meets_difficulty(&hash, 1));
+        // u64::MAX / 10000 = 1844674407370955 → 281474976710656 < 1844674407370955 → passes
+        assert!(hash_meets_difficulty(&hash, 10000));
+        // u64::MAX / 100000 = 184467440737095 → 281474976710656 > 184467440737095 → fails
+        assert!(!hash_meets_difficulty(&hash, 100000));
+
+        // Zero difficulty always passes
+        let full_hash = [0xFF; 32];
+        assert!(hash_meets_difficulty(&full_hash, 0));
     }
 
     #[test]
@@ -480,14 +492,15 @@ mod tests {
 
     #[test]
     fn test_poseidon2_v2_parts() {
+        let nonce = [42u8; 64];
         let hash = poseidon_hash_header_parts_v2(
             2, &[0u8; 32], &[1u8; 32], &[2u8; 32], &[3u8; 32],
-            1000, 8, 42,
+            1000, 8, &nonce,
         );
         assert_ne!(hash, [0u8; 32], "Hash should not be zero");
 
         // Parts function should match manual byte construction
-        let mut header_bytes = Vec::with_capacity(156);
+        let mut header_bytes = Vec::with_capacity(212);
         header_bytes.extend_from_slice(&2u32.to_le_bytes());
         header_bytes.extend_from_slice(&[0u8; 32]);
         header_bytes.extend_from_slice(&[1u8; 32]);
@@ -495,7 +508,7 @@ mod tests {
         header_bytes.extend_from_slice(&[3u8; 32]);
         header_bytes.extend_from_slice(&1000u64.to_le_bytes());
         header_bytes.extend_from_slice(&8u64.to_le_bytes());
-        header_bytes.extend_from_slice(&42u64.to_le_bytes());
+        header_bytes.extend_from_slice(&nonce);
         let hash_direct = poseidon_hash_header_v2(&header_bytes);
         assert_eq!(hash, hash_direct, "Parts and direct must produce same hash");
     }

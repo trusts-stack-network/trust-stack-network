@@ -12,5 +12,6 @@ pub use difficulty::{
 pub use poseidon_pow::{
     poseidon_hash_header, poseidon_hash_header_parts,
     poseidon_hash_header_for_height, poseidon_hash_header_legacy,
+    hash_meets_difficulty,
 };
 pub use pow::{mine_block, mine_block_with_jobs, Miner, MiningPool, SimdMode};

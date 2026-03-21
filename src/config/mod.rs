@@ -52,7 +52,7 @@ pub const FAST_SYNC_CHECKPOINTS: &[(u64, &str)] = &[
 ];
 
 /// Default port for nodes
-pub const DEFAULT_PORT: u16 = 8333;
+pub const DEFAULT_PORT: u16 = 9333;
 
 /// Initial block reward in base units (50 coins)
 pub const BLOCK_REWARD: u64 = 50_000_000_000;

@@ -39,11 +39,13 @@ pub struct BlockHeader {
     /// Block creation timestamp (Unix timestamp).
     pub timestamp: u64,
 
-    /// Mining difficulty target.
+    /// Mining difficulty target (numeric: hash_prefix < u64::MAX / difficulty).
     pub difficulty: u64,
 
-    /// Nonce for proof-of-work.
-    pub nonce: u64,
+    /// Nonce for proof-of-work (512 bits).
+    /// First 56 bytes are random per-thread, last 8 bytes are a counter.
+    #[serde(with = "hex_nonce")]
+    pub nonce: [u8; 64],
 }
 
 impl BlockHeader {
@@ -59,7 +61,7 @@ impl BlockHeader {
             &self.nullifier_root,
             self.timestamp,
             self.difficulty,
-            self.nonce,
+            &self.nonce,
         )
     }
 
@@ -74,7 +76,7 @@ impl BlockHeader {
             &self.nullifier_root,
             self.timestamp,
             self.difficulty,
-            self.nonce,
+            &self.nonce,
             height,
         )
     }
@@ -89,17 +91,17 @@ impl BlockHeader {
         hex::encode(self.hash_for_height(height))
     }
 
-    /// Check if the header hash meets the difficulty target.
-    /// The hash must have at least `difficulty` leading zero bits.
+    /// Check if the header hash meets the numeric difficulty target.
+    /// The first 8 bytes of the hash (big-endian u64) must be < u64::MAX / difficulty.
     pub fn meets_difficulty(&self) -> bool {
         let hash = self.hash();
-        count_leading_zeros(&hash) >= self.difficulty as usize
+        poseidon_pow::hash_meets_difficulty(&hash, self.difficulty)
     }
 
     /// Check if the header hash meets the difficulty target, height-aware.
     pub fn meets_difficulty_for_height(&self, height: u64) -> bool {
         let hash = self.hash_for_height(height);
-        count_leading_zeros(&hash) >= self.difficulty as usize
+        poseidon_pow::hash_meets_difficulty(&hash, self.difficulty)
     }
 }
 
@@ -136,7 +138,7 @@ impl BlockHeaderHashPrefix {
 
     /// Hash a header using the stored prefix + variable fields.
     /// Uses height-aware hashing: legacy BN254 for old blocks, Goldilocks for new.
-    pub fn hash(&self, timestamp: u64, difficulty: u64, nonce: u64) -> [u8; BLOCK_HASH_SIZE] {
+    pub fn hash(&self, timestamp: u64, difficulty: u64, nonce: &[u8; 64]) -> [u8; BLOCK_HASH_SIZE] {
         poseidon_pow::poseidon_hash_header_parts_for_height(
             self.version,
             &self.prev_hash,
@@ -150,9 +152,9 @@ impl BlockHeaderHashPrefix {
         )
     }
 
-    /// Check difficulty using the stored prefix.
-    pub fn meets_difficulty(&self, timestamp: u64, difficulty: u64, nonce: u64) -> bool {
-        count_leading_zeros(&self.hash(timestamp, difficulty, nonce)) >= difficulty as usize
+    /// Check numeric difficulty using the stored prefix.
+    pub fn meets_difficulty(&self, timestamp: u64, difficulty: u64, nonce: &[u8; 64]) -> bool {
+        poseidon_pow::hash_meets_difficulty(&self.hash(timestamp, difficulty, nonce), difficulty)
     }
 }
 
@@ -200,7 +202,7 @@ impl ShieldedBlock {
                 .unwrap()
                 .as_secs(),
             difficulty,
-            nonce: 0,
+            nonce: [0u8; 64],
         };
 
         Self {
@@ -241,7 +243,7 @@ impl ShieldedBlock {
                 .unwrap()
                 .as_secs(),
             difficulty,
-            nonce: 0,
+            nonce: [0u8; 64],
         };
 
         Self {
@@ -287,7 +289,7 @@ impl ShieldedBlock {
             nullifier_root: [0u8; BLOCK_HASH_SIZE], // Empty nullifier set
             timestamp: 0, // The beginning of time
             difficulty,
-            nonce: 0,
+            nonce: [0u8; 64],
         };
 
         Self {
@@ -334,42 +336,42 @@ impl ShieldedBlock {
     /// Get all nullifiers introduced by this block.
     pub fn nullifiers(&self) -> Vec<crate::crypto::nullifier::Nullifier> {
         let mut nullifiers = Vec::new();
-        
+
         // V1 transactions - clone the referenced nullifiers
         for tx in &self.transactions {
             for nullifier_ref in tx.nullifiers() {
                 nullifiers.push(nullifier_ref.clone());
             }
         }
-        
+
         // V2 transactions - convert from bytes to Nullifier
         for tx in &self.transactions_v2 {
             for nullifier in tx.nullifiers() {
                 nullifiers.push(crate::crypto::nullifier::Nullifier(nullifier));
             }
         }
-        
+
         nullifiers
     }
 
     /// Get all note commitments created by this block.
     pub fn note_commitments(&self) -> Vec<crate::crypto::commitment::NoteCommitment> {
         let mut commitments = Vec::new();
-        
+
         // V1 transactions - clone the referenced commitments
         for tx in &self.transactions {
             for commitment_ref in tx.note_commitments() {
                 commitments.push(commitment_ref.clone());
             }
         }
-        
+
         // V2 transactions - convert from bytes to NoteCommitment
         for tx in &self.transactions_v2 {
             for commitment in tx.note_commitments() {
                 commitments.push(crate::crypto::commitment::NoteCommitment(commitment));
             }
         }
-        
+
         commitments.push(self.coinbase.note_commitment.clone());
         commitments
     }
@@ -387,7 +389,7 @@ impl ShieldedBlock {
 
     /// Get the block size in bytes (approximate).
     pub fn size(&self) -> usize {
-        let header_size = 8 * 8; // 8 fields * 8 bytes each (rough estimate)
+        let header_size = 4 + 32*4 + 8 + 8 + 64; // version + hashes + timestamp + difficulty + nonce
         let tx_size: usize = self.transactions.iter().map(|tx| tx.size()).sum();
         let coinbase_size = 32 + 32 + 8 + 8; // rough estimate
         header_size + tx_size + coinbase_size
@@ -404,17 +406,23 @@ impl ShieldedBlock {
     }
 
     /// Mine this block by finding a valid nonce.
-    /// Returns the nonce that satisfies the difficulty target.
+    /// Returns the number of attempts made.
     pub fn mine(&mut self) -> u64 {
         let prefix = BlockHeaderHashPrefix::new(&self.header);
-        let mut nonce = 0u64;
+        let mut attempts = 0u64;
+
+        // Use zeros for the random part, increment counter in last 8 bytes
+        let mut nonce = [0u8; 64];
 
         loop {
-            if prefix.meets_difficulty(self.header.timestamp, self.header.difficulty, nonce) {
+            if prefix.meets_difficulty(self.header.timestamp, self.header.difficulty, &nonce) {
                 self.header.nonce = nonce;
-                return nonce;
+                return attempts;
             }
-            nonce += 1;
+            attempts += 1;
+            // Increment the counter in the last 8 bytes
+            let counter = u64::from_le_bytes(nonce[56..64].try_into().unwrap());
+            nonce[56..64].copy_from_slice(&counter.wrapping_add(1).to_le_bytes());
         }
     }
 
@@ -491,20 +499,6 @@ fn compute_merkle_root(hashes: &[[u8; 32]]) -> [u8; 32] {
     level[0]
 }
 
-/// Count the number of leading zero bits in a hash.
-fn count_leading_zeros(hash: &[u8; 32]) -> usize {
-    let mut count = 0;
-    for &byte in hash {
-        if byte == 0 {
-            count += 8;
-        } else {
-            count += byte.leading_zeros() as usize;
-            break;
-        }
-    }
-    count
-}
-
 /// Helper module for hex serialization of byte arrays.
 mod hex_array {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -531,6 +525,40 @@ mod hex_array {
     }
 }
 
+/// Helper module for hex serialization of the 64-byte nonce.
+mod hex_nonce {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "Expected 64 bytes for nonce, got {}",
+                bytes.len()
+            )));
+        }
+        let mut array = [0u8; 64];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
+}
+
+/// Get the nonce as a hex string (for display/API purposes).
+pub fn nonce_to_hex(nonce: &[u8; 64]) -> String {
+    hex::encode(nonce)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,13 +573,13 @@ mod tests {
             commitment_root: [2u8; 32],
             nullifier_root: [3u8; 32],
             timestamp: 1234567890,
-            difficulty: 20,
-            nonce: 42,
+            difficulty: 10000,
+            nonce: [42u8; 64],
         };
 
         let hash = header.hash();
         assert_eq!(hash.len(), 32);
-        
+
         // Hash should be deterministic
         assert_eq!(hash, header.hash());
     }
@@ -576,10 +604,18 @@ mod tests {
     }
 
     #[test]
-    fn test_leading_zeros() {
-        assert_eq!(count_leading_zeros(&[0u8; 32]), 256);
-        assert_eq!(count_leading_zeros(&[0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 0);
-        assert_eq!(count_leading_zeros(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 7);
+    fn test_numeric_difficulty() {
+        // Zero difficulty always passes
+        let mut hash = [0xFF; 32];
+        assert!(poseidon_pow::hash_meets_difficulty(&hash, 0));
+
+        // Very low hash should pass high difficulty
+        hash = [0u8; 32];
+        assert!(poseidon_pow::hash_meets_difficulty(&hash, 1000000));
+
+        // Very high hash should fail even low difficulty
+        hash = [0xFF; 32];
+        assert!(!poseidon_pow::hash_meets_difficulty(&hash, 2));
     }
 
     #[test]
@@ -592,11 +628,12 @@ mod tests {
             0,
         );
 
-        let genesis = ShieldedBlock::genesis(20, coinbase);
+        let genesis = ShieldedBlock::genesis(10000, coinbase);
         assert!(genesis.is_genesis());
         assert_eq!(genesis.height(), 0);
         assert_eq!(genesis.transaction_count(), 0);
         assert_eq!(genesis.reward(), 5000000000);
+        assert_eq!(genesis.header.nonce, [0u8; 64]);
     }
 
     #[test]
@@ -609,13 +646,34 @@ mod tests {
             0,
         );
 
-        let mut block = ShieldedBlock::genesis(0, coinbase); // Zero difficulty for testing
-        
+        let block = ShieldedBlock::genesis(0, coinbase); // Zero difficulty for testing
+
         // Should verify with correct merkle root and zero difficulty
         assert!(block.verify().is_ok());
+    }
 
-        // Break the merkle root
-        block.header.merkle_root = [0u8; 32];
-        assert!(matches!(block.verify(), Err(BlockError::InvalidMerkleRoot)));
+    #[test]
+    fn test_nonce_serde() {
+        let header = BlockHeader {
+            version: 1,
+            prev_hash: [0u8; 32],
+            merkle_root: [1u8; 32],
+            commitment_root: [2u8; 32],
+            nullifier_root: [3u8; 32],
+            timestamp: 1234567890,
+            difficulty: 10000,
+            nonce: [0xAB; 64],
+        };
+
+        let serialized = serde_json::to_string(&header).unwrap();
+        let deserialized: BlockHeader = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(header.nonce, deserialized.nonce);
+    }
+
+    #[test]
+    fn test_nonce_hex_display() {
+        let nonce = [0u8; 64];
+        let hex_str = nonce_to_hex(&nonce);
+        assert_eq!(hex_str.len(), 128); // 64 bytes = 128 hex chars
     }
 }

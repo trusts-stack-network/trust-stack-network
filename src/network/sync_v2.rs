@@ -13,7 +13,7 @@ use tokio::time::{interval, timeout};
 use tracing::{debug, error, info, warn};
 
 use crate::core::{ShieldedBlock, ShieldedState};
-use super::{AppState, DiscoveryError};
+use super::{AppState, DiscoveryError, peer_id};
 
 /// Configuration for parallel sync operations.
 #[derive(Debug, Clone)]
@@ -206,7 +206,7 @@ impl ParallelSyncManager {
                     max_height = max_height.max(height);
                 }
                 Err(e) => {
-                    warn!("Failed to query height from peer {}: {}", peer, e);
+                    warn!("Failed to query height from peer {}: {}", peer_id(peer), e);
                 }
             }
         }
@@ -422,7 +422,7 @@ impl ParallelSyncManager {
                         debug!("Processed blocks from {}, next expected height: {}", peer_url, next_expected_height);
                     }
                     DownloadResult::Failed { job, error } => {
-                        warn!("Download failed for height {} from {}: {}", job.start_height, job.peer_url, error);
+                        warn!("Download failed for height {} from {}: {}", job.start_height, peer_id(&job.peer_url), error);
                         
                         // Update progress
                         {

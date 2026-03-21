@@ -5,7 +5,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tsn::config::{self, GENESIS_DIFFICULTY};
 use tsn::consensus::{MiningPool, SimdMode};
 use tsn::core::{ShieldedBlock, ShieldedBlockchain};
-use tsn::network::{create_router, Mempool};
+use tsn::network::{create_router, Mempool, peer_id};
 use tsn::node::NodeRole;
 use tsn::wallet::ShieldedWallet;
 
@@ -14,7 +14,37 @@ use tsn::wallet::ShieldedWallet;
 #[command(about = "TSN - Trust Stack Network: A privacy-preserving post-quantum cryptocurrency", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    // ---- Top-level flags (for default node mode) ----
+
+    /// Number of mining threads (default: 1)
+    #[arg(short, long, global = false)]
+    threads: Option<usize>,
+
+    /// Wallet file (default: auto-detect wallet.json next to binary)
+    #[arg(short, long, global = false)]
+    wallet: Option<String>,
+
+    /// Port to listen on (default: 9333)
+    #[arg(short, long, global = false)]
+    port: Option<u16>,
+
+    /// Additional peer nodes
+    #[arg(long, global = false)]
+    peer: Vec<String>,
+
+    /// Data directory (default: ./data)
+    #[arg(short, long, global = false)]
+    data_dir: Option<String>,
+
+    /// Public URL to announce to peers
+    #[arg(long, global = false)]
+    public_url: Option<String>,
+
+    /// Disable connecting to seed nodes
+    #[arg(long, global = false)]
+    no_seeds: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -193,12 +223,75 @@ enum Commands {
     },
     /// Show wallet balance (scans blockchain for owned notes)
     Balance {
-        /// Wallet file
-        #[arg(short, long, default_value = "wallet.json")]
-        wallet: String,
-        /// Node URL to query
-        #[arg(short, long, default_value = "http://localhost:8333")]
-        node: String,
+        /// Wallet file (default: auto-detect)
+        #[arg(short, long)]
+        wallet: Option<String>,
+        /// Node URL to query (default: auto-detect from port)
+        #[arg(short, long)]
+        node: Option<String>,
+    },
+    /// Run a miner node (shortcut for: node --role miner)
+    Miner {
+        /// Number of mining threads
+        #[arg(short, long)]
+        threads: Option<usize>,
+        /// Port (default: auto-detect free port from 9333)
+        #[arg(short, long)]
+        port: Option<u16>,
+        /// Wallet file (default: auto-detect or auto-create)
+        #[arg(short, long)]
+        wallet: Option<String>,
+        /// Data directory (default: ./data-miner)
+        #[arg(short, long)]
+        data_dir: Option<String>,
+        /// Additional peer nodes
+        #[arg(long)]
+        peer: Vec<String>,
+        /// Public URL to announce to peers
+        #[arg(long)]
+        public_url: Option<String>,
+        /// Disable connecting to seed nodes
+        #[arg(long)]
+        no_seeds: bool,
+    },
+    /// Run a relay node (shortcut for: node --role relay)
+    Relay {
+        /// Port (default: auto-detect free port from 9333)
+        #[arg(short, long)]
+        port: Option<u16>,
+        /// Wallet file (for receiving relay rewards)
+        #[arg(short, long)]
+        wallet: Option<String>,
+        /// Data directory (default: ./data-relay)
+        #[arg(short, long)]
+        data_dir: Option<String>,
+        /// Additional peer nodes
+        #[arg(long)]
+        peer: Vec<String>,
+        /// Public URL to announce to peers
+        #[arg(long)]
+        public_url: Option<String>,
+        /// Disable connecting to seed nodes
+        #[arg(long)]
+        no_seeds: bool,
+    },
+    /// Run a light client node (shortcut for: node --role light)
+    Light {
+        /// Port (default: auto-detect free port from 9333)
+        #[arg(short, long)]
+        port: Option<u16>,
+        /// Wallet file (for balance checking and sending transactions)
+        #[arg(short, long)]
+        wallet: Option<String>,
+        /// Data directory (default: ./data-light)
+        #[arg(short, long)]
+        data_dir: Option<String>,
+        /// Additional peer nodes
+        #[arg(long)]
+        peer: Vec<String>,
+        /// Disable connecting to seed nodes
+        #[arg(long)]
+        no_seeds: bool,
     },
     /// Start mining blocks
     Mine {
@@ -238,7 +331,7 @@ enum Commands {
     },
     /// Run a full node
     Node {
-        /// Node role: miner, relay, prover, light (default: miner)
+        /// Node role: miner, relay, light (default: miner)
         #[arg(long, default_value = "miner")]
         role: String,
         /// Port to listen on (or set TSN_PORT env var)
@@ -277,40 +370,81 @@ enum Commands {
         /// Override daily faucet limit in TSN (default: 50)
         #[arg(long)]
         faucet_daily_limit: Option<u64>,
-        /// Fast sync: download state snapshot from a peer instead of replaying blocks.
-        /// Dramatically speeds up initial sync for new nodes.
-        #[arg(long)]
-        fast_sync: bool,
     },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
+    let cli = Cli::parse();
+
+    // Suppress logs for simple commands (balance, new-wallet)
+    let is_quiet_cmd = matches!(cli.command, Some(Commands::Balance { .. }) | Some(Commands::NewWallet { .. }));
+    let log_level = if is_quiet_cmd { "error" } else { "info" };
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+                .unwrap_or_else(|_| log_level.into()),
         )
         .init();
 
-    let cli = Cli::parse();
-
     match cli.command {
-        Commands::NewWallet { output } => {
+        Some(Commands::NewWallet { output }) => {
             cmd_new_wallet(&output)?;
         }
-        Commands::Balance { wallet, node } => {
+        Some(Commands::Balance { wallet, node }) => {
+            let wallet = wallet.or_else(auto_detect_wallet).unwrap_or_else(|| "wallet.json".to_string());
+            let node = node.unwrap_or_else(|| {
+                // Try common ports to find running node (use 127.0.0.1, not localhost which may resolve to IPv6)
+                for port in [9333u16, 9334, 9335, 8333] {
+                    if let Ok(stream) = std::net::TcpStream::connect_timeout(
+                        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                        std::time::Duration::from_millis(200),
+                    ) {
+                        drop(stream);
+                        return format!("http://127.0.0.1:{}", port);
+                    }
+                }
+                format!("http://127.0.0.1:{}", config::get_port())
+            });
             cmd_balance(&wallet, &node).await?;
         }
-        Commands::Mine {
+        Some(Commands::Miner { threads, port, wallet, data_dir, peer, public_url, no_seeds }) => {
+            let data_dir = data_dir.unwrap_or_else(|| "data-miner".to_string());
+            let port = port.unwrap_or_else(|| find_free_port(config::get_port()));
+            let wallet_path = wallet.unwrap_or_else(|| auto_wallet_for_mining(&data_dir));
+            let jobs = threads.unwrap_or(1);
+            let mut peers = if no_seeds { Vec::new() } else { config::get_seed_nodes() };
+            peers.extend(peer);
+            dedup_peers(&mut peers);
+            cmd_node(port, peers, &data_dir, Some(wallet_path), jobs, None, public_url, false, None, None, true, NodeRole::Miner).await?;
+        }
+        Some(Commands::Relay { port, wallet, data_dir, peer, public_url, no_seeds }) => {
+            let data_dir = data_dir.unwrap_or_else(|| "data-relay".to_string());
+            let port = port.unwrap_or_else(|| find_free_port(config::get_port()));
+            let wallet_path = wallet.or_else(auto_detect_wallet);
+            let mut peers = if no_seeds { Vec::new() } else { config::get_seed_nodes() };
+            peers.extend(peer);
+            dedup_peers(&mut peers);
+            cmd_node(port, peers, &data_dir, wallet_path, 1, None, public_url, false, None, None, true, NodeRole::Relay).await?;
+        }
+        Some(Commands::Light { port, wallet, data_dir, peer, no_seeds }) => {
+            let data_dir = data_dir.unwrap_or_else(|| "data-light".to_string());
+            let port = port.unwrap_or_else(|| find_free_port(config::get_port()));
+            let wallet_path = wallet.or_else(auto_detect_wallet);
+            let mut peers = if no_seeds { Vec::new() } else { config::get_seed_nodes() };
+            peers.extend(peer);
+            dedup_peers(&mut peers);
+            cmd_node(port, peers, &data_dir, wallet_path, 1, None, None, false, None, None, true, NodeRole::LightClient).await?;
+        }
+        Some(Commands::Mine {
             wallet,
             blocks,
             difficulty,
             jobs,
             simd,
-        } => {
+        }) => {
             cmd_mine(
                 &wallet,
                 blocks,
@@ -320,13 +454,13 @@ async fn main() -> anyhow::Result<()> {
                 MiningMode::Mine,
             )?;
         }
-        Commands::Benchmark {
+        Some(Commands::Benchmark {
             wallet,
             blocks,
             difficulty,
             jobs,
             simd,
-        } => {
+        }) => {
             cmd_mine(
                 &wallet,
                 blocks,
@@ -336,7 +470,7 @@ async fn main() -> anyhow::Result<()> {
                 MiningMode::Benchmark,
             )?;
         }
-        Commands::Node {
+        Some(Commands::Node {
             role,
             port,
             peer,
@@ -350,58 +484,146 @@ async fn main() -> anyhow::Result<()> {
             force_mine,
             faucet_wallet,
             faucet_daily_limit,
-            fast_sync,
-        } => {
-            // Parse node role
+        }) => {
+            // Legacy `node` subcommand — still supported
             let node_role = NodeRole::from_str(&role).unwrap_or_else(|| {
-                eprintln!("Unknown node role '{}'. Valid roles: miner, relay, prover, light", role);
+                eprintln!("Unknown node role '{}'. Valid roles: miner, relay, light", role);
                 std::process::exit(1);
             });
-
-            // Use config defaults, with CLI/env overrides
             let port = port.unwrap_or_else(config::get_port);
             let data_dir = data_dir.unwrap_or_else(config::get_data_dir);
-
-            // Set full verify mode via environment variable (config.rs checks this)
             if full_verify {
                 std::env::set_var("TSN_FULL_VERIFY", "1");
             }
-
-            // Combine seed nodes with CLI peers, deduplicating
-            let mut peers = if no_seeds {
-                Vec::new()
-            } else {
-                config::get_seed_nodes()
-            };
+            let mut peers = if no_seeds { Vec::new() } else { config::get_seed_nodes() };
             peers.extend(peer);
-            // Deduplicate: normalize URLs (trim trailing slashes) and remove dupes
-            for p in peers.iter_mut() {
-                while p.ends_with('/') {
-                    p.pop();
-                }
-            }
-            let mut seen = std::collections::HashSet::new();
-            peers.retain(|p| seen.insert(p.clone()));
+            dedup_peers(&mut peers);
 
             cmd_node(
-                port,
-                peers,
-                &data_dir,
-                mine,
-                jobs,
-                simd.map(Into::into),
-                public_url,
-                force_mine,
-                faucet_wallet,
-                faucet_daily_limit,
-                fast_sync,
+                port, peers, &data_dir,
+                mine, jobs, simd.map(Into::into), public_url,
+                force_mine, faucet_wallet, faucet_daily_limit,
+                true, // fast_sync always on
                 node_role,
-            )
-            .await?;
+            ).await?;
+        }
+        None => {
+            // ---- DEFAULT MODE: auto-detect everything and run ----
+            let node_role = auto_detect_role();
+            let wallet = cli.wallet.or_else(auto_detect_wallet);
+            let port = cli.port.unwrap_or_else(config::get_port);
+            let data_dir = cli.data_dir.unwrap_or_else(config::get_data_dir);
+            let jobs = cli.threads.unwrap_or(1);
+
+            let mut peers = if cli.no_seeds { Vec::new() } else { config::get_seed_nodes() };
+            peers.extend(cli.peer);
+            dedup_peers(&mut peers);
+
+            cmd_node(
+                port, peers, &data_dir,
+                wallet, jobs, None, cli.public_url,
+                false, None, None,
+                true, // fast_sync always on
+                node_role,
+            ).await?;
         }
     }
 
     Ok(())
+}
+
+/// Find a free port starting from `start`.
+/// Tries start, start+1, start+2, ... up to start+100.
+fn find_free_port(start: u16) -> u16 {
+    for port in start..start.saturating_add(100) {
+        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
+    start // fallback
+}
+
+/// Auto-detect or auto-create wallet for mining.
+/// 1. Check wallet.json next to binary / in cwd
+/// 2. Check data_dir/wallet.json
+/// 3. Create a new wallet in data_dir/wallet.json
+fn auto_wallet_for_mining(data_dir: &str) -> String {
+    // Check common locations first
+    if let Some(w) = auto_detect_wallet() {
+        println!("Wallet found: {}", w);
+        return w;
+    }
+    // Check in data dir
+    let data_wallet = std::path::PathBuf::from(data_dir).join("wallet.json");
+    if data_wallet.exists() {
+        let p = data_wallet.to_string_lossy().to_string();
+        println!("Wallet found: {}", p);
+        return p;
+    }
+    // Auto-create
+    println!("No wallet found — creating new wallet...");
+    std::fs::create_dir_all(data_dir).ok();
+    let wallet = ShieldedWallet::generate();
+    let path = data_wallet.to_string_lossy().to_string();
+    wallet.save(&path).expect("Failed to create wallet");
+    println!("New wallet created: {}", path);
+    println!("Address: {}", hex::encode(wallet.pk_hash()));
+    println!("IMPORTANT: Back up this wallet file! Without it, your mined coins are lost.");
+    println!();
+    path
+}
+
+/// Auto-detect node role from parent directory name
+fn auto_detect_role() -> NodeRole {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let dir_name = parent.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if dir_name.contains("relay") { return NodeRole::from_str("relay").unwrap(); }
+            if dir_name.contains("light") { return NodeRole::from_str("light").unwrap(); }
+        }
+    }
+    // Also check current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        let dir_name = cwd.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if dir_name.contains("relay") { return NodeRole::from_str("relay").unwrap(); }
+        if dir_name.contains("light") { return NodeRole::from_str("light").unwrap(); }
+    }
+    // Default: miner
+    NodeRole::from_str("miner").unwrap()
+}
+
+/// Auto-detect wallet.json next to binary or in current dir
+fn auto_detect_wallet() -> Option<String> {
+    // Check next to binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let wallet_path = parent.join("wallet.json");
+            if wallet_path.exists() {
+                return Some(wallet_path.to_string_lossy().to_string());
+            }
+        }
+    }
+    // Check current directory
+    let cwd_wallet = std::path::Path::new("wallet.json");
+    if cwd_wallet.exists() {
+        return Some("wallet.json".to_string());
+    }
+    None
+}
+
+/// Deduplicate peer URLs
+fn dedup_peers(peers: &mut Vec<String>) {
+    for p in peers.iter_mut() {
+        while p.ends_with('/') { p.pop(); }
+    }
+    let mut seen = std::collections::HashSet::new();
+    peers.retain(|p| seen.insert(p.clone()));
 }
 
 fn cmd_new_wallet(output: &str) -> anyhow::Result<()> {
@@ -419,18 +641,175 @@ fn cmd_new_wallet(output: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_balance(wallet_path: &str, _node: &str) -> anyhow::Result<()> {
-    // Load wallet
-    let wallet = ShieldedWallet::load(wallet_path)?;
+async fn cmd_balance(wallet_path: &str, node_url: &str) -> anyhow::Result<()> {
+    let mut wallet = ShieldedWallet::load(wallet_path)?;
+    let coin_decimals = config::COIN_DECIMALS;
+    let divisor = 10u64.pow(coin_decimals);
+    let scanned_height = wallet.last_scanned_height();
 
-    println!("Wallet: {}", wallet_path);
-    println!("Public key hash: {}", hex::encode(wallet.pk_hash()));
+    // Try to scan new blocks via running node API, then fallback to local DB
+    let (api_ok, api_notes) = try_scan_via_api(&mut wallet, node_url, wallet_path).await;
+
+    let mut new_notes = api_notes;
+    let mut scan_source = if api_ok { "node API" } else { "" };
+
+    if !api_ok {
+        // Fallback: try local blockchain DB
+        let data_dirs = ["data-miner", "data", "./data-miner", "./data"];
+        for dir in &data_dirs {
+            let db_path = format!("{}/blockchain", dir);
+            if !std::path::Path::new(&db_path).exists() { continue; }
+            if let Ok(chain) = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY) {
+                let chain_height = chain.height();
+                if chain_height > wallet.last_scanned_height() {
+                    for h in (wallet.last_scanned_height() + 1)..=chain_height {
+                        if let Some(block) = chain.get_block_by_height(h) {
+                            new_notes += wallet.scan_block(&block, 0);
+                        }
+                    }
+                    wallet.save(wallet_path).ok();
+                    scan_source = dir;
+                }
+                break;
+            }
+        }
+    }
+
+    // Display result — clean and simple
+    let balance_raw = wallet.balance();
+    let balance_coins = balance_raw as f64 / divisor as f64;
+    let green = "\x1b[1;32m";
+    let cyan = "\x1b[1;36m";
+    let reset = "\x1b[0m";
+
     println!();
-    println!("Balance: {} (from {} unspent notes)", wallet.balance(), wallet.note_count());
+    println!("  Address:  {}", hex::encode(wallet.pk_hash()));
+    if balance_raw > 0 {
+        println!("  Balance:  {}{:.4} TSN{} ({} notes)", green, balance_coins, reset, wallet.note_count());
+    } else {
+        println!("  Balance:  0 TSN");
+    }
+    println!("  Scanned:  height {}", wallet.last_scanned_height());
+
+    if new_notes > 0 {
+        println!("  {}+{} new notes found{} (from {})", cyan, new_notes, reset, scan_source);
+    }
+
+    if wallet.last_scanned_height() == 0 && balance_raw == 0 {
+        println!();
+        println!("  Tip: Run your node to sync the blockchain first.");
+    }
     println!();
-    println!("Note: To update your balance, run the node and let the wallet scan the blockchain.");
 
     Ok(())
+}
+
+/// Try to scan wallet via a running node's API.
+/// Uses /blocks/since/:height which returns full ShieldedBlock structs.
+/// Returns (success, notes_found).
+async fn try_scan_via_api(wallet: &mut ShieldedWallet, node_url: &str, wallet_path: &str) -> (bool, usize) {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (false, 0),
+    };
+
+    // Check node is reachable and get chain height
+    let info_url = format!("{}/chain/info", node_url);
+    let chain_height: u64 = match client.get(&info_url).send().await {
+        Ok(r) if r.status().is_success() => {
+            match r.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    let h = v["height"].as_u64().unwrap_or(0);
+                    h
+                }
+                Err(_) => return (false, 0),
+            }
+        }
+        _ => return (false, 0),
+    };
+
+    let scanned_height = wallet.last_scanned_height();
+    if chain_height <= scanned_height {
+        return (true, 0); // already up to date
+    }
+
+    let blocks_to_scan = chain_height - scanned_height;
+    if blocks_to_scan > 50 {
+        eprint!("  Scanning {} blocks...", blocks_to_scan);
+    }
+
+    // Fetch full blocks via /blocks/since/:height (returns Vec<ShieldedBlock>)
+    let mut new_notes = 0usize;
+    let mut current = scanned_height;
+
+    // Fetch blocks from the node. After fast-sync, the node may only have recent blocks.
+    // Try scanned_height first, then fall back to height 0 (which returns from earliest available).
+    let url = format!("{}/blocks/since/{}", node_url, scanned_height);
+    let body = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => {
+            match r.text().await {
+                Ok(b) => b,
+                Err(_) => return (false, 0),
+            }
+        }
+        _ => return (false, 0),
+    };
+
+    // If empty, the node doesn't have blocks from our scanned_height (fast-sync).
+    // Binary search for the first available block.
+    let body = if body == "[]" {
+        // The node did fast-sync — blocks before the snapshot don't exist.
+        // Skip ahead: wallet can't scan blocks it doesn't have, so jump to what's available.
+        let mut try_height = chain_height.saturating_sub(200);
+        let mut found_body = String::from("[]");
+        // Binary search for first available block
+        let mut lo = scanned_height;
+        let mut hi = chain_height;
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2;
+            if let Ok(r) = client.get(&format!("{}/blocks/since/{}", node_url, mid)).send().await {
+                if let Ok(b) = r.text().await {
+                    if b != "[]" {
+                        hi = mid;
+                        found_body = b;
+                    } else {
+                        lo = mid;
+                    }
+                } else { break; }
+            } else { break; }
+        }
+        // Also update scanned_height to skip the gap (we can't scan blocks we don't have)
+        wallet.set_last_scanned_height(hi);
+        found_body
+    } else {
+        body
+    };
+
+    if let Ok(blocks) = serde_json::from_str::<Vec<tsn::core::ShieldedBlock>>(&body) {
+        for (i, block) in blocks.iter().enumerate() {
+            let block_h = if block.coinbase.height > 0 {
+                block.coinbase.height
+            } else {
+                wallet.last_scanned_height() + 1 + i as u64
+            };
+            new_notes += wallet.scan_block(block, 0);
+            wallet.set_last_scanned_height(block_h);
+        }
+    }
+
+    if blocks_to_scan > 50 {
+        eprintln!(" done.");
+    }
+
+    let scanned_now = wallet.last_scanned_height();
+    if scanned_now > scanned_height {
+        wallet.save(wallet_path).ok();
+    }
+    (scanned_now > scanned_height, new_notes)
 }
 
 fn cmd_mine(
@@ -547,48 +926,74 @@ async fn cmd_node(
 
     let simd = require_simd_support(simd);
 
-    // Validate role vs flags
-    if !node_role.can_mine() && mine_wallet.is_some() {
-        tracing::warn!(
-            "Node role '{}' cannot mine — ignoring --mine wallet flag",
-            node_role
-        );
-    }
-
     // Create data directory if needed
     std::fs::create_dir_all(data_dir)?;
 
-    println!("===========================================");
-    println!("      TSN Shielded Node v0.4.0");
-    println!("===========================================");
-    println!();
-    println!("Role:           {} ({})", node_role, node_role.description());
-    println!("Network:        {}", config::NETWORK_NAME);
-    println!("Genesis diff:   {} leading zero bits", GENESIS_DIFFICULTY);
-    println!("Data directory: {}", data_dir);
-    println!("API endpoint:   http://0.0.0.0:{}", port);
-    if node_role.stores_full_chain() {
-        println!("Explorer:       http://localhost:{}/explorer", port);
-    }
-    println!("Wallet:         http://localhost:{}/wallet", port);
-
-    // Load miner wallet if provided and role allows mining
-    let miner_info = if node_role.can_mine() {
-        if let Some(wallet_path) = &mine_wallet {
-            let wallet = ShieldedWallet::load(wallet_path)?;
-            let pk_hash = wallet.pk_hash();
-            let viewing_key = wallet.viewing_key().clone();
-            println!("Mining to:      {} (pk_hash)", hex::encode(pk_hash));
-            Some((pk_hash, viewing_key))
-        } else {
-            None
-        }
+    // Load wallet for any role (miner: mining rewards, relay: relay rewards, light: balance/send)
+    let miner_info = if let Some(wallet_path) = &mine_wallet {
+        let wallet = ShieldedWallet::load(wallet_path)?;
+        let pk_hash = wallet.pk_hash();
+        let viewing_key = wallet.viewing_key().clone();
+        Some((pk_hash, viewing_key))
     } else {
         None
     };
 
+    let role_icon = match node_role {
+        NodeRole::Miner => "⛏️",
+        NodeRole::Relay => "🔄",
+        NodeRole::LightClient => "💡",
+    };
+
+    println!();
+    println!("╔═══════════════════════════════════════════╗");
+    println!("║     TSN Shielded Node v0.6.0              ║");
+    println!("╚═══════════════════════════════════════════╝");
+    println!();
+    // ANSI color codes
+    let green = "\x1b[1;32m";   // bold green
+    let cyan = "\x1b[1;36m";    // bold cyan
+    let yellow = "\x1b[1;33m";  // bold yellow
+    let reset = "\x1b[0m";
+
+    println!("  {} Role:        {}{} ({}){}", role_icon, green, node_role, node_role.description(), reset);
+    println!("  Network:      {}", config::NETWORK_NAME);
+    println!("  Port:         {}", port);
+    println!("  Data:         {}", data_dir);
+    if node_role.stores_full_chain() {
+        println!("  Explorer:     http://localhost:{}/explorer", port);
+    }
+    if let Some((ref pk_hash, _)) = miner_info {
+        println!();
+        match node_role {
+            NodeRole::Miner => {
+                println!("  {}⛏️  MINING ACTIVE{}", yellow, reset);
+                println!("  Threads:      {}{}{}", cyan, jobs, reset);
+                println!("  Address:      {}", hex::encode(pk_hash));
+                println!("  Reward split: 92% miner / 5% dev fees / 3% relay pool");
+            }
+            NodeRole::Relay => {
+                println!("  {}🔄 RELAY WALLET{}", yellow, reset);
+                println!("  Address:      {}", hex::encode(pk_hash));
+                println!("  Reward:       3% relay pool");
+            }
+            NodeRole::LightClient => {
+                println!("  {}💡 WALLET ACTIVE{}", yellow, reset);
+                println!("  Address:      {}", hex::encode(pk_hash));
+            }
+        }
+    } else {
+        match node_role {
+            NodeRole::Miner => {
+                println!();
+                println!("  Mining:       INACTIVE (no wallet provided)");
+            }
+            NodeRole::Relay => {}
+            NodeRole::LightClient => {}
+        }
+    }
     if !peers.is_empty() {
-        println!("Seed peers:     {}", peers.len());
+        println!("  Seed peers:   {}", peers.len());
     }
     println!();
 
@@ -596,84 +1001,209 @@ async fn cmd_node(
     let db_path = format!("{}/blockchain", data_dir);
     let mut blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
 
-    // Fast sync: download snapshot from a peer if this is a fresh node
-    if fast_sync && blockchain.height() == 0 && !peers.is_empty() {
-        println!("Fast sync enabled — downloading state snapshot from peers...");
+    // Fast sync: paginated block download from peers
+    // Works for fresh nodes (height=0) AND nodes that are behind
+    if fast_sync && !peers.is_empty() {
+        let local_height = blockchain.height();
+        // Check if any peer is ahead of us
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        let mut downloaded = false;
+        // Find best peer
+        let mut best_peer: Option<(String, u64)> = None;
         for peer_url in &peers {
-            // Check snapshot availability
-            let info_url = format!("{}/snapshot/info", peer_url);
-            match client.get(&info_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(info) = resp.json::<serde_json::Value>().await {
-                        if info["available"].as_bool() != Some(true) {
-                            continue;
-                        }
-                        let snap_height = info["height"].as_u64().unwrap_or(0);
-                        let snap_size = info["size_bytes"].as_u64().unwrap_or(0);
-                        println!("  Found snapshot at {} — height={}, size={}KB",
-                            peer_url, snap_height, snap_size / 1024);
-
-                        // Download compressed snapshot
-                        let dl_url = format!("{}/snapshot/download", peer_url);
-                        match client.get(&dl_url).send().await {
-                            Ok(resp) if resp.status().is_success() => {
-                                let compressed = resp.bytes().await?;
-                                println!("  Downloaded {}KB compressed", compressed.len() / 1024);
-
-                                // Decompress
-                                use std::io::Read;
-                                let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
-                                let mut json_data = Vec::new();
-                                if decoder.read_to_end(&mut json_data).is_ok() {
-                                    // Parse and restore snapshot
-                                    match serde_json::from_slice::<tsn::core::StateSnapshotPQ>(&json_data) {
-                                        Ok(snapshot) => {
-                                            // We need to also sync all blocks from the peer
-                                            // For now, restore snapshot and then sync blocks
-                                            println!("  Snapshot parsed — {} nullifiers", snapshot.nullifiers.len());
-                                            println!("  Syncing blocks from peer...");
-
-                                            // Sync blocks from peer to match snapshot height
-                                            let blocks_url = format!("{}/blocks/since/0", peer_url);
-                                            match client.get(&blocks_url).send().await {
-                                                Ok(resp) if resp.status().is_success() => {
-                                                    if let Ok(blocks_json) = resp.json::<Vec<serde_json::Value>>().await {
-                                                        println!("  Received {} blocks from peer", blocks_json.len());
-                                                        // Import blocks via the standard add_block path
-                                                        // The snapshot will be saved after blocks are added
-                                                        for block_val in &blocks_json {
-                                                            if let Ok(block) = serde_json::from_value::<tsn::core::ShieldedBlock>(block_val.clone()) {
-                                                                let _ = blockchain.add_block(block);
-                                                            }
-                                                        }
-                                                        downloaded = true;
-                                                        println!("  Fast sync complete! Height: {}", blockchain.height());
-                                                    }
-                                                }
-                                                _ => println!("  Failed to sync blocks from {}", peer_url),
-                                            }
-                                        }
-                                        Err(e) => println!("  Failed to parse snapshot: {}", e),
-                                    }
-                                } else {
-                                    println!("  Failed to decompress snapshot");
-                                }
-                            }
-                            _ => println!("  Failed to download snapshot from {}", peer_url),
+            let tip_url = format!("{}/tip", peer_url);
+            if let Ok(resp) = client.get(&tip_url).send().await {
+                if let Ok(tip) = resp.json::<serde_json::Value>().await {
+                    let peer_height = tip["height"].as_u64().unwrap_or(0);
+                    if peer_height > local_height + 10 {
+                        if best_peer.is_none() || peer_height > best_peer.as_ref().unwrap().1 {
+                            best_peer = Some((peer_url.clone(), peer_height));
                         }
                     }
                 }
-                _ => continue,
             }
-            if downloaded { break; }
         }
-        if !downloaded {
-            println!("  No snapshot available — falling back to normal sync");
+
+        if let Some((peer_url, peer_height)) = best_peer {
+            let behind = peer_height - local_height;
+            let start_time = std::time::Instant::now();
+
+            // Strategy: if far behind (>100 blocks), use snapshot-based sync (instant)
+            // Otherwise, use block-by-block trusted sync
+            if behind > 50 {
+                // ===== SNAPSHOT SYNC (instant) =====
+                println!("Fast sync: {} blocks behind — downloading state snapshot...", behind);
+
+                let snapshot_client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()?;
+
+                // Get snapshot info
+                let info_url = format!("{}/snapshot/info", peer_url);
+                let mut snapshot_ok = false;
+
+                if let Ok(resp) = snapshot_client.get(&info_url).send().await {
+                    if let Ok(info) = resp.json::<serde_json::Value>().await {
+                        if info["available"].as_bool() == Some(true) {
+                            let snap_height = info["height"].as_u64().unwrap_or(0);
+                            let snap_hash_str = info["block_hash"].as_str().unwrap_or("");
+                            let snap_size = info["size_bytes"].as_u64().unwrap_or(0);
+                            println!("  Snapshot available: height={}, size={}KB", snap_height, snap_size / 1024);
+
+                            // Download compressed snapshot
+                            let dl_url = format!("{}/snapshot/download", peer_url);
+                            if let Ok(resp) = snapshot_client.get(&dl_url).send().await {
+                                if resp.status().is_success() {
+                                    let compressed = resp.bytes().await?;
+                                    println!("  Downloaded {}KB compressed", compressed.len() / 1024);
+
+                                    // Decompress
+                                    use std::io::Read;
+                                    let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+                                    let mut json_data = Vec::new();
+                                    if decoder.read_to_end(&mut json_data).is_ok() {
+                                        // Parse snapshot
+                                        if let Ok(snapshot) = serde_json::from_slice::<tsn::core::StateSnapshotPQ>(&json_data) {
+                                            // Parse block hash
+                                            let mut block_hash = [0u8; 32];
+                                            if let Ok(hash_bytes) = hex::decode(snap_hash_str) {
+                                                if hash_bytes.len() == 32 {
+                                                    block_hash.copy_from_slice(&hash_bytes);
+                                                }
+                                            }
+
+                                            // Get difficulty from peer
+                                            let difficulty = if let Ok(resp) = client.get(&format!("{}/chain/info", peer_url)).send().await {
+                                                resp.json::<serde_json::Value>().await.ok()
+                                                    .and_then(|i| i["difficulty"].as_u64())
+                                                    .unwrap_or(GENESIS_DIFFICULTY)
+                                            } else {
+                                                GENESIS_DIFFICULTY
+                                            };
+
+                                            // Import snapshot — sets chain state instantly
+                                            blockchain.import_snapshot_at_height(snapshot, snap_height, block_hash, difficulty);
+
+                                            // Now sync only recent blocks (from snapshot height onward)
+                                            println!("  Syncing recent blocks...");
+                                            let mut synced = 0u64;
+                                            let mut current = snap_height;
+                                            loop {
+                                                let url = format!("{}/blocks/since/{}", peer_url, current);
+                                                match client.get(&url).send().await {
+                                                    Ok(resp) if resp.status().is_success() => {
+                                                        match resp.json::<Vec<serde_json::Value>>().await {
+                                                            Ok(blocks) if !blocks.is_empty() => {
+                                                                let count = blocks.len() as u64;
+                                                                for bv in &blocks {
+                                                                    if let Ok(block) = serde_json::from_value::<tsn::core::ShieldedBlock>(bv.clone()) {
+                                                                        let _ = blockchain.add_block_trusted(block);
+                                                                    }
+                                                                }
+                                                                current = blockchain.height();
+                                                                synced += count;
+                                                                if count < 50 { break; }
+                                                            }
+                                                            _ => break,
+                                                        }
+                                                    }
+                                                    _ => break,
+                                                }
+                                            }
+
+                                            let elapsed = start_time.elapsed().as_secs_f64();
+                                            println!("  ✓ State restored at height {} + {} recent blocks in {:.1}s",
+                                                snap_height, synced, elapsed);
+                                            snapshot_ok = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !snapshot_ok {
+                    println!("  Snapshot unavailable — falling back to block sync...");
+                }
+
+                // Fall through to block sync if snapshot failed
+                if !snapshot_ok {
+                    println!("  Block-by-block sync (trusted)...");
+                    let mut current_height = local_height;
+                    let mut total = 0u64;
+                    loop {
+                        let prev_height = current_height;
+                        let url = format!("{}/blocks/since/{}", peer_url, current_height);
+                        match client.get(&url).send().await {
+                            Ok(resp) if resp.status().is_success() => {
+                                match resp.json::<Vec<serde_json::Value>>().await {
+                                    Ok(blocks) if !blocks.is_empty() => {
+                                        let n = blocks.len() as u64;
+                                        for bv in &blocks {
+                                            if let Ok(block) = serde_json::from_value::<tsn::core::ShieldedBlock>(bv.clone()) {
+                                                let _ = blockchain.add_block_trusted(block);
+                                            }
+                                        }
+                                        current_height = blockchain.height();
+                                        total += n;
+                                        if total % 500 == 0 || n < 50 {
+                                            let e = start_time.elapsed().as_secs_f64();
+                                            println!("  {} blocks — height: {} / {} — {:.0} b/s", total, current_height, peer_height, total as f64 / e);
+                                        }
+                                        // Break if no progress (prevents infinite loop)
+                                        if current_height == prev_height { break; }
+                                        if n < 50 { break; }
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    println!("  Fallback sync: {} blocks in {:.1}s", total, elapsed);
+                }
+            } else if behind > 10 {
+                // ===== SMALL GAP: block-by-block trusted sync =====
+                println!("Syncing {} blocks from {} (trusted)...", behind, peer_id(&peer_url));
+                let mut current_height = local_height;
+                let mut total = 0u64;
+                loop {
+                    let prev_height = current_height;
+                    let url = format!("{}/blocks/since/{}", peer_url, current_height);
+                    match client.get(&url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            match resp.json::<Vec<serde_json::Value>>().await {
+                                Ok(blocks) if !blocks.is_empty() => {
+                                    let n = blocks.len() as u64;
+                                    for bv in &blocks {
+                                        if let Ok(block) = serde_json::from_value::<tsn::core::ShieldedBlock>(bv.clone()) {
+                                            let _ = blockchain.add_block_trusted(block);
+                                        }
+                                    }
+                                    current_height = blockchain.height();
+                                    total += n;
+                                    if total % 500 == 0 || n < 50 {
+                                        let e = start_time.elapsed().as_secs_f64();
+                                        println!("  {} blocks — height: {} / {} — {:.0} b/s", total, current_height, peer_height, total as f64 / e);
+                                    }
+                                    if current_height == prev_height { break; }
+                                    if n < 50 { break; }
+                                }
+                                _ => break,
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                let elapsed = start_time.elapsed().as_secs_f64();
+                println!("  Synced {} blocks in {:.1}s", total, elapsed);
+            }
+        } else {
+            println!("Node synced (height: {})", local_height);
         }
     }
 
@@ -739,6 +1269,9 @@ async fn cmd_node(
         faucet: faucet_service,
         sync_gate: tsn::network::SyncGate::new(),
         public_url: public_url.clone(),
+        p2p_broadcast: RwLock::new(None),
+        p2p_peer_id: RwLock::new(None),
+        node_role: format!("{}", node_role),
     });
 
     // Create router with API (wallet and explorer are served from static React app)
@@ -748,43 +1281,52 @@ async fn cmd_node(
     let our_url = public_url.unwrap_or_else(|| format!("http://localhost:{}", port));
     println!("Announcing as:  {}", our_url);
 
-    // Sync from peers on startup
-    if !peers.is_empty() {
-        println!("Peers: {:?}", peers);
-        println!("Syncing from peers...");
-
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
-
-        for peer in &peers {
-            // Announce ourselves to this peer
-            let announce_url = format!("{}/peers", peer.trim_end_matches('/'));
-            match http_client.post(&announce_url)
-                .json(&serde_json::json!({ "url": our_url }))
-                .send()
-                .await
-            {
-                Ok(_) => println!("  Announced to peer {}", peer),
-                Err(e) => println!("  Failed to announce to {}: {}", peer, e),
+    // Start HTTP API server FIRST (non-blocking — explorer and wallet need this immediately)
+    let api_port = port;
+    let api_app = app;
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", api_port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("FATAL: Cannot bind port {}: {}", api_port, e);
+                std::process::exit(1);
             }
-
-            match sync_from_peer(state.clone(), peer).await {
-                Ok(n) => {
-                    if n > 0 {
-                        println!("  Synced {} blocks from {}", n, peer);
-                    } else {
-                        println!("  {} - already in sync", peer);
-                    }
-                }
-                Err(e) => {
-                    println!("  {} - sync failed: {}", peer, e);
-                }
-            }
+        };
+        tracing::info!("HTTP API listening on port {}", api_port);
+        if let Err(e) = axum::serve(listener, api_app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
+            eprintln!("HTTP server error: {}", e);
         }
+    });
 
-        // Start background sync loop (checks every 30 seconds)
+    // Sync from peers in background (non-blocking — API is already running)
+    if !peers.is_empty() {
+        println!("Peers: [{}]", peers.iter().map(|p| peer_id(p)).collect::<Vec<_>>().join(", "));
+
+        let sync_state_init = state.clone();
+        let sync_peers_init = peers.clone();
+        let sync_our_url = our_url.clone();
+        tokio::spawn(async move {
+            let http_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
+
+            for peer in &sync_peers_init {
+                let announce_url = format!("{}/peers", peer.trim_end_matches('/'));
+                let _ = http_client.post(&announce_url)
+                    .json(&serde_json::json!({ "url": sync_our_url }))
+                    .send()
+                    .await;
+
+                match sync_from_peer(sync_state_init.clone(), peer).await {
+                    Ok(n) if n > 0 => tracing::info!("Synced {} blocks from {}", n, peer_id(peer)),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("Sync from {} failed: {}", peer_id(peer), e),
+                }
+            }
+        });
+
+        // Start background sync loop (HTTP fallback — checks every 30 seconds)
         let sync_state = state.clone();
         let sync_peers = state.peers.read().unwrap().clone();
         tokio::spawn(async move {
@@ -796,6 +1338,90 @@ async fn cmd_node(
         tokio::spawn(async move {
             discovery_loop(discovery_state).await;
         });
+
+        // Start libp2p P2P layer — PRIMARY block/tx propagation
+        // GossipSub pushes blocks instantly to all connected peers (including NAT)
+        // HTTP sync loop kept as temporary fallback for non-upgraded nodes
+        {
+            use tsn::network::p2p::{P2pConfig, P2pNode, P2pEvent, seeds_to_bootstrap};
+            use tracing::{info, warn, debug};
+
+            let p2p_port = port + 1; // P2P on next port (e.g. 9334 if HTTP is 9333)
+            let seed_urls = state.peers.read().unwrap().clone();
+
+            // Convert HTTP seed URLs to P2P multiaddrs (IP:p2p_port)
+            let dial_seeds = seeds_to_bootstrap(&seed_urls, p2p_port);
+            info!("P2P: dialing {} seed nodes on port {}", dial_seeds.len(), p2p_port);
+
+            let p2p_config = P2pConfig {
+                listen_port: p2p_port,
+                bootstrap_peers: Vec::new(),
+                dial_seeds,
+                relay_server: node_role == NodeRole::Miner,
+                protocol_version: "tsn/0.6.0".to_string(),
+            };
+
+            let p2p = P2pNode::start(p2p_config).await
+                .expect("FATAL: P2P layer failed to start — node cannot propagate blocks");
+
+            println!("  P2P:          {} (port {})", p2p.peer_id, p2p_port);
+
+            // Store PeerID in AppState for /node/info endpoint
+            {
+                let mut pid = state.p2p_peer_id.write().unwrap();
+                *pid = Some(p2p.peer_id.to_string());
+            }
+
+            let p2p_peer_id = p2p.peer_id;
+            let p2p_command_tx = p2p.command_tx.clone();
+
+            // Store P2P command sender in AppState for use by miner and API
+            // (used to broadcast mined blocks and submitted transactions)
+            {
+                let mut p2p_tx = state.p2p_broadcast.write().unwrap();
+                *p2p_tx = Some(p2p.command_tx.clone());
+            }
+
+            // Spawn task to handle incoming P2P events
+            let p2p_blockchain = state.clone();
+            let mut p2p_events = p2p.event_rx;
+            tokio::spawn(async move {
+                while let Some(event) = p2p_events.recv().await {
+                    match event {
+                        P2pEvent::NewBlock(data) => {
+                            match serde_json::from_slice::<tsn::core::ShieldedBlock>(&data) {
+                                Ok(block) => {
+                                    let height = block.coinbase.height;
+                                    let mut chain = p2p_blockchain.blockchain.write().unwrap();
+                                    match chain.add_block(block) {
+                                        Ok(_) => info!("P2P: new block {} accepted", height),
+                                        Err(e) => debug!("P2P: block rejected: {}", e),
+                                    }
+                                }
+                                Err(e) => debug!("P2P: invalid block data: {}", e),
+                            }
+                        }
+                        P2pEvent::NewTransaction(data) => {
+                            // Add received transaction to mempool
+                            if let Ok(tx) = serde_json::from_slice::<tsn::core::ShieldedTransactionV2>(&data) {
+                                let mut mempool = p2p_blockchain.mempool.write().unwrap();
+                                let wrapped = tsn::core::Transaction::V2(tx);
+                                mempool.add_v2(wrapped);
+                            }
+                        }
+                        P2pEvent::PeerConnected(peer) => {
+                            info!("P2P: peer {} connected", peer);
+                        }
+                        P2pEvent::PeerDisconnected(peer) => {
+                            debug!("P2P: peer {} disconnected", peer);
+                        }
+                        P2pEvent::NatStatus(status) => {
+                            info!("P2P: NAT status = {}", status);
+                        }
+                    }
+                }
+            });
+        }
     }
 
     // Start tip broadcast loop (announces local tip to peers every 30 seconds)
@@ -934,10 +1560,6 @@ async fn cmd_node(
             tracing::info!("Relay mode: storing and relaying full blocks, mining disabled");
             println!("Mode: RELAY — full block relay, no mining");
         }
-        NodeRole::Prover => {
-            tracing::info!("Prover mode: ZK proof generation service active, mining disabled");
-            println!("Mode: PROVER — ZK proof service endpoint, no mining");
-        }
         NodeRole::Miner => {
             if !mining_active {
                 tracing::info!("Miner mode: full node (no --mine wallet provided, mining inactive)");
@@ -947,8 +1569,9 @@ async fn cmd_node(
         }
     }
 
-    // Start integrated miner if requested
-    if let Some((miner_pk_hash, viewing_key)) = miner_info {
+    // Start integrated miner (ONLY for miner role — relay/light have wallets but don't mine)
+    let mining_wallet = if node_role.can_mine() { miner_info } else { None };
+    if let Some((miner_pk_hash, viewing_key)) = mining_wallet {
         if force_mine {
             println!("Force mining enabled - skipping sync verification");
         } else {
@@ -1096,7 +1719,17 @@ async fn cmd_node(
                     }
                 }
 
-                // Broadcast to peers (use current peer list for newly discovered peers)
+                // Broadcast via P2P GossipSub (primary — instant push to all peers)
+                {
+                    let p2p_tx = mine_state.p2p_broadcast.read().unwrap().clone();
+                    if let Some(tx) = p2p_tx {
+                        if let Ok(block_data) = serde_json::to_vec(&mined_block) {
+                            let _ = tx.send(tsn::network::p2p::P2pCommand::BroadcastBlock(block_data)).await;
+                        }
+                    }
+                }
+
+                // Broadcast via HTTP (fallback for non-upgraded nodes)
                 let mut current_peers = mine_state.peers.read().unwrap().clone();
                 current_peers.retain(|peer| {
                     peer != &announce_url && peer != &local_url && peer != &local_ip_url
@@ -1136,9 +1769,9 @@ async fn cmd_node(
     println!("Node is running. Press Ctrl+C to stop.");
     println!();
 
-    // Start server with ConnectInfo for rate limiting
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
+    // Keep the main task alive (API + sync + P2P all run in spawned tasks)
+    tokio::signal::ctrl_c().await?;
+    println!("Shutting down...");
 
     Ok(())
 }

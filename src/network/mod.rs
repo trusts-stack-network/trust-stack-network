@@ -5,6 +5,7 @@
 pub mod alerts;
 pub mod anti_dos;
 pub mod api;
+pub mod p2p;
 pub mod discovery;
 pub mod eclipse_protection;
 pub mod gossip;
@@ -47,6 +48,29 @@ pub use message_limits::{
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::time::Duration;
+
+/// Masque une URL de peer en identifiant court pour les logs.
+///
+/// - Seeds connus (seed1-4.tsnchain.com) → "seed1", "seed2", etc.
+/// - Autres URLs → "peer:" + 8 premiers hex d'un hash SHA-256
+///
+/// L'URL originale reste utilisée en interne ; seul l'affichage change.
+pub fn peer_id(url: &str) -> String {
+    // Détection des seeds connus
+    for i in 1..=4 {
+        let seed_domain = format!("seed{}.tsnchain.com", i);
+        if url.contains(&seed_domain) {
+            return format!("seed{}", i);
+        }
+    }
+
+    // Hash SHA-256 de l'URL → 8 premiers caractères hex
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    let result = hasher.finalize();
+    format!("peer:{}", hex::encode(&result[..4]))
+}
 
 #[derive(Error, Debug)]
 pub enum NetworkError {

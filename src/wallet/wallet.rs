@@ -13,7 +13,7 @@ use std::path::Path;
 use crate::core::ShieldedBlock;
 use crate::crypto::{
     commitment::NoteCommitment,
-    note::{compute_pk_hash, Note, ViewingKey},
+    note::{compute_pk_hash, decrypt_note_pq, Note, ViewingKey},
     nullifier::{derive_nullifier, Nullifier, NullifierKey},
     sign, Address, KeyPair,
 };
@@ -266,7 +266,30 @@ impl ShieldedWallet {
             }
         }
 
-        // Scan coinbase
+        // Scan V2 transaction outputs (post-quantum)
+        for tx in &block.transactions_v2 {
+            for output in &tx.outputs {
+                if let Some((value, pk_hash, _randomness)) = decrypt_note_pq(&output.encrypted_note, &self.pk_hash) {
+                    if pk_hash == self.pk_hash {
+                        // Create a Note with zero randomness (for balance tracking only)
+                        let note = Note::with_randomness(value, pk_hash, ark_bn254::Fr::from(0u64));
+                        // Use a dummy commitment for V2 notes (the real one is PQ)
+                        let dummy_commitment = note.commitment();
+                        let wallet_note = WalletNote::new(
+                            note,
+                            dummy_commitment,
+                            position,
+                            height,
+                        );
+                        self.notes.push(wallet_note);
+                        new_notes += 1;
+                    }
+                }
+                position += 1;
+            }
+        }
+
+        // Scan coinbase (miner reward)
         if let Some(note) = decryption_key.decrypt_note(&block.coinbase.encrypted_note) {
             if note.recipient_pk_hash == self.pk_hash {
                 let wallet_note = WalletNote::new(
@@ -277,6 +300,19 @@ impl ShieldedWallet {
                 );
                 self.notes.push(wallet_note);
                 new_notes += 1;
+            }
+        }
+
+        // Scan coinbase dev fee note (in case this wallet is the treasury)
+        if let Some(ref encrypted) = block.coinbase.dev_fee_encrypted_note {
+            if let Some(note) = decryption_key.decrypt_note(encrypted) {
+                if note.recipient_pk_hash == self.pk_hash {
+                    if let Some(ref cm) = block.coinbase.dev_fee_commitment {
+                        let wallet_note = WalletNote::new(note, *cm, position + 1, height);
+                        self.notes.push(wallet_note);
+                        new_notes += 1;
+                    }
+                }
             }
         }
 
@@ -299,6 +335,11 @@ impl ShieldedWallet {
     /// Get the last scanned block height.
     pub fn last_scanned_height(&self) -> u64 {
         self.last_scanned_height
+    }
+
+    /// Set the last scanned block height (for external scanning via API).
+    pub fn set_last_scanned_height(&mut self, height: u64) {
+        self.last_scanned_height = height;
     }
 
     /// Export viewing key as hex string for sharing with third parties.

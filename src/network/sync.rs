@@ -5,6 +5,22 @@ use tracing::{info, warn};
 use crate::core::ShieldedBlock;
 
 use crate::network::api::AppState;
+use crate::network::peer_id;
+
+/// Remove IP addresses and URLs from error messages for privacy.
+fn sanitize_error(e: &dyn std::fmt::Display) -> String {
+    let msg = e.to_string();
+    // Strip anything after "url (" to hide the full URL with IP
+    if let Some(idx) = msg.find("url (") {
+        format!("{}connection failed", &msg[..idx])
+    } else if let Some(idx) = msg.find("http://") {
+        format!("{}<hidden>", &msg[..idx])
+    } else if let Some(idx) = msg.find("https://") {
+        format!("{}<hidden>", &msg[..idx])
+    } else {
+        msg
+    }
+}
 
 /// Sync the local chain from a peer node.
 /// Handles both catching up and chain reorganizations.
@@ -43,7 +59,7 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     if !peer_ahead && !is_fork {
         info!(
             "Peer {} is not ahead (peer: {}, local: {})",
-            peer_url, peer_info.height, local_height
+            peer_id(peer_url), peer_info.height, local_height
         );
         return Ok(0);
     }
@@ -51,12 +67,12 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     if is_fork {
         info!(
             "Fork detected with peer {} at height {} (peer: {}..., local: {}...)",
-            peer_url, peer_info.height, &peer_info.latest_hash[..16], &local_hash[..16]
+            peer_id(peer_url), peer_info.height, &peer_info.latest_hash[..16], &local_hash[..16]
         );
     } else {
         info!(
             "Syncing from peer {} (peer height: {}, local: {})",
-            peer_url, peer_info.height, local_height
+            peer_id(peer_url), peer_info.height, local_height
         );
     }
 
@@ -101,7 +117,7 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                     current_sync_height = chain.height();
                     if is_fork && !reorged {
                         reorged = true;
-                        info!("Chain reorganization triggered from peer {}", peer_url);
+                        info!("Chain reorganization triggered from peer {}", peer_id(peer_url));
                     }
                 }
                 Ok(false) => {
@@ -115,7 +131,7 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         }
 
         if synced > 0 && synced % 50 == 0 {
-            info!("Synced {} blocks from {} (height: {})", synced, peer_url, current_sync_height);
+            info!("Synced {} blocks from {} (height: {})", synced, peer_id(peer_url), current_sync_height);
         }
 
         // If we got fewer blocks than the default batch, we're caught up
@@ -131,9 +147,9 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                 .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?
                 .height();
             info!("Reorg complete: synced {} blocks from {} (new height: {})",
-                synced, peer_url, height);
+                synced, peer_id(peer_url), height);
         } else {
-            info!("Synced {} blocks from {}", synced, peer_url);
+            info!("Synced {} blocks from {}", synced, peer_id(peer_url));
         }
     }
     Ok(synced)
@@ -200,9 +216,9 @@ pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String]) -> Vec<Res
             .map_err(SyncError::from);
 
         if let Err(ref e) = result {
-            warn!("Failed to broadcast block to {}: {}", peer, e);
+            warn!("Failed to broadcast block to {}: {}", peer_id(peer), sanitize_error(e));
         } else {
-            info!("Broadcast block {} to {}", block.hash_hex(), peer);
+            info!("Broadcast block {} to {}", block.hash_hex(), peer_id(peer));
         }
 
         results.push(result);
@@ -223,13 +239,19 @@ pub async fn sync_loop(state: Arc<AppState>, peers: Vec<String>, sync_interval_s
         interval.tick().await;
 
         for peer in &peers {
-            match sync_from_peer(state.clone(), peer).await {
-                Ok(n) if n > 0 => {
-                    info!("Synced {} blocks from {}", n, peer);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("Sync from {} failed: {}", peer, e);
+            // Keep syncing until caught up (not just one batch per cycle)
+            loop {
+                match sync_from_peer(state.clone(), peer).await {
+                    Ok(n) if n > 0 => {
+                        info!("Synced {} blocks from {}", n, peer_id(peer));
+                        // If we got blocks, immediately try again (peer may have more)
+                        continue;
+                    }
+                    Ok(_) => break, // caught up with this peer
+                    Err(e) => {
+                        warn!("Sync from {} failed: {}", peer_id(peer), sanitize_error(&e));
+                        break;
+                    }
                 }
             }
         }
@@ -365,15 +387,15 @@ pub async fn verify_snapshot_multi_peer(
                     match resp.json::<PeerSnapshotInfo>().await {
                         Ok(info) => responses.push((peer, info)),
                         Err(e) => {
-                            warn!("Peer {} a renvoyé une réponse invalide: {}", peer, e);
+                            warn!("Peer {} a renvoyé une réponse invalide: {}", peer_id(&peer), e);
                         }
                     }
                 }
                 Ok(resp) => {
-                    warn!("Peer {} a renvoyé HTTP {}", peer, resp.status());
+                    warn!("Peer {} a renvoyé HTTP {}", peer_id(&peer), resp.status());
                 }
                 Err(e) => {
-                    warn!("Peer {} injoignable: {}", peer, e);
+                    warn!("Peer {} injoignable: {}", peer_id(&peer), e);
                 }
             }
         }
@@ -413,7 +435,7 @@ pub async fn verify_snapshot_multi_peer(
         if info.block_hash != majority_hash || info.height != majority_key.1 {
             warn!(
                 "Peer {} en désaccord: block_hash={}, height={} (majorité: hash={}, height={})",
-                peer, info.block_hash, info.height, majority_hash, majority_key.1
+                peer_id(peer), info.block_hash, info.height, majority_hash, majority_key.1
             );
         }
     }

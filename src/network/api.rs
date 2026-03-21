@@ -28,6 +28,7 @@ use tracing::{info, warn};
 
 use super::Mempool;
 use super::sync_gate::SyncGate;
+use super::peer_id;
 
 /// Maximum request body size (10 MB)
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -52,6 +53,12 @@ pub struct AppState {
     pub sync_gate: SyncGate,
     /// Our own public URL (to avoid adding ourselves as peer)
     pub public_url: Option<String>,
+    /// P2P broadcast channel (GossipSub) — used to push blocks/txs to all peers
+    pub p2p_broadcast: RwLock<Option<tokio::sync::mpsc::Sender<super::p2p::P2pCommand>>>,
+    /// Local P2P PeerID (set after libp2p starts)
+    pub p2p_peer_id: RwLock<Option<String>>,
+    /// Node role (miner, relay, light)
+    pub node_role: String,
 }
 
 /// Create the API router with rate limiting and request size limits.
@@ -100,6 +107,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Peer management
         .route("/peers", get(get_peers))
         .route("/peers", post(add_peer))
+        .route("/peers/p2p", get(get_p2p_peers))
         // Transaction relay endpoint (for peer-to-peer relay)
         .route("/tx/relay", post(receive_transaction))
         // Wallet scanning endpoints
@@ -126,6 +134,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Sync progress & version endpoints
         .route("/sync/status", get(sync_status))
         .route("/version.json", get(version_info))
+        .route("/node/info", get(node_info))
         .route("/api/roadmap", get(roadmap_status))
         // Fast sync: download state snapshot to skip block replay
         .route("/snapshot/info", get(snapshot_info))
@@ -219,9 +228,28 @@ struct VersionInfoResponse {
 async fn version_info() -> Json<VersionInfoResponse> {
     Json(VersionInfoResponse {
         version: env!("CARGO_PKG_VERSION"),
-        minimum_version: "0.3.0",
+        minimum_version: "0.6.0",
         protocol_version: 3,
     })
+}
+
+/// Node identity and status.
+async fn node_info(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let height = state.blockchain.read().unwrap().height();
+    let peer_id = state.p2p_peer_id.read().unwrap().clone();
+    let http_peers = state.peers.read().unwrap().len();
+
+    Json(serde_json::json!({
+        "peer_id": peer_id,
+        "role": state.node_role,
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol": "tsn/0.6.0",
+        "height": height,
+        "http_peers": http_peers,
+        "signatures": "ML-DSA-65 (FIPS 204)",
+        "hash": "Poseidon2",
+        "zk_proofs": "Plonky3 STARKs",
+    }))
 }
 
 /// Roadmap milestone status.
@@ -365,7 +393,7 @@ struct BlockResponse {
     prev_hash: String,
     timestamp: u64,
     difficulty: u64,
-    nonce: u64,
+    nonce: String,
     tx_count: usize,
     tx_count_v2: usize,
     commitment_root: String,
@@ -418,7 +446,7 @@ fn block_to_response(block: &ShieldedBlock, height: u64) -> BlockResponse {
         prev_hash: hex::encode(block.header.prev_hash),
         timestamp: block.header.timestamp,
         difficulty: block.header.difficulty,
-        nonce: block.header.nonce,
+        nonce: hex::encode(block.header.nonce),
         tx_count: block.transactions.len(),
         tx_count_v2: block.transactions_v2.len(),
         commitment_root: hex::encode(block.header.commitment_root),
@@ -836,6 +864,11 @@ struct BlocksSinceParams {
 struct PeersResponse {
     peers: Vec<String>,
     count: usize,
+    /// P2P peers connected via libp2p (identified by PeerID)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    p2p_peers: Vec<super::p2p::PeerInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p2p_count: Option<usize>,
 }
 
 /// Get the list of known peers.
@@ -852,7 +885,28 @@ async fn get_peers(State(state): State<Arc<AppState>>) -> Json<PeersResponse> {
     Json(PeersResponse {
         count: unique_peers.len(),
         peers: unique_peers,
+        p2p_peers: vec![],
+        p2p_count: None,
     })
+}
+
+/// Get P2P peers connected via libp2p (identified by PeerID).
+async fn get_p2p_peers(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let p2p_tx = state.p2p_broadcast.read().unwrap().clone();
+    if let Some(tx) = p2p_tx {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if tx.try_send(super::p2p::P2pCommand::GetPeers(reply_tx)).is_ok() {
+            if let Ok(Ok(peers)) = tokio::time::timeout(
+                std::time::Duration::from_millis(500), reply_rx
+            ).await {
+                return Json(serde_json::json!({
+                    "count": peers.len(),
+                    "peers": peers,
+                }));
+            }
+        }
+    }
+    Json(serde_json::json!({ "count": 0, "peers": [] }))
 }
 
 #[derive(Deserialize)]
@@ -912,7 +966,7 @@ async fn add_peer(
 
     if !is_self && !already_known {
         peers.push(normalized.clone());
-        info!("Added peer: {}", normalized);
+        info!("Added peer: {}", peer_id(&normalized));
     }
 
     Json(AddPeerResponse {
@@ -998,17 +1052,17 @@ async fn relay_block(block: &ShieldedBlock, peers: &[String]) {
         let url = format!("{}/blocks", peer);
         match client.post(&url).json(block).send().await {
             Ok(resp) if resp.status().is_success() => {
-                info!("Relayed block {} to {}", block_hash, peer);
+                info!("Relayed block {} to {}", block_hash, peer_id(peer));
             }
             Ok(resp) => {
                 // Peer might already have it (duplicate) - not an error
                 let status = resp.status();
                 if status != StatusCode::BAD_REQUEST {
-                    warn!("Relay to {} returned {}", peer, status);
+                    warn!("Relay to {} returned {}", peer_id(peer), status);
                 }
             }
             Err(e) => {
-                warn!("Failed to relay block to {}: {}", peer, e);
+                warn!("Failed to relay block to {}: {}", peer_id(peer), e);
             }
         }
     }
@@ -1023,13 +1077,13 @@ async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String]) {
         let url = format!("{}/tx/relay", peer);
         match client.post(&url).json(tx).send().await {
             Ok(resp) if resp.status().is_success() => {
-                info!("Relayed transaction {} to {}", tx_hash, peer);
+                info!("Relayed transaction {} to {}", tx_hash, peer_id(peer));
             }
             Ok(_) => {
                 // Peer might already have it - not an error
             }
             Err(e) => {
-                warn!("Failed to relay transaction to {}: {}", peer, e);
+                warn!("Failed to relay transaction to {}: {}", peer_id(peer), e);
             }
         }
     }

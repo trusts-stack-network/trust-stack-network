@@ -1,0 +1,362 @@
+/*
+ * TSN Wallet — Nouvelle Palette "Quantum Shift"
+ * Mars 2026 — Design post-quantique futuriste
+ */
+
+:root {
+  /* === PALETTE QUANTUM SHIFT === */
+
+  /* Couleurs Quantiques Primaires */
+  --quantum-blue: #0099ff;
+  --quantum-purple: #9955ff;
+  --quantum-cyan: #00ffcc;
+  --quantum-gradient: linear-gradient(135deg, #0099ff 0%, #9955ff 50%, #00ffcc 100%);
+
+  /* Backgrounds Ultra-Modernes */
+  --bg-quantum: #050810;
+  --bg-glass: rgba(15, 23, 35, 0.6);
+  --bg-glass-hover: rgba(15, 23, 35, 0.8);
+  --bg-glow: rgba(0, 153, 255, 0.08);
+  --bg-glow-intense: rgba(0, 153, 255, 0.15);
+
+  /* Borders & Outlines */
+  --border-quantum: rgba(0, 153, 255, 0.3);
+  --border-active: rgba(153, 85, 255, 0.5);
+  --border-glow: rgba(0, 255, 204, 0.4);
+
+  /* Texte */
+  --text-quantum: #ffffff;
+  --text-secondary: #a0a9c0;
+  --text-accent: var(--quantum-cyan);
+
+  /* États */
+  --success-quantum: #00ff88;
+  --danger-quantum: #ff4466;
+  --warning-quantum: #ffaa00;
+}
+
+/* === EFFETS DYNAMIQUES === */
+
+/* Quantum Pulse — Respiration lumineuse */
+@keyframes quantum-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 10px rgba(0, 153, 255, 0.3),
+      0 0 20px rgba(153, 85, 255, 0.2),
+      0 0 30px rgba(0, 255, 204, 0.1);
+  }
+  50% {
+    box-shadow:
+      0 0 20px rgba(0, 153, 255, 0.6),
+      0 0 40px rgba(153, 85, 255, 0.4),
+      0 0 60px rgba(0, 255, 204, 0.3);
+  }
+}
+
+/* Gradient Morphing — Couleurs qui évoluent */
+@keyframes gradient-morph {
+  0% { background: linear-gradient(135deg, #0099ff 0%, #9955ff 100%); }
+  33% { background: linear-gradient(135deg, #9955ff 0%, #00ffcc 100%); }
+  66% { background: linear-gradient(135deg, #00ffcc 0%, #0099ff 100%); }
+  100% { background: linear-gradient(135deg, #0099ff 0%, #9955ff 100%); }
+}
+
+/* Quantum Glow — Lueur progressive */
+@keyframes quantum-glow {
+  0%, 100% {
+    filter: brightness(1) saturate(1);
+    transform: scale(1);
+  }
+  50% {
+    filter: brightness(1.2) saturate(1.5);
+    transform: scale(1.02);
+  }
+}
+
+/* Particle Float — Particules flottantes */
+@keyframes particle-float {
+  0% {
+    transform: translateY(0px) rotate(0deg);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-100px) rotate(360deg);
+    opacity: 0;
+  }
+}
+
+/* Glassmorphism Shift — Effet de verre dynamique */
+@keyframes glass-shift {
+  0%, 100% {
+    backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid rgba(0, 153, 255, 0.3);
+  }
+  50% {
+    backdrop-filter: blur(25px) saturate(200%);
+    border: 1px solid rgba(153, 85, 255, 0.4);
+  }
+}
+
+/* === COMPOSANTS QUANTUM === */
+
+/* Navigation Quantique */
+.nav-quantum {
+  background: var(--bg-glass);
+  backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--border-quantum);
+  border-radius: 16px;
+  animation: glass-shift 4s ease-in-out infinite;
+}
+
+.nav-quantum .nav-item {
+  color: var(--text-secondary);
+  padding: 12px 24px;
+  border-radius: 12px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.nav-quantum .nav-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: var(--quantum-gradient);
+  opacity: 0;
+  transition: all 0.5s ease;
+  z-index: -1;
+}
+
+.nav-quantum .nav-item:hover::before {
+  left: 0;
+  opacity: 0.1;
+}
+
+.nav-quantum .nav-item:hover {
+  color: var(--text-quantum);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(0, 153, 255, 0.3);
+}
+
+.nav-quantum .nav-item.active {
+  background: var(--quantum-gradient);
+  color: var(--text-quantum);
+  animation: quantum-pulse 2s ease-in-out infinite;
+  font-weight: 600;
+}
+
+/* Cards Quantiques */
+.card-quantum {
+  background: var(--bg-glass);
+  backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--border-quantum);
+  border-radius: 20px;
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.card-quantum::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--quantum-gradient);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s ease;
+}
+
+.card-quantum:hover {
+  background: var(--bg-glass-hover);
+  border-color: var(--border-active);
+  transform: translateY(-4px);
+  box-shadow:
+    0 20px 40px rgba(0, 0, 0, 0.3),
+    0 0 30px rgba(0, 153, 255, 0.2);
+}
+
+.card-quantum:hover::before {
+  transform: scaleX(1);
+}
+
+/* Boutons Quantiques */
+.btn-quantum {
+  background: var(--quantum-gradient);
+  border: none;
+  border-radius: 12px;
+  padding: 14px 28px;
+  color: var(--text-quantum);
+  font-weight: 600;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  animation: quantum-glow 3s ease-in-out infinite;
+}
+
+.btn-quantum::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  transition: all 0.5s ease;
+}
+
+.btn-quantum:hover::before {
+  width: 300px;
+  height: 300px;
+}
+
+.btn-quantum:hover {
+  transform: translateY(-3px) scale(1.05);
+  box-shadow:
+    0 10px 30px rgba(0, 153, 255, 0.4),
+    0 0 40px rgba(153, 85, 255, 0.3);
+}
+
+.btn-quantum:active {
+  transform: translateY(-1px) scale(1.02);
+}
+
+/* Balance Quantique */
+.balance-quantum {
+  font-size: 3rem;
+  font-weight: 700;
+  background: var(--quantum-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gradient-morph 8s ease-in-out infinite;
+  text-shadow: 0 0 30px rgba(0, 153, 255, 0.5);
+}
+
+/* Particules Quantiques */
+.particle-system {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  background: var(--quantum-cyan);
+  border-radius: 50%;
+  animation: particle-float 6s linear infinite;
+  box-shadow: 0 0 10px var(--quantum-cyan);
+}
+
+.particle:nth-child(1) { left: 10%; animation-delay: 0s; }
+.particle:nth-child(2) { left: 30%; animation-delay: 1s; }
+.particle:nth-child(3) { left: 50%; animation-delay: 2s; }
+.particle:nth-child(4) { left: 70%; animation-delay: 3s; }
+.particle:nth-child(5) { left: 90%; animation-delay: 4s; }
+
+/* Input Quantiques */
+.input-quantum {
+  background: var(--bg-glass);
+  border: 1px solid var(--border-quantum);
+  border-radius: 12px;
+  padding: 16px;
+  color: var(--text-quantum);
+  font-size: 1rem;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+}
+
+.input-quantum:focus {
+  outline: none;
+  border-color: var(--quantum-purple);
+  box-shadow:
+    0 0 0 3px rgba(153, 85, 255, 0.2),
+    0 0 20px rgba(153, 85, 255, 0.3);
+  animation: quantum-glow 2s ease-in-out infinite;
+}
+
+/* Loading Quantique */
+.loading-quantum {
+  position: relative;
+  width: 40px;
+  height: 40px;
+}
+
+.loading-quantum::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: 3px solid transparent;
+  border-top: 3px solid var(--quantum-blue);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.loading-quantum::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: calc(100% - 6px);
+  height: calc(100% - 6px);
+  border: 2px solid transparent;
+  border-bottom: 2px solid var(--quantum-cyan);
+  border-radius: 50%;
+  animation: spin 1.5s linear infinite reverse;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Responsive Quantum */
+@media (max-width: 768px) {
+  .card-quantum {
+    padding: 16px;
+    border-radius: 16px;
+  }
+
+  .balance-quantum {
+    font-size: 2rem;
+  }
+
+  .btn-quantum {
+    padding: 12px 20px;
+  }
+}
+
+/* Accessibilité */
+@media (prefers-reduced-motion: reduce) {
+  .quantum-pulse,
+  .gradient-morph,
+  .quantum-glow,
+  .particle-float,
+  .glass-shift {
+    animation: none;
+  }
+}

@@ -23,8 +23,6 @@ pub struct RoleProof {
     pub chain_tip_hash: Option<String>,
     /// For Miner/Relay: chain height (proves full chain storage)
     pub chain_height: Option<u64>,
-    /// For Prover: a sample proof hash to demonstrate proving capability
-    pub sample_proof_hash: Option<String>,
     /// Timestamp of proof generation
     pub timestamp: u64,
 }
@@ -37,7 +35,6 @@ impl RoleProof {
             mik_tx_hash: Some(mik_tx_hash),
             chain_tip_hash: Some(chain_tip),
             chain_height: Some(height),
-            sample_proof_hash: None,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -52,22 +49,6 @@ impl RoleProof {
             mik_tx_hash: None,
             chain_tip_hash: Some(chain_tip),
             chain_height: Some(height),
-            sample_proof_hash: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        }
-    }
-
-    /// Create a proof for a Prover role
-    pub fn for_prover(chain_tip: String, height: u64, sample_proof: String) -> Self {
-        Self {
-            role: NodeRole::Prover,
-            mik_tx_hash: None,
-            chain_tip_hash: Some(chain_tip),
-            chain_height: Some(height),
-            sample_proof_hash: Some(sample_proof),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -82,7 +63,6 @@ impl RoleProof {
             mik_tx_hash: None,
             chain_tip_hash: None,
             chain_height: None,
-            sample_proof_hash: None,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -100,8 +80,6 @@ pub enum RoleValidation {
     MinerWithoutMik,
     /// Node claims full chain but reported height is too far behind network tip
     ChainTooFarBehind { claimed: u64, network_tip: u64 },
-    /// Prover claims to prove but provided no proof sample
-    ProverWithoutProof,
     /// Peer already registered with a different role (anti-dual-role)
     DuplicateRole { existing: NodeRole, claimed: NodeRole },
     /// Proof is too old (stale)
@@ -124,7 +102,6 @@ impl std::fmt::Display for RoleValidation {
             Self::ChainTooFarBehind { claimed, network_tip } => {
                 write!(f, "chain too far behind (claimed: {}, network tip: {})", claimed, network_tip)
             }
-            Self::ProverWithoutProof => write!(f, "prover without sample proof"),
             Self::DuplicateRole { existing, claimed } => {
                 write!(f, "already registered as {} but claiming {}", existing, claimed)
             }
@@ -188,7 +165,7 @@ impl RoleValidator {
         if let Some(existing) = self.peer_roles.get(&peer) {
             if existing.role != proof.role {
                 tracing::warn!(
-                    "🚫 Anti-cheat: peer {} already registered as {} but claiming {}",
+                    "Anti-cheat: peer {} already registered as {} but claiming {}",
                     peer, existing.role, proof.role
                 );
                 return RoleValidation::DuplicateRole {
@@ -212,7 +189,6 @@ impl RoleValidator {
         let validation = match proof.role {
             NodeRole::Miner => self.validate_miner(proof),
             NodeRole::Relay => self.validate_relay(proof),
-            NodeRole::Prover => self.validate_prover(proof),
             NodeRole::LightClient => RoleValidation::Valid, // Light clients need no proof
         };
 
@@ -226,7 +202,7 @@ impl RoleValidator {
             info.role = proof.role;
             info.last_validated = Instant::now();
             info.validation_count += 1;
-            tracing::info!("✅ Peer {} validated as {}", peer, proof.role);
+            tracing::info!("Peer {} validated as {}", peer, proof.role);
         } else {
             // Record fraud strike
             let info = self.peer_roles.entry(peer).or_insert(PeerRoleInfo {
@@ -237,7 +213,7 @@ impl RoleValidator {
             });
             info.fraud_strikes += 1;
             tracing::warn!(
-                "⚠️ Anti-cheat: peer {} failed {} validation (strike {}/{}): {}",
+                "Anti-cheat: peer {} failed {} validation (strike {}/{}): {}",
                 peer, proof.role, info.fraud_strikes, MAX_FRAUD_STRIKES, validation
             );
         }
@@ -277,24 +253,6 @@ impl RoleValidator {
         }
     }
 
-    fn validate_prover(&self, proof: &RoleProof) -> RoleValidation {
-        // Prover MUST demonstrate proving capability
-        if proof.sample_proof_hash.is_none() {
-            return RoleValidation::ProverWithoutProof;
-        }
-        // Prover should also store full chain for witness generation
-        match proof.chain_height {
-            Some(h) if self.network_tip > 0 && h + self.max_chain_lag < self.network_tip => {
-                RoleValidation::ChainTooFarBehind {
-                    claimed: h,
-                    network_tip: self.network_tip,
-                }
-            }
-            None => RoleValidation::IncompleteProof("prover must report chain height".into()),
-            _ => RoleValidation::Valid,
-        }
-    }
-
     /// Get the verified role of a peer (None if not registered or expired)
     pub fn get_peer_role(&self, peer: &SocketAddr) -> Option<NodeRole> {
         self.peer_roles.get(peer).and_then(|info| {
@@ -323,7 +281,6 @@ impl RoleValidator {
             Some(role) => match task {
                 PeerTask::MineBlock => role.can_mine(),
                 PeerTask::RelayBlock | PeerTask::RelayTransaction => role.can_relay(),
-                PeerTask::GenerateProof => role.can_prove(),
                 PeerTask::ServeSnapshot => role.stores_full_chain(),
                 PeerTask::ServeWitness => role.stores_full_chain(),
                 PeerTask::SyncHeaders => true, // All roles can sync headers
@@ -359,7 +316,6 @@ impl RoleValidator {
     pub fn stats(&self) -> RoleValidatorStats {
         let mut miners = 0;
         let mut relays = 0;
-        let mut provers = 0;
         let mut light_clients = 0;
         let mut banned = 0;
 
@@ -371,7 +327,6 @@ impl RoleValidator {
             match info.role {
                 NodeRole::Miner => miners += 1,
                 NodeRole::Relay => relays += 1,
-                NodeRole::Prover => provers += 1,
                 NodeRole::LightClient => light_clients += 1,
             }
         }
@@ -380,7 +335,6 @@ impl RoleValidator {
             total_peers: self.peer_roles.len(),
             miners,
             relays,
-            provers,
             light_clients,
             banned,
         }
@@ -393,7 +347,6 @@ pub enum PeerTask {
     MineBlock,
     RelayBlock,
     RelayTransaction,
-    GenerateProof,
     ServeSnapshot,
     ServeWitness,
     SyncHeaders,
@@ -405,7 +358,6 @@ pub struct RoleValidatorStats {
     pub total_peers: usize,
     pub miners: usize,
     pub relays: usize,
-    pub provers: usize,
     pub light_clients: usize,
     pub banned: usize,
 }
@@ -450,7 +402,6 @@ mod tests {
             mik_tx_hash: None, // No MIK!
             chain_tip_hash: Some("hash".into()),
             chain_height: Some(100),
-            sample_proof_hash: None,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -480,28 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prover_without_proof_rejected() {
-        let mut validator = RoleValidator::new();
-        let peer = test_addr(9004);
-
-        let proof = RoleProof {
-            role: NodeRole::Prover,
-            mik_tx_hash: None,
-            chain_tip_hash: Some("hash".into()),
-            chain_height: Some(100),
-            sample_proof_hash: None, // No proof!
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-        assert_eq!(
-            validator.validate_and_register(peer, &proof),
-            RoleValidation::ProverWithoutProof
-        );
-    }
-
-    #[test]
     fn test_light_client_always_valid() {
         let mut validator = RoleValidator::new();
         let peer = test_addr(9005);
@@ -516,31 +445,21 @@ mod tests {
 
         let miner = test_addr(9010);
         let relay = test_addr(9011);
-        let prover = test_addr(9012);
         let light = test_addr(9013);
 
         validator.validate_and_register(miner, &RoleProof::for_miner("mik".into(), "h".into(), 100));
         validator.validate_and_register(relay, &RoleProof::for_relay("h".into(), 100));
-        validator.validate_and_register(prover, &RoleProof::for_prover("h".into(), 100, "proof".into()));
         validator.validate_and_register(light, &RoleProof::for_light_client());
 
         // Only miner can mine
         assert!(validator.can_handle_task(&miner, PeerTask::MineBlock));
         assert!(!validator.can_handle_task(&relay, PeerTask::MineBlock));
-        assert!(!validator.can_handle_task(&prover, PeerTask::MineBlock));
         assert!(!validator.can_handle_task(&light, PeerTask::MineBlock));
 
         // Miner and relay can relay
         assert!(validator.can_handle_task(&miner, PeerTask::RelayBlock));
         assert!(validator.can_handle_task(&relay, PeerTask::RelayBlock));
-        assert!(!validator.can_handle_task(&prover, PeerTask::RelayBlock));
         assert!(!validator.can_handle_task(&light, PeerTask::RelayBlock));
-
-        // Miner and prover can prove
-        assert!(validator.can_handle_task(&miner, PeerTask::GenerateProof));
-        assert!(!validator.can_handle_task(&relay, PeerTask::GenerateProof));
-        assert!(validator.can_handle_task(&prover, PeerTask::GenerateProof));
-        assert!(!validator.can_handle_task(&light, PeerTask::GenerateProof));
 
         // Light client can't serve snapshots or witnesses
         assert!(!validator.can_handle_task(&light, PeerTask::ServeSnapshot));
@@ -572,15 +491,13 @@ mod tests {
 
         validator.validate_and_register(test_addr(9030), &RoleProof::for_miner("m".into(), "h".into(), 100));
         validator.validate_and_register(test_addr(9031), &RoleProof::for_relay("h".into(), 100));
-        validator.validate_and_register(test_addr(9032), &RoleProof::for_prover("h".into(), 100, "p".into()));
         validator.validate_and_register(test_addr(9033), &RoleProof::for_light_client());
 
         let stats = validator.stats();
         assert_eq!(stats.miners, 1);
         assert_eq!(stats.relays, 1);
-        assert_eq!(stats.provers, 1);
         assert_eq!(stats.light_clients, 1);
-        assert_eq!(stats.total_peers, 4);
+        assert_eq!(stats.total_peers, 3);
         assert_eq!(stats.banned, 0);
     }
 }

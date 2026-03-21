@@ -445,7 +445,7 @@ impl ConsensusMetricsCalculator {
             let current_difficulty = self.blocks.back()
                 .map(|b| b.difficulty)
                 .unwrap_or(crate::consensus::difficulty::MIN_DIFFICULTY);
-            2_f64.powi(current_difficulty as i32) / timing.avg_block_time
+            current_difficulty as f64 / timing.avg_block_time
         } else {
             0.0
         };

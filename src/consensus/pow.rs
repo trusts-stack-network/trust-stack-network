@@ -2,6 +2,7 @@
 //!
 //! Uses Poseidon hash (ZK-friendly) instead of SHA-256.
 //! This enables efficient in-circuit verification of PoW proofs.
+//! Nonce is 64 bytes: 56 random bytes (per thread) + 8 byte counter.
 
 use crate::core::{BlockHeaderHashPrefix, ShieldedBlock};
 use std::sync::{
@@ -39,29 +40,32 @@ fn mine_block_single(block: &mut ShieldedBlock) -> u64 {
     let prefix = BlockHeaderHashPrefix::new_with_height(&block.header, block.height());
     let mut attempts = 0u64;
 
+    // Nonce: 56 zero bytes (single thread) + 8 byte counter
+    let mut nonce = [0u8; 64];
+
     loop {
         if prefix.meets_difficulty(
             block.header.timestamp,
             block.header.difficulty,
-            block.header.nonce,
+            &nonce,
         ) {
+            block.header.nonce = nonce;
             return attempts;
         }
 
-        block.header.nonce = block.header.nonce.wrapping_add(1);
+        // Increment the counter in the last 8 bytes
+        let counter = u64::from_le_bytes(nonce[56..64].try_into().unwrap());
+        nonce[56..64].copy_from_slice(&counter.wrapping_add(1).to_le_bytes());
         attempts += 1;
 
         // Update timestamp periodically to avoid stale blocks
         if attempts % 1_000_000 == 0 {
             // SECURITY FIX: Remplacement de unwrap() par une gestion d'erreur sécurisée
             // Un panic ici arrêterait le mining complet
-            // → Si SystemTime::now() < UNIX_EPOCH (horloge système invalide),
-            // on utilise le timestamp actuel du bloc sans le modifier
             if let Ok(duration) = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH) {
                 block.header.timestamp = duration.as_secs();
             }
-            // Si l'horloge est invalide, on continue avec le timestamp existant
         }
     }
 }
@@ -117,7 +121,7 @@ impl MiningPool {
             let handle = std::thread::spawn(move || {
                 while let Ok(command) = rx.recv() {
                     match command {
-                        WorkerCommand::Mine(job) => run_mining_job(job, _worker_id, jobs),
+                        WorkerCommand::Mine(job) => run_mining_job(job, _worker_id),
                         WorkerCommand::Stop => break,
                     }
                 }
@@ -168,7 +172,6 @@ impl MiningPool {
         }
 
         // SECURITY FIX: Remplacement de unwrap() par unwrap_or_default() + log
-        // Un panic ici corromprait le résultat du mining
         if let Ok(mut guard) = result.lock() {
             if let Some(winner) = guard.take() {
                 *block = winner;
@@ -196,7 +199,7 @@ impl Drop for MiningPool {
     }
 }
 
-fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize) {
+fn run_mining_job(job: MineJob, worker_id: usize) {
     let MineJob {
         mut template,
         found,
@@ -205,10 +208,22 @@ fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize) {
         done_tx,
     } = job;
 
-    template.header.nonce = template.header.nonce.wrapping_add(worker_id as u64);
+    // Each worker gets a unique nonce prefix: first 56 bytes are random per worker.
+    // We use a simple deterministic derivation from worker_id for the first 8 bytes
+    // to guarantee disjoint nonce spaces.
+    let mut nonce = [0u8; 64];
+    // Set worker ID in the first 8 bytes to ensure disjoint nonce spaces
+    nonce[0..8].copy_from_slice(&(worker_id as u64).to_le_bytes());
+    // Fill bytes 8..56 with pseudo-random data based on worker_id + timestamp
+    let seed = template.header.timestamp.wrapping_mul(worker_id as u64 + 1);
+    for i in (8..56).step_by(8) {
+        let val = seed.wrapping_add(i as u64).wrapping_mul(0x517cc1b727220a95);
+        let end = (i + 8).min(56);
+        nonce[i..end].copy_from_slice(&val.to_le_bytes()[..end - i]);
+    }
+    // Last 8 bytes are the counter, starting at 0
 
     let prefix = BlockHeaderHashPrefix::new_with_height(&template.header, template.height());
-    let step = jobs as u64;
     let mut attempts = 0u64;
 
     loop {
@@ -219,9 +234,10 @@ fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize) {
         if prefix.meets_difficulty(
             template.header.timestamp,
             template.header.difficulty,
-            template.header.nonce,
+            &nonce,
         ) {
             if !found.swap(true, Ordering::Relaxed) {
+                template.header.nonce = nonce;
                 // SECURITY FIX: Gestion sécurisée du Mutex poisoning
                 if let Ok(mut guard) = result.lock() {
                     *guard = Some(template.clone());
@@ -230,7 +246,9 @@ fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize) {
             break;
         }
 
-        template.header.nonce = template.header.nonce.wrapping_add(step);
+        // Increment the counter in the last 8 bytes
+        let counter = u64::from_le_bytes(nonce[56..64].try_into().unwrap());
+        nonce[56..64].copy_from_slice(&counter.wrapping_add(1).to_le_bytes());
         attempts += 1;
 
         if attempts % 1_000_000 == 0 {
