@@ -150,7 +150,8 @@ TSN se connecte automatiquement à un réseau de seed nodes distribués mondiale
 ### Économie
 - **Récompense** : 50 TSN/bloc
 - **Halving** : Tous les 210,000 blocs
-- **Dev Fund** : 5% automatique
+- **Dev Fees** : 5% automatique
+- **Relay Pool** : 3% pour les nœuds relais
 - **Temps bloc** : ~10 secondes
 
 ---

@@ -103,8 +103,9 @@ sequenceDiagram
 - Algo : `new_diff = old_diff * (600 * T_target) / (T_observed)` avec limite 4×/÷4 par fenêtre.
 
 ### Rewards & fees
-- Subsidence 5 % par an
-- 80 % reward au miner, 20 % au DAO Treasury (adresse `ts1treasury…` verrouillée script)
+- Halving every 210,000 blocks (Bitcoin-style)
+- 92% reward to miner, 5% dev fees to treasury, 3% relay pool
+- NO PREMINE — treasury accumulates through mining only
 
 ---
 

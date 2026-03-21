@@ -141,7 +141,8 @@ curl http://localhost:8333/sync/status   # Statut synchronisation
 - Difficulté genesis : 12
 - Ajustement difficulté : Tous les 144 blocs (~24h)
 - Halving : Tous les 210,000 blocs
-- Dev fund : 5% automatique
+- Dev fees : 5% automatique
+- Relay pool : 3% pour les nœuds relais
 # Créer nouveau wallet shielded
 ./target/release/tsn new-wallet --output mon-wallet.json
 

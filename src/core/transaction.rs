@@ -288,7 +288,7 @@ impl ShieldedTransaction {
 
 /// A coinbase transaction (mining reward).
 /// Creates a new note for the miner without any spends.
-/// Since the dev fee system, the reward is split: 95% to miner, 5% to dev treasury.
+/// Since the dev fee system, the reward is split: 92% miner, 5% dev fees, 3% relay pool.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoinbaseTransaction {
     /// Commitment to the reward note (V1/BN254).

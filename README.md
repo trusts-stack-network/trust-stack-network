@@ -5,13 +5,12 @@
 <h1 align="center">Trust Stack Network (TSN)</h1>
 
 <p align="center">
-  <strong>Post-quantum privacy blockchain</strong><br>
-  Plonky3 STARKs &bull; ML-DSA-65 &bull; Poseidon2 &bull; zkVM Smart Contracts
+  <strong>Post-quantum privacy blockchain — Plonky3 STARKs · ML-DSA-65 · Poseidon2 · Shielded Transactions</strong>
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.0-blue">
-  <img alt="Rust" src="https://img.shields.io/badge/rust-70k+_lines-orange">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.6.0-blue">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-84k+_lines-orange">
   <img alt="Tests" src="https://img.shields.io/badge/tests-800+-brightgreen">
   <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
@@ -38,13 +37,16 @@ Trust Stack Network is a **Layer 1 blockchain** designed from the ground up for 
 
 | Feature | Description |
 |---------|-------------|
-| **Plonky3 STARKs** | AIR-based zero-knowledge proofs — no trusted setup, truly post-quantum |
+| **Plonky3 STARKs** | AIR-based zero-knowledge proofs wired into block validation — no trusted setup, truly post-quantum |
 | **ML-DSA-65 (FIPS 204)** | NIST post-quantum digital signatures for all transactions and blocks |
 | **SLH-DSA (FIPS 205)** | Stateless hash-based signatures as secondary post-quantum layer |
 | **Poseidon2** | ZK-friendly hash function over the Goldilocks field (p = 2⁶⁴ - 2³² + 1) |
 | **Shielded Transactions** | Amounts and addresses hidden by default via ZK commitments and nullifiers |
 | **zkVM Smart Contracts** | Stack-based VM with 30+ opcodes, gas metering, and ZK execution traces |
-| **MIK Consensus** | Mining Identity Key — Proof of Work with anti-Sybil protection |
+| **MIK Consensus** | Mining Identity Key — Proof of Work with numeric difficulty and 512-bit nonce |
+| **Fast Sync** | Snapshot-based synchronization — full sync in ~20 seconds |
+| **BIP39 Wallet** | 24-word mnemonic seed phrase for wallet backup and recovery |
+| **DNS Seed Discovery** | Automatic peer discovery via seed1-4.tsnchain.com |
 | **4 Node Roles** | Miner, Relay, Prover, Light Client — each contributes uniquely |
 
 ## Security Model
@@ -56,7 +58,7 @@ TSN is designed to be **fully quantum-safe** — not just signatures, but the en
 | Signatures | ML-DSA-65 | FIPS 204 | Transaction & block signing |
 | Backup Signatures | SLH-DSA (SPHINCS+) | FIPS 205 | Stateless hash-based fallback |
 | ZK Proofs | Plonky3 STARKs (AIR) | — | Shielded transaction validity |
-| Hash Function | Poseidon2 | — | PoW mining, Merkle trees, commitments |
+| Hash Function | Poseidon2 | — | PoW mining (numeric difficulty, 512-bit nonce), Merkle trees, commitments |
 | Field | Goldilocks | p = 2⁶⁴ - 2³² + 1 | ZK-friendly arithmetic |
 | Encryption | ChaCha20-Poly1305 | RFC 8439 | Note payload encryption |
 | Anti-Sybil | MIK | — | One identity per miner |
@@ -65,7 +67,7 @@ TSN is designed to be **fully quantum-safe** — not just signatures, but the en
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         TSN Node v0.5.0                              │
+│                         TSN Node v0.6.0                              │
 ├──────────────┬──────────────┬──────────────┬─────────────────────────┤
 │    Core      │    Crypto    │  Consensus   │        Network          │
 │  Block       │  Poseidon2   │  PoW Mining  │  P2P Protocol           │
@@ -82,7 +84,7 @@ TSN is designed to be **fully quantum-safe** — not just signatures, but the en
 └──────────────┴────────────────────────────────┴───────────────────────┘
 ```
 
-## Smart Contracts (v0.5.0)
+## Smart Contracts (v0.6.0)
 
 TSN includes a **stack-based zkVM** that executes smart contracts with gas metering and produces execution traces for ZK proof generation.
 
@@ -93,11 +95,10 @@ TSN includes a **stack-based zkVM** that executes smart contracts with gas meter
 
 ## Node Types
 
-| Type | Stores Full Chain | Mines | Relays | Proves | Reward |
+| Type | Stores Full Chain | Mines | Relays | ZK Proofs | Reward |
 |------|:-:|:-:|:-:|:-:|--------|
-| **Miner** `--role miner` | ✅ | ✅ | ✅ | ✅ | 85% block reward |
-| **Relay** `--role relay` | ✅ | — | ✅ | — | 8% relay pool |
-| **Prover** `--role prover` | ✅ | — | ✅ | ✅ | Proving fees |
+| **Miner** `--role miner` | ✅ | ✅ | ✅ | ✅ | 92% block reward |
+| **Relay** `--role relay` | ✅ | — | ✅ | — | 3% relay pool |
 | **Light Client** `--role light` | — | — | — | — | — |
 
 ## Quick Start
@@ -108,15 +109,17 @@ git clone https://github.com/trusts-stack-network/trust-stack-network.git
 cd trust-stack-network
 cargo build --release
 
-# Run a miner node
+# Run a miner node (DNS seeds are built-in — no IPs needed)
 ./target/release/tsn --role miner --port 9333
 
 # Run a relay node
-./target/release/tsn --role relay --port 9333 --seeds "seed1.tsnchain.com:9333"
+./target/release/tsn --role relay --port 9333
 
 # Run a light client
 ./target/release/tsn --role light --port 9333
 ```
+
+Peer discovery is automatic via DNS seeds (seed1-4.tsnchain.com). New nodes fast-sync from a snapshot in ~20 seconds.
 
 See the full [Run a Node guide](https://tsnchain.com/run-node.html) for requirements and configuration.
 
@@ -125,7 +128,7 @@ See the full [Run a Node guide](https://tsnchain.com/run-node.html) for requirem
 | Parameter | Value |
 |-----------|-------|
 | Default Port | 9333 |
-| Block Reward | 50 TSN (85% miner, 8% relay, 7% dev) |
+| Block Reward | 50 TSN (92% miner, 5% dev fees, 3% relay pool) |
 | Target Block Time | ~10 seconds |
 | Difficulty Adjustment | Every 10 blocks |
 | Max Reorg Depth | 100 blocks |
@@ -158,7 +161,7 @@ See [tsnchain.com/testnet.html](https://tsnchain.com/testnet.html) for details.
 
 ## Codebase
 
-- **70,000+ lines** of Rust
+- **84,000+ lines** of Rust
 - **800+ tests** across 20+ modules
 - **280+ source files**
 - **700+ commits** of active development

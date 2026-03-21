@@ -121,25 +121,9 @@ TSN propose 4 types de nœuds selon vos besoins :
 - ✅ Point d'entrée pour autres nœuds
 - ✅ APIs REST complètes
 
-### 🔬 Prover Node (Vérification maximale)
+### ℹ️ Note v0.6.0
 
-**Pour** : Auditeurs, recherche, vérification complète
-**Ressources** : Maximales (32 GB RAM, 1 TB disque)
-
-```bash
-# Node prover avec vérification complète
-./target/release/tsn node --role prover \
-    --full-verify \
-    --port 8333 \
-    --data-dir /opt/tsn/prover-data
-```
-
-**Fonctionnalités** :
-- ✅ Vérification complète des preuves ZK depuis genèse
-- ✅ Validation cryptographique maximum
-- ✅ APIs étendues pour audit
-- ✅ Métriques détaillées
-- ⚠️ Très intensif en CPU/RAM
+Le rôle **Prover** a été supprimé en v0.6.0. Les preuves ZK sont désormais générées directement par les **Miners** lors du minage (PoW + ZK intégrés).
 
 ## ⚙️ Configuration avancée
 

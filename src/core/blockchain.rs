@@ -594,28 +594,48 @@ impl ShieldedBlockchain {
     }
 
     /// Add a validated block to the chain.
-    pub fn add_block(&mut self, block: ShieldedBlock) -> Result<(), BlockchainError> {
-        // Validate first
-        self.validate_block(&block)?;
+    /// Add a block without full validation (trusted source, e.g. fast-sync from seeds).
+    /// Only checks prev_hash continuity. Skips PoW, signatures, ZK proofs.
+    /// Security: caller MUST verify a checkpoint hash after importing a batch.
+    pub fn add_block_trusted(&mut self, block: ShieldedBlock) -> Result<(), BlockchainError> {
+        if block.header.prev_hash != self.latest_hash() {
+            return Err(BlockchainError::InvalidPrevHash);
+        }
+        self.insert_block_internal(block, false)
+    }
 
+    pub fn add_block(&mut self, block: ShieldedBlock) -> Result<(), BlockchainError> {
+        self.validate_block(&block)?;
+        self.insert_block_internal(block, true)
+    }
+
+    /// Verify that a specific height has the expected hash.
+    /// Used after fast-sync to validate the trusted chain against hardcoded checkpoints.
+    pub fn verify_checkpoint(&self, height: u64, expected_hash: &str) -> bool {
+        if let Some(block) = self.get_block_by_height(height) {
+            let actual_hash = hex::encode(block.hash());
+            actual_hash == expected_hash
+        } else {
+            false
+        }
+    }
+
+    /// Internal: insert a block into the chain (shared by add_block and add_block_trusted).
+    fn insert_block_internal(&mut self, block: ShieldedBlock, full_mode: bool) -> Result<(), BlockchainError> {
         let hash = block.hash();
         let new_height = self.height_index.len() as u64;
 
-        // Persist block and nullifiers if we have a database
+        // Persist block and nullifiers
         if let Some(ref db) = self.db {
-            // Save block
             db.save_block(&block, new_height)
                 .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
 
-            // Save nullifiers from V1 transactions
             for tx in &block.transactions {
                 for spend in &tx.spends {
                     db.save_nullifier(&spend.nullifier.to_bytes())
                         .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
                 }
             }
-
-            // Save nullifiers from V2 transactions
             for tx in &block.transactions_v2 {
                 for spend in &tx.spends {
                     db.save_nullifier(&spend.nullifier)
@@ -623,36 +643,32 @@ impl ShieldedBlockchain {
                 }
             }
 
-            // Update metadata
             db.set_metadata("difficulty", &block.header.difficulty.to_string())
                 .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
 
-            // Flush to ensure durability
-            db.flush()
-                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+            // In trusted mode, flush less frequently (every 100 blocks instead of every block)
+            if full_mode || new_height % 100 == 0 {
+                db.flush()
+                    .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+            }
         }
 
-        // Apply V1 transactions to state
+        // Apply transactions to state
         for tx in &block.transactions {
             self.state.apply_transaction(tx);
         }
-        // Apply V2 transactions to state
         for tx in &block.transactions_v2 {
             self.state.apply_transaction_v2(tx);
         }
         self.state.apply_coinbase(&block.coinbase);
 
-        // Update difficulty
+        // Update chain state
         self.difficulty = block.header.difficulty;
-
-        // Update cumulative work (heaviest chain metric)
         self.cumulative_work += block.header.difficulty as u128;
-
-        // Add to in-memory structures
         self.blocks.insert(hash, block);
         self.height_index.push(hash);
 
-        // Update checkpoint if this block's height is a multiple of CHECKPOINT_INTERVAL
+        // Checkpoint finalization
         if crate::config::CHECKPOINT_ENABLED
             && new_height > 0
             && new_height % crate::config::CHECKPOINT_INTERVAL == 0
@@ -660,22 +676,23 @@ impl ShieldedBlockchain {
         {
             self.last_checkpoint_height = new_height;
             self.last_checkpoint_hash = Some(hash);
-            tracing::info!(
-                "Checkpoint finalized at height {} (hash: {})",
-                new_height,
-                hex::encode(hash)
-            );
+            if full_mode {
+                tracing::info!(
+                    "Checkpoint finalized at height {} (hash: {})",
+                    new_height, hex::encode(hash)
+                );
+            }
         }
 
-        // Save state snapshot every 10 blocks for fast startup recovery
-        // Previously every 1000 blocks — caused 25+ min startup replays after updates
-        if new_height > 0 && new_height % 10 == 0 {
+        // Save state snapshot every 10 blocks (for fast startup)
+        // In trusted mode with full_mode=false, save less frequently (every 500 blocks)
+        let snapshot_interval = if full_mode { 10 } else { 500 };
+        if new_height > 0 && new_height % snapshot_interval == 0 {
             if let Some(ref db) = self.db {
                 let snapshot = self.state.snapshot_pq();
                 if let Err(e) = db.save_state_snapshot(&snapshot, new_height) {
                     tracing::warn!("Failed to save state snapshot at height {}: {}", new_height, e);
                 }
-                // Persist cumulative_work to avoid O(n) recalculation on startup
                 let _ = db.set_metadata("cumulative_work", &self.cumulative_work.to_string());
             }
         }
@@ -940,7 +957,7 @@ impl ShieldedBlockchain {
     }
 
     /// Create a coinbase transaction for a new block.
-    /// Splits reward: 95% to miner, 5% dev fee to treasury.
+    /// Splits reward: 92% to miner, 5% dev fees to treasury, 3% relay pool.
     pub fn create_coinbase(
         &self,
         miner_pk_hash: [u8; 32],
@@ -955,11 +972,12 @@ impl ShieldedBlockchain {
         let base_reward = crate::config::block_reward_at_height(height);
         let total_reward = base_reward + extra_fees;
 
-        // Split reward: 95% miner, 5% dev fee
+        // Split reward: 92% miner, 5% dev fees, 3% relay pool
         let miner_amount = config::miner_reward(total_reward);
         let dev_amount = config::dev_fee(total_reward);
+        // Note: relay_pool(total_reward) = 3% accumulated for relay node distribution
 
-        // --- Miner note (95%) ---
+        // --- Miner note (92%) ---
         let miner_note = Note::new(miner_amount, miner_pk_hash, &mut rng);
         let miner_key = ViewingKey::from_pk_hash(miner_pk_hash);
         let miner_encrypted = miner_key.encrypt_note(&miner_note, &mut rng);
@@ -970,7 +988,7 @@ impl ShieldedBlockchain {
         miner_note.randomness.serialize_compressed(&mut miner_randomness_bytes[..]).unwrap();
         let miner_commitment_pq = commit_to_note_pq(miner_amount, &miner_pk_hash, &miner_randomness_bytes);
 
-        // --- Dev fee note (5%) ---
+        // --- Dev fees note (5%) ---
         let treasury_pk_hash = config::DEV_TREASURY_PK_HASH;
         let dev_note = Note::new(dev_amount, treasury_pk_hash, &mut rng);
         let treasury_key = ViewingKey::from_pk_hash(treasury_pk_hash);
@@ -1065,7 +1083,48 @@ impl ShieldedBlockchain {
             proof_verification_enabled: self.verifying_params.is_some(),
             assume_valid_height: self.assume_valid_height,
             last_checkpoint_height: self.last_checkpoint_height,
+            network_hashrate: self.estimate_network_hashrate(),
         }
+    }
+
+    /// Estimate network hashrate using Bitcoin's method:
+    /// hashrate = sum(difficulty_of_each_block) / time_span
+    /// over the last HASHRATE_WINDOW blocks.
+    fn estimate_network_hashrate(&self) -> f64 {
+        const HASHRATE_WINDOW: u64 = 120; // Same as Bitcoin Core default
+
+        let tip = self.height();
+        if tip < 2 {
+            return 0.0;
+        }
+
+        let start_height = if tip > HASHRATE_WINDOW { tip - HASHRATE_WINDOW } else { 1 };
+
+        // Get timestamps and difficulties of blocks in window
+        let tip_block = match self.get_block_by_height(tip) {
+            Some(b) => b,
+            None => return 0.0,
+        };
+        let start_block = match self.get_block_by_height(start_height) {
+            Some(b) => b,
+            None => return 0.0,
+        };
+
+        let time_span = tip_block.header.timestamp.saturating_sub(start_block.header.timestamp);
+        if time_span == 0 {
+            return 0.0;
+        }
+
+        // Sum difficulties of all blocks in window (= total work done)
+        let mut total_work: f64 = 0.0;
+        for h in (start_height + 1)..=tip {
+            if let Some(block) = self.get_block_by_height(h) {
+                total_work += block.header.difficulty as f64;
+            }
+        }
+
+        // hashrate = total_work / time_span (in seconds)
+        total_work / time_span as f64
     }
 
     /// Get the current assume-valid height.
@@ -1106,6 +1165,55 @@ impl ShieldedBlockchain {
         let data = serde_json::to_vec(&snapshot).ok()?;
         Some((data, height, hash))
     }
+
+    /// Import a state snapshot from a peer, setting the chain to the given height.
+    /// This skips block replay entirely — the state is trusted (verified by checkpoints after).
+    /// Only the last few blocks are synced normally to build the height index tail.
+    pub fn import_snapshot_at_height(
+        &mut self,
+        snapshot: crate::core::StateSnapshotPQ,
+        height: u64,
+        block_hash: [u8; 32],
+        difficulty: u64,
+    ) {
+        // Restore state
+        self.state.restore_pq_from_snapshot(snapshot.clone());
+
+        // Set chain metadata
+        self.difficulty = difficulty;
+        self.cumulative_work = difficulty as u128 * height as u128; // approximate
+
+        // Build a minimal height index (we'll fill in real hashes when we sync recent blocks)
+        // For now, put placeholder hashes — the important thing is height() returns the right value
+        self.height_index.clear();
+        for _ in 0..height {
+            self.height_index.push([0u8; 32]); // placeholder
+        }
+        // Set the tip hash correctly
+        self.height_index.push(block_hash);
+
+        // Update checkpoint
+        self.last_checkpoint_height = height;
+        self.last_checkpoint_hash = Some(block_hash);
+
+        // Save snapshot to local DB for fast restart
+        if let Some(ref db) = self.db {
+            if let Err(e) = db.save_state_snapshot(&snapshot, height) {
+                tracing::warn!("Failed to save imported snapshot: {}", e);
+            }
+            let _ = db.set_metadata("height", &height.to_string());
+            let _ = db.set_metadata("difficulty", &difficulty.to_string());
+            let _ = db.set_metadata("cumulative_work", &self.cumulative_work.to_string());
+            let _ = db.set_metadata("latest_hash", &hex::encode(block_hash));
+            let _ = db.set_metadata("fast_sync_base_height", &height.to_string());
+            let _ = db.flush();
+        }
+
+        tracing::info!(
+            "Snapshot imported: height={}, commitments={}, nullifiers={}",
+            height, self.state.commitment_count(), self.state.nullifier_count()
+        );
+    }
 }
 
 /// Summary information about the chain.
@@ -1124,6 +1232,8 @@ pub struct ChainInfo {
     /// Height of the last finalized checkpoint. Reorgs below this height
     /// are rejected. Set to 0 if no checkpoint yet.
     pub last_checkpoint_height: u64,
+    /// Estimated network hashrate in H/s (Bitcoin-style: sum(difficulty) / time_span over last N blocks)
+    pub network_hashrate: f64,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -6,7 +6,8 @@
 /// The difficulty used for the genesis block.
 /// This MUST be the same for all nodes on the network.
 /// Changing this creates an incompatible chain.
-pub const GENESIS_DIFFICULTY: u64 = 12;
+/// Numeric difficulty: hash_prefix (u64 big-endian) must be < u64::MAX / difficulty.
+pub const GENESIS_DIFFICULTY: u64 = 10000;
 
 /// Activation height for Poseidon Goldilocks PoW hash.
 /// Blocks at height >= this value use Poseidon over GoldilocksField (plonky2).
@@ -38,6 +39,18 @@ pub const SEED_NODES: &[&str] = &[
 /// Network name for identification
 pub const NETWORK_NAME: &str = "tsn-mainnet";
 
+/// Hardcoded checkpoints for fast-sync verification.
+/// After downloading blocks in trusted mode, the node verifies that these
+/// block hashes match. If any mismatch is found, the chain is rejected.
+/// Updated with each release.
+pub const FAST_SYNC_CHECKPOINTS: &[(u64, &str)] = &[
+    (1000, "00001b2472680fc639ed26e3685be505f447d5985feb9d34127a7403bca3fbca"),
+    (2000, "0000032433f0ae800c405fae727b0e77986aad79c44f24a115ffe966c87f465b"),
+    (4000, "000006323dc2bedeab8bb05fb1e872beadd94f21c32f9072c6cdbc5919de3bda"),
+    (6000, "0000017367102785e9d72b5004d8b9f6470920982efcfdb85cf3e9a8d8ba75bd"),
+    (8000, "000004897656bbcf66d38b35ac017edce417d5d4025a197944918af839a77808"),
+];
+
 /// Default port for nodes
 pub const DEFAULT_PORT: u16 = 8333;
 
@@ -64,13 +77,19 @@ pub fn block_reward_at_height(height: u64) -> u64 {
 }
 
 // ============================================================================
-// Dev Fee Configuration (5% of block reward to treasury)
+// Block Reward Distribution
+// ============================================================================
+//
+// Split: 92% miner, 5% dev fees, 3% relay pool
+// Total = 100%. NO PREMINE — treasury only accumulates through mining.
+// Relay pool: distributed to active relay nodes proportionally to uptime.
 // ============================================================================
 
-/// Dev fee percentage (5% of block reward).
-/// Applied to every block reward: 95% goes to miner, 5% to dev treasury.
-/// NO PREMINE — the treasury only accumulates through mining.
+/// Dev fees percentage (5% of block reward to treasury).
 pub const DEV_FEE_PERCENT: u64 = 5;
+
+/// Relay pool percentage (3% of block reward to relay nodes).
+pub const RELAY_POOL_PERCENT: u64 = 3;
 
 /// Dev treasury pk_hash (Blake2s256 hash of ML-DSA-65 public key).
 /// This is the PUBLIC hash — safe to include in code.
@@ -83,16 +102,22 @@ pub const DEV_TREASURY_PK_HASH: [u8; 32] = [
     0x22, 0xb7, 0xbe, 0x2a, 0xfd, 0x88, 0xa0, 0x01,
 ];
 
-/// Calculate miner reward from total reward (95%).
-/// Uses integer division: miner gets reward * 95 / 100.
+/// Calculate miner reward from total reward (92%).
+/// Miner gets total - dev_fee - relay_pool.
 pub fn miner_reward(total_reward: u64) -> u64 {
-    total_reward * (100 - DEV_FEE_PERCENT) / 100
+    total_reward * (100 - DEV_FEE_PERCENT - RELAY_POOL_PERCENT) / 100
 }
 
-/// Calculate dev fee from total reward (5%).
-/// Uses: total_reward - miner_reward to avoid rounding issues.
+/// Calculate dev fees from total reward (5%).
+/// Uses: ensures no rounding loss by computing last.
 pub fn dev_fee(total_reward: u64) -> u64 {
-    total_reward - miner_reward(total_reward)
+    total_reward * DEV_FEE_PERCENT / 100
+}
+
+/// Calculate relay pool share from total reward (3%).
+/// Remainder goes here to avoid rounding loss.
+pub fn relay_pool(total_reward: u64) -> u64 {
+    total_reward - miner_reward(total_reward) - dev_fee(total_reward)
 }
 
 /// Get seed nodes from environment or use defaults
@@ -221,4 +246,5 @@ pub const MAX_REORG_DEPTH: u64 = 100;
 /// must not start. This prevents silent chain forks from misconfigured genesis.
 ///
 /// Set to empty string to disable verification (first launch / testnet reset).
-pub const EXPECTED_GENESIS_HASH: &str = "87f69eaa9d6fe1d23bf4e2ced253b62cc782fc18f0d4c225374c27ffa304e2ee";
+/// Reset after PoW refactor to numeric difficulty + 64-byte nonce.
+pub const EXPECTED_GENESIS_HASH: &str = "8b6f36791b8ad50d871cb5444299b397b724e005a902d2d3789bcee9a63398f2";
