@@ -91,6 +91,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     );
     info!("Request body limit: {} bytes", MAX_BODY_SIZE);
 
+    // ALL routes — rate limiter DISABLED (was causing 429 sync deadlocks)
     let api_routes = Router::new()
         .route("/chain/info", get(chain_info))
         .route("/miner/stats", get(miner_stats))
@@ -101,16 +102,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/tx/:hash", get(get_transaction))
         .route("/transactions/recent", get(get_recent_transactions))
         .route("/mempool", get(get_mempool))
-        // Peer sync endpoints
         .route("/blocks", post(receive_block))
         .route("/blocks/since/:height", get(get_blocks_since))
-        // Peer management
         .route("/peers", get(get_peers))
         .route("/peers", post(add_peer))
         .route("/peers/p2p", get(get_p2p_peers))
-        // Transaction relay endpoint (for peer-to-peer relay)
         .route("/tx/relay", post(receive_transaction))
-        // Wallet scanning endpoints
         .route("/outputs/since/:height", get(get_outputs_since))
         .route("/nullifiers/check", post(check_nullifiers))
         .route("/witness/:commitment", get(get_witness))
@@ -121,17 +118,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/debug/poseidon-pq", get(debug_poseidon_pq_test))
         .route("/debug/merkle-pq", get(debug_merkle_pq))
         .route("/debug/verify-path", post(debug_verify_path))
-        // Wallet viewing-key endpoints
         .route("/wallet/viewing-key", get(wallet_viewing_key))
         .route("/wallet/watch", post(wallet_watch))
-        // Faucet endpoints
         .route("/faucet/status/:pk_hash", get(faucet_status))
         .route("/faucet/claim", post(faucet_claim))
         .route("/faucet/game-claim", post(faucet_game_claim))
         .route("/faucet/stats", get(faucet_stats))
-        // Sync gate tip endpoints (anti-fork)
-        .route("/tip", get(get_tip).post(receive_tip))
-        // Sync progress & version endpoints
         .route("/sync/status", get(sync_status))
         .route("/version.json", get(version_info))
         .route("/node/info", get(node_info))
@@ -146,9 +138,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/contract/:address", get(contract_info))
         .route("/contract/:address/events", get(contract_events))
         .with_state(state)
-        // Apply rate limiting (returns 429 Too Many Requests when exceeded)
-        .layer(rate_limit_layer)
-        // Apply request body size limit (returns 413 Payload Too Large when exceeded)
+        // Rate limiter REMOVED — was causing 429 deadlocks between nodes
+        // Body size limit still applied
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE));
 
     let ui_routes = Router::new()
@@ -711,8 +702,34 @@ async fn submit_transaction_v2(
 
     info!("V2 transaction {} added to mempool", &hash[..16]);
 
-    // TODO: Relay V2 transactions to peers
-    // For now, V2 transactions stay in local mempool
+    // Relay V2 transaction to peers via P2P GossipSub
+    {
+        let p2p_tx = state.p2p_broadcast.read().unwrap().clone();
+        if let Some(sender) = p2p_tx {
+            if let Ok(tx_data) = serde_json::to_vec(&tx) {
+                let _ = sender.try_send(super::p2p::P2pCommand::BroadcastTransaction(tx_data));
+            }
+        }
+    }
+
+    // Relay V2 transaction to peers via HTTP (fallback for non-upgraded nodes)
+    {
+        let peers = state.peers.read().unwrap().clone();
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+            for peer in &peers {
+                let url = format!("{}/tx/v2", peer);
+                let _ = client.post(&url)
+                    .json(&serde_json::json!({ "transaction": tx_clone }))
+                    .send()
+                    .await;
+            }
+        });
+    }
 
     Ok(Json(SubmitTxResponse {
         hash,

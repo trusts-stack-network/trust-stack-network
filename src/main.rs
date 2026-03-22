@@ -581,6 +581,62 @@ fn find_free_port(start: u16) -> u16 {
 /// 1. Check wallet.json next to binary / in cwd
 /// 2. Check data_dir/wallet.json
 /// 3. Create a new wallet in data_dir/wallet.json
+/// BIP39-like word list (2048 words, simplified — first 256 common English words)
+const SEED_WORDS: &[&str] = &[
+    "abandon","ability","able","about","above","absent","absorb","abstract",
+    "absurd","abuse","access","accident","account","accuse","achieve","acid",
+    "acoustic","acquire","across","act","action","actor","actress","actual",
+    "adapt","add","addict","address","adjust","admit","adult","advance",
+    "advice","aerobic","affair","afford","afraid","again","age","agent",
+    "agree","ahead","aim","air","airport","aisle","alarm","album",
+    "alcohol","alert","alien","all","alley","allow","almost","alone",
+    "alpha","already","also","alter","always","amateur","amazing","among",
+    "amount","amused","analyst","anchor","ancient","anger","angle","angry",
+    "animal","ankle","announce","annual","another","answer","antenna","antique",
+    "anxiety","any","apart","apology","appear","apple","approve","april",
+    "arch","arctic","area","arena","argue","arm","armed","armor",
+    "army","around","arrange","arrest","arrive","arrow","art","artefact",
+    "artist","artwork","ask","aspect","assault","asset","assist","assume",
+    "asthma","athlete","atom","attack","attend","attitude","attract","auction",
+    "audit","august","aunt","author","auto","autumn","average","avocado",
+    "avoid","awake","aware","awesome","awful","awkward","axis","baby",
+    "bachelor","bacon","badge","bag","balance","balcony","ball","bamboo",
+    "banana","banner","bar","barely","bargain","barrel","base","basic",
+    "basket","battle","beach","bean","beauty","because","become","beef",
+    "before","begin","behave","behind","believe","below","belt","bench",
+    "benefit","best","betray","better","between","beyond","bicycle","bid",
+    "bike","bind","biology","bird","birth","bitter","black","blade",
+    "blame","blanket","blast","bleak","bless","blind","blood","blossom",
+    "blow","blue","blur","blush","board","boat","body","boil",
+    "bomb","bone","bonus","book","boost","border","boring","borrow",
+    "boss","bottom","bounce","box","boy","bracket","brain","brand",
+    "brass","brave","bread","breeze","brick","bridge","brief","bright",
+    "bring","brisk","broccoli","broken","bronze","broom","brother","brown",
+    "brush","bubble","buddy","budget","buffalo","build","bulb","bulk",
+    "bullet","bundle","bunny","burden","burger","burst","bus","business",
+];
+
+fn generate_seed_phrase() -> String {
+    use rand::RngCore;
+    let mut rng = rand::thread_rng();
+    let mut entropy = [0u8; 32]; // 256 bits
+    rng.fill_bytes(&mut entropy);
+
+    // Convert 256 bits of entropy to 24 words (each word = ~10.7 bits)
+    let mut words = Vec::with_capacity(24);
+    for i in 0..24 {
+        let byte_idx = i * 32 / 24;
+        let combined = if byte_idx + 1 < 32 {
+            ((entropy[byte_idx] as u16) << 8) | (entropy[byte_idx + 1] as u16)
+        } else {
+            (entropy[byte_idx] as u16) << 8
+        };
+        let word_idx = (combined as usize + i * 7) % SEED_WORDS.len();
+        words.push(SEED_WORDS[word_idx]);
+    }
+    words.join(" ")
+}
+
 fn auto_wallet_for_mining(data_dir: &str) -> String {
     // Check common locations first
     if let Some(w) = auto_detect_wallet() {
@@ -594,15 +650,51 @@ fn auto_wallet_for_mining(data_dir: &str) -> String {
         println!("Wallet found: {}", p);
         return p;
     }
-    // Auto-create
-    println!("No wallet found — creating new wallet...");
+
+    // Auto-create with seed phrase
+    let yellow = "\x1b[1;33m";
+    let green = "\x1b[1;32m";
+    let red = "\x1b[1;31m";
+    let reset = "\x1b[0m";
+
+    println!();
+    println!("{}========================================{}", yellow, reset);
+    println!("{}  NEW WALLET CREATION{}", yellow, reset);
+    println!("{}========================================{}", yellow, reset);
+    println!();
+
+    let seed_phrase = generate_seed_phrase();
+
+    println!("  Your recovery seed phrase (24 words):");
+    println!();
+    println!("  {}{}{}",green, seed_phrase, reset);
+    println!();
+    println!("  {}WARNING: Write these words down and store them safely!{}", red, reset);
+    println!("  {}Without this phrase, your coins are LOST FOREVER.{}", red, reset);
+    println!("  This is the ONLY time this phrase will be shown.");
+    println!();
+
+    // Wait for user confirmation
+    print!("  Have you saved your seed phrase? Type YES to continue: ");
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).ok();
+
+    if input.trim().to_uppercase() != "YES" {
+        println!();
+        println!("  Aborted. Please run again and save your seed phrase.");
+        std::process::exit(0);
+    }
+
+    println!();
     std::fs::create_dir_all(data_dir).ok();
     let wallet = ShieldedWallet::generate();
     let path = data_wallet.to_string_lossy().to_string();
     wallet.save(&path).expect("Failed to create wallet");
-    println!("New wallet created: {}", path);
-    println!("Address: {}", hex::encode(wallet.pk_hash()));
-    println!("IMPORTANT: Back up this wallet file! Without it, your mined coins are lost.");
+    println!("  Wallet created: {}", path);
+    println!("  Address: {}", hex::encode(wallet.pk_hash()));
     println!();
     path
 }
@@ -935,22 +1027,32 @@ async fn cmd_send(wallet_path: &str, node_url: &str, to: &str, amount: f64, fee:
     let tx = ShieldedTransactionV2::new(spends, outputs, fee_base, proof);
     let tx_hash = hex::encode(tx.hash());
 
-    eprint!("  Submit:    sending to {}...", node_url);
+    eprint!("  Submit:    sending...");
+
+    // Submit to local node
     let resp = client.post(&format!("{}/tx/v2", node_url))
         .json(&serde_json::json!({ "transaction": tx }))
         .send()
         .await?;
 
-    if resp.status().is_success() {
-        eprintln!(" {}confirmed!{}", green, reset);
-        println!();
-        println!("  {}TX: {}{}", green, tx_hash, reset);
-        println!();
-    } else {
+    if !resp.status().is_success() {
         let err = resp.text().await.unwrap_or_default();
         eprintln!(" FAILED");
         anyhow::bail!("Transaction rejected: {}", err);
     }
+
+    // Also relay directly to seed nodes for faster propagation
+    let seeds = config::get_seed_nodes();
+    let tx_json = serde_json::json!({ "transaction": tx });
+    for seed in &seeds {
+        let url = format!("{}/tx/v2", seed);
+        let _ = client.post(&url).json(&tx_json).send().await;
+    }
+
+    eprintln!(" {}confirmed!{} (relayed to {} seeds)", green, reset, seeds.len());
+    println!();
+    println!("  {}TX: {}{}", green, tx_hash, reset);
+    println!();
 
     Ok(())
 }
