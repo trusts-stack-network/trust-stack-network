@@ -124,6 +124,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/faucet/claim", post(faucet_claim))
         .route("/faucet/game-claim", post(faucet_game_claim))
         .route("/faucet/stats", get(faucet_stats))
+        // Sync gate tip endpoints (anti-fork)
+        .route("/tip", get(get_tip).post(receive_tip))
         .route("/sync/status", get(sync_status))
         .route("/version.json", get(version_info))
         .route("/node/info", get(node_info))

@@ -30,10 +30,11 @@ pub const POSEIDON2_V2_ACTIVATION_HEIGHT: u64 = 1100;
 /// These are the initial nodes that new nodes connect to.
 /// Add your deployed node URLs here.
 pub const SEED_NODES: &[&str] = &[
-    "http://151.240.19.253:9333",
-    "http://45.145.164.76:9333",
-    "http://146.19.168.71:9333",
-    "http://45.132.96.141:9333",
+    "http://45.145.165.223:9333",   // node-1 (miner)
+    "http://151.240.19.253:9333",   // seed-1
+    "http://45.145.164.76:9333",    // seed-2
+    "http://146.19.168.71:9333",    // seed-3
+    "http://45.132.96.141:9333",    // seed-4
 ];
 
 /// Network name for identification
