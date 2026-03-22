@@ -1830,6 +1830,7 @@ async fn cmd_node(
 
         let jobs = jobs.max(1);
         let mine_state = state.clone();
+        let mine_wallet_path = mine_wallet.clone();
         let announce_url = our_url.clone();
         let local_url = format!("http://localhost:{}", port);
         let local_ip_url = format!("http://127.0.0.1:{}", port);
@@ -1938,6 +1939,27 @@ async fn cmd_node(
                                 chain.height(),
                                 &mined_block.hash_hex()[..16]
                             );
+
+                            // Save mined coinbase note to wallet (so balance updates immediately)
+                            // Use the correct global position in the commitment tree
+                            if let Some(ref wp) = mine_wallet_path {
+                                if let Ok(mut wallet) = ShieldedWallet::load(wp) {
+                                    // The miner reward commitment was just added to the tree.
+                                    // Its position = tree_size_before_this_block's commitments
+                                    // = current_tree_size - N (where N = commitments in this block)
+                                    let tree_size = chain.state().commitment_count() as u64;
+                                    // This block added: 1 (miner) + optionally 1 (dev fee) = 1-2 commitments
+                                    let coinbase_commitments = if mined_block.coinbase.has_dev_fee() { 2u64 } else { 1u64 };
+                                    let tx_commitments: u64 = mined_block.transactions.iter().map(|t| t.outputs.len() as u64).sum::<u64>()
+                                        + mined_block.transactions_v2.iter().map(|t| t.outputs.len() as u64).sum::<u64>();
+                                    let block_start_pos = tree_size - coinbase_commitments - tx_commitments;
+
+                                    let new_notes = wallet.scan_block(&mined_block, block_start_pos);
+                                    if new_notes > 0 {
+                                        wallet.save(wp).ok();
+                                    }
+                                }
+                            }
 
                             // Remove mined transactions from mempool (both V1 and V2)
                             let mut tx_hashes: Vec<[u8; 32]> = mined_block
