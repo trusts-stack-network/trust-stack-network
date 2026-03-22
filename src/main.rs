@@ -1074,17 +1074,18 @@ async fn cmd_node(
                                                 }
                                             }
 
-                                            // Get difficulty from peer
-                                            let difficulty = if let Ok(resp) = client.get(&format!("{}/chain/info", peer_url)).send().await {
-                                                resp.json::<serde_json::Value>().await.ok()
-                                                    .and_then(|i| i["difficulty"].as_u64())
-                                                    .unwrap_or(GENESIS_DIFFICULTY)
+                                            // Get difficulty AND next_difficulty from peer
+                                            let (difficulty, next_diff) = if let Ok(resp) = client.get(&format!("{}/chain/info", peer_url)).send().await {
+                                                let info = resp.json::<serde_json::Value>().await.ok();
+                                                let d = info.as_ref().and_then(|i| i["difficulty"].as_u64()).unwrap_or(GENESIS_DIFFICULTY);
+                                                let nd = info.as_ref().and_then(|i| i["next_difficulty"].as_u64()).unwrap_or(d);
+                                                (d, nd)
                                             } else {
-                                                GENESIS_DIFFICULTY
+                                                (GENESIS_DIFFICULTY, GENESIS_DIFFICULTY)
                                             };
 
                                             // Import snapshot — sets chain state instantly
-                                            blockchain.import_snapshot_at_height(snapshot, snap_height, block_hash, difficulty);
+                                            blockchain.import_snapshot_at_height(snapshot, snap_height, block_hash, difficulty, next_diff);
 
                                             // Now sync only recent blocks (from snapshot height onward)
                                             println!("  Syncing recent blocks...");

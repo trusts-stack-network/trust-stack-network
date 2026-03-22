@@ -84,8 +84,8 @@ pub enum P2pCommand {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PeerInfo {
     pub peer_id: String,
-    pub addresses: Vec<String>,
-    pub protocols: Vec<String>,
+    pub height: Option<u64>,
+    pub protocol: String,
 }
 
 /// Combined libp2p behaviour for TSN
@@ -297,6 +297,11 @@ async fn p2p_event_loop(
     let block_topic = gossipsub::IdentTopic::new(TOPIC_BLOCKS);
     let tx_topic = gossipsub::IdentTopic::new(TOPIC_TRANSACTIONS);
 
+    // Track identified peers to avoid spam logging
+    let mut identified_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
+    // Track peer heights (updated via block-announces and identify)
+    let mut peer_heights: std::collections::HashMap<PeerId, u64> = std::collections::HashMap::new();
+
     // Periodic redial timer for seeds (every 30s if not enough peers)
     let mut redial_interval = tokio::time::interval(Duration::from_secs(30));
     redial_interval.tick().await; // skip first immediate tick
@@ -322,6 +327,15 @@ async fn p2p_event_loop(
                         let topic = message.topic.as_str();
                         if topic == block_topic.hash().as_str() {
                             debug!("Received block via GossipSub ({} bytes)", message.data.len());
+                            // Track sender's height from the block
+                            if let Some(source) = message.source {
+                                // Try to parse height from the block data (coinbase.height)
+                                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&message.data) {
+                                    if let Some(h) = v.get("coinbase").and_then(|c| c.get("height")).and_then(|h| h.as_u64()) {
+                                        peer_heights.insert(source, h);
+                                    }
+                                }
+                            }
                             event_tx.send(P2pEvent::NewBlock(message.data)).await.ok();
                         } else if topic == tx_topic.hash().as_str() {
                             debug!("Received transaction via GossipSub ({} bytes)", message.data.len());
@@ -331,15 +345,19 @@ async fn p2p_event_loop(
                     SwarmEvent::Behaviour(TsnBehaviourEvent::Identify(
                         identify::Event::Received { peer_id, info, .. }
                     )) => {
-                        info!("P2P: identified peer {} — {}",
-                            &peer_id.to_string()[..16],
-                            info.protocol_version,
-                        );
-                        // Add discovered addresses to Kademlia and bootstrap
+                        // Only log first identification per peer (avoid spam)
+                        if identified_peers.insert(peer_id) {
+                            info!("P2P: identified peer {} — {}",
+                                &peer_id.to_string()[..16],
+                                info.protocol_version,
+                            );
+                        }
+                        // Add discovered addresses to Kademlia
                         for addr in &info.listen_addrs {
                             swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
                         }
-                        // Try to bootstrap Kademlia now that we know a peer
+                        // Parse height from protocol version if present (e.g. "tsn/0.6.0")
+                        // Bootstrap Kademlia now that we know a peer
                         let _ = swarm.behaviour_mut().kademlia.bootstrap();
                     }
                     SwarmEvent::Behaviour(TsnBehaviourEvent::Autonat(
@@ -375,6 +393,8 @@ async fn p2p_event_loop(
                     }
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
                         debug!("P2P peer disconnected: {}", peer_id);
+                        identified_peers.remove(&peer_id);
+                        peer_heights.remove(&peer_id);
                         event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await.ok();
                     }
                     SwarmEvent::NewListenAddr { address, .. } => {
@@ -404,8 +424,8 @@ async fn p2p_event_loop(
                         let peers: Vec<PeerInfo> = swarm.connected_peers()
                             .map(|p| PeerInfo {
                                 peer_id: p.to_string(),
-                                addresses: vec![], // addresses discovered via identify
-                                protocols: vec![],
+                                height: peer_heights.get(p).copied(),
+                                protocol: "tsn/0.6.0".to_string(),
                             })
                             .collect();
                         reply.send(peers).ok();

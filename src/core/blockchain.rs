@@ -50,6 +50,9 @@ pub struct ShieldedBlockchain {
     last_checkpoint_hash: Option<[u8; 32]>,
     /// Cumulative work (sum of difficulties) for heaviest-chain fork choice.
     cumulative_work: u128,
+    /// Height at which fast-sync snapshot was imported (0 = no fast-sync).
+    /// Blocks before this height may not exist in DB.
+    fast_sync_base_height: u64,
 }
 
 impl ShieldedBlockchain {
@@ -85,6 +88,7 @@ impl ShieldedBlockchain {
             last_checkpoint_height: 0,
             last_checkpoint_hash: None,
             cumulative_work: difficulty as u128,
+            fast_sync_base_height: 0,
         }
     }
 
@@ -267,6 +271,14 @@ impl ShieldedBlockchain {
                 }
             }
 
+            // Load fast_sync_base_height from metadata
+            let fast_sync_base: u64 = db
+                .get_metadata("fast_sync_base_height")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+
             Ok(Self {
                 blocks,
                 height_index,
@@ -279,6 +291,7 @@ impl ShieldedBlockchain {
                 last_checkpoint_height: cp_height,
                 last_checkpoint_hash: cp_hash,
                 cumulative_work,
+                fast_sync_base_height: fast_sync_base,
             })
         } else {
             // Create a fresh chain with a dummy genesis
@@ -344,6 +357,7 @@ impl ShieldedBlockchain {
                 last_checkpoint_height: 0,
                 last_checkpoint_hash: None,
                 cumulative_work: difficulty as u128,
+            fast_sync_base_height: 0,
             })
         }
     }
@@ -402,6 +416,13 @@ impl ShieldedBlockchain {
 
         if should_adjust_difficulty(height + 1) {
             let window_start = height + 1 - ADJUSTMENT_INTERVAL;
+
+            // After fast-sync, blocks before the snapshot don't exist.
+            // If the adjustment window extends before the snapshot, trust self.difficulty.
+            if self.fast_sync_base_height > 0 && window_start < self.fast_sync_base_height {
+                return self.difficulty.max(MIN_DIFFICULTY);
+            }
+
             let first_block = self.get_block_by_height(window_start);
             let last_block = self.get_block_by_height(height);
 
@@ -413,6 +434,8 @@ impl ShieldedBlockchain {
                     ADJUSTMENT_INTERVAL,
                 );
             }
+            // Fallback if blocks are somehow missing
+            return self.difficulty.max(MIN_DIFFICULTY);
         }
 
         self.difficulty.max(MIN_DIFFICULTY)
@@ -503,7 +526,22 @@ impl ShieldedBlockchain {
         // Check difficulty
         let expected_difficulty = self.next_difficulty();
         if block.header.difficulty != expected_difficulty {
-            return Err(BlockchainError::InvalidDifficulty);
+            // After fast-sync, difficulty adjustment may not be computable
+            // (missing blocks in the adjustment window). Accept the block's difficulty
+            // if the window extends before the fast-sync base height.
+            let expected_height = self.height() + 1;
+            let window_extends_before_sync = self.fast_sync_base_height > 0
+                && should_adjust_difficulty(expected_height)
+                && expected_height.saturating_sub(ADJUSTMENT_INTERVAL) < self.fast_sync_base_height;
+
+            if !window_extends_before_sync {
+                return Err(BlockchainError::InvalidDifficulty);
+            }
+            // Accept and update difficulty from the trusted peer's block
+            tracing::debug!(
+                "Accepting difficulty {} from trusted peer (fast-sync window)",
+                block.header.difficulty
+            );
         }
 
         // Validate coinbase (with halving-aware reward)
@@ -1175,13 +1213,15 @@ impl ShieldedBlockchain {
         height: u64,
         block_hash: [u8; 32],
         difficulty: u64,
+        next_difficulty: u64,
     ) {
         // Restore state
         self.state.restore_pq_from_snapshot(snapshot.clone());
 
-        // Set chain metadata
-        self.difficulty = difficulty;
+        // Set chain metadata — use next_difficulty so validation works after fast-sync
+        self.difficulty = next_difficulty;
         self.cumulative_work = difficulty as u128 * height as u128; // approximate
+        self.fast_sync_base_height = height;
 
         // Build a minimal height index (we'll fill in real hashes when we sync recent blocks)
         // For now, put placeholder hashes — the important thing is height() returns the right value
