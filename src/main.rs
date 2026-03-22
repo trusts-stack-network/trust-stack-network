@@ -846,10 +846,17 @@ async fn cmd_send(wallet_path: &str, node_url: &str, to: &str, amount: f64, fee:
             root,
         };
 
-        // Reconstruct randomness from the note
-        let mut randomness = [0u8; 32];
-        use ark_serialize::CanonicalSerialize;
-        note.note.randomness.serialize_compressed(&mut randomness[..]).ok();
+        // Get PQ randomness (required for V2 spending)
+        let randomness = match note.pq_randomness {
+            Some(r) => r,
+            None => {
+                // Fallback: try to derive from Fr randomness (may not work)
+                let mut r = [0u8; 32];
+                use ark_serialize::CanonicalSerialize;
+                note.note.randomness.serialize_compressed(&mut r[..]).ok();
+                r
+            }
+        };
 
         spend_witnesses.push(SpendWitnessPQ {
             value: note.note.value,

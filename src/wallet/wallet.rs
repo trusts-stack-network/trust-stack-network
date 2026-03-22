@@ -33,6 +33,10 @@ pub struct WalletNote {
     pub is_spent: bool,
     /// The nullifier for this note (computed lazily).
     nullifier: Option<Nullifier>,
+    /// PQ randomness (for V2 spending). If set, use this instead of note.randomness.
+    pub pq_randomness: Option<[u8; 32]>,
+    /// PQ commitment bytes (for V2 spending).
+    pub pq_commitment: Option<[u8; 32]>,
 }
 
 impl WalletNote {
@@ -45,6 +49,8 @@ impl WalletNote {
             height,
             is_spent: false,
             nullifier: None,
+            pq_randomness: None,
+            pq_commitment: None,
         }
     }
 
@@ -131,6 +137,14 @@ impl ShieldedWallet {
                 let commitment = NoteCommitment::from_bytes(
                     hex::decode(&sn.commitment).ok()?.try_into().ok()?,
                 );
+                let pq_rand = sn.pq_randomness.and_then(|h| {
+                    let b = hex::decode(&h).ok()?;
+                    if b.len() == 32 { let mut a = [0u8;32]; a.copy_from_slice(&b); Some(a) } else { None }
+                });
+                let pq_cm = sn.pq_commitment.and_then(|h| {
+                    let b = hex::decode(&h).ok()?;
+                    if b.len() == 32 { let mut a = [0u8;32]; a.copy_from_slice(&b); Some(a) } else { None }
+                });
                 Some(WalletNote {
                     note,
                     commitment,
@@ -138,6 +152,8 @@ impl ShieldedWallet {
                     height: sn.height,
                     is_spent: sn.is_spent,
                     nullifier: None,
+                    pq_randomness: pq_rand,
+                    pq_commitment: pq_cm,
                 })
             })
             .collect();
@@ -163,6 +179,8 @@ impl ShieldedWallet {
                 position: wn.position,
                 height: wn.height,
                 is_spent: wn.is_spent,
+                pq_randomness: wn.pq_randomness.map(|r| hex::encode(r)),
+                pq_commitment: wn.pq_commitment.map(|c| hex::encode(c)),
             })
             .collect();
 
@@ -279,18 +297,18 @@ impl ShieldedWallet {
         // Scan V2 transaction outputs (post-quantum)
         for tx in &block.transactions_v2 {
             for output in &tx.outputs {
-                if let Some((value, pk_hash, _randomness)) = decrypt_note_pq(&output.encrypted_note, &self.pk_hash) {
+                if let Some((value, pk_hash, pq_rand)) = decrypt_note_pq(&output.encrypted_note, &self.pk_hash) {
                     if pk_hash == self.pk_hash {
-                        // Create a Note with zero randomness (for balance tracking only)
                         let note = Note::with_randomness(value, pk_hash, ark_bn254::Fr::from(0u64));
-                        // Use a dummy commitment for V2 notes (the real one is PQ)
                         let dummy_commitment = note.commitment();
-                        let wallet_note = WalletNote::new(
+                        let mut wallet_note = WalletNote::new(
                             note,
                             dummy_commitment,
                             position,
                             height,
                         );
+                        wallet_note.pq_randomness = Some(pq_rand);
+                        wallet_note.pq_commitment = Some(output.note_commitment);
                         self.notes.push(wallet_note);
                         new_notes += 1;
                     }
@@ -299,15 +317,20 @@ impl ShieldedWallet {
             }
         }
 
-        // Scan coinbase (miner reward)
+        // Scan coinbase (miner reward) — extract both V1 and PQ data
         if let Some(note) = decryption_key.decrypt_note(&block.coinbase.encrypted_note) {
             if note.recipient_pk_hash == self.pk_hash {
-                let wallet_note = WalletNote::new(
+                let mut wallet_note = WalletNote::new(
                     note,
                     block.coinbase.note_commitment,
                     position,
                     height,
                 );
+                // Also extract PQ data for V2 spending
+                if let Some((_, _, pq_rand)) = decrypt_note_pq(&block.coinbase.encrypted_note, &self.pk_hash) {
+                    wallet_note.pq_randomness = Some(pq_rand);
+                    wallet_note.pq_commitment = Some(block.coinbase.note_commitment_pq);
+                }
                 self.notes.push(wallet_note);
                 new_notes += 1;
             }
@@ -461,6 +484,10 @@ struct StoredNote {
     position: u64,
     height: u64,
     is_spent: bool,
+    #[serde(default)]
+    pq_randomness: Option<String>,
+    #[serde(default)]
+    pq_commitment: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
