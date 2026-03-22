@@ -207,6 +207,16 @@ impl ShieldedWallet {
         &self.nullifier_key
     }
 
+    /// Get the nullifier key as raw bytes (for PQ proof witnesses).
+    pub fn nullifier_key_bytes(&self) -> [u8; 32] {
+        use blake2::Digest;
+        use blake2::Blake2s256;
+        let mut hasher = Blake2s256::new();
+        hasher.update(b"tsn_nullifier_key");
+        hasher.update(self.keypair.secret_key_bytes());
+        hasher.finalize().into()
+    }
+
     /// Get the current balance (sum of unspent notes).
     pub fn balance(&self) -> u64 {
         self.notes

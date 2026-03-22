@@ -293,6 +293,24 @@ enum Commands {
         #[arg(long)]
         no_seeds: bool,
     },
+    /// Send TSN to an address
+    Send {
+        /// Recipient address (pk_hash hex, 64 chars)
+        #[arg(long)]
+        to: String,
+        /// Amount to send in TSN
+        #[arg(long)]
+        amount: f64,
+        /// Transaction fee in TSN (default: 0.001)
+        #[arg(long, default_value = "0.001")]
+        fee: f64,
+        /// Wallet file (default: auto-detect)
+        #[arg(short, long)]
+        wallet: Option<String>,
+        /// Node URL to submit transaction (default: auto-detect)
+        #[arg(short, long)]
+        node: Option<String>,
+    },
     /// Start mining blocks
     Mine {
         /// Wallet file (mining rewards go to this wallet)
@@ -378,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Suppress logs for simple commands (balance, new-wallet)
-    let is_quiet_cmd = matches!(cli.command, Some(Commands::Balance { .. }) | Some(Commands::NewWallet { .. }));
+    let is_quiet_cmd = matches!(cli.command, Some(Commands::Balance { .. }) | Some(Commands::NewWallet { .. }) | Some(Commands::Send { .. }));
     let log_level = if is_quiet_cmd { "error" } else { "info" };
 
     tracing_subscriber::registry()
@@ -409,6 +427,22 @@ async fn main() -> anyhow::Result<()> {
                 format!("http://127.0.0.1:{}", config::get_port())
             });
             cmd_balance(&wallet, &node).await?;
+        }
+        Some(Commands::Send { to, amount, fee, wallet, node }) => {
+            let wallet = wallet.or_else(auto_detect_wallet).unwrap_or_else(|| "wallet.json".to_string());
+            let node = node.unwrap_or_else(|| {
+                for port in [9333u16, 9334, 9335, 8333] {
+                    if let Ok(stream) = std::net::TcpStream::connect_timeout(
+                        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                        std::time::Duration::from_millis(200),
+                    ) {
+                        drop(stream);
+                        return format!("http://127.0.0.1:{}", port);
+                    }
+                }
+                format!("http://127.0.0.1:{}", config::get_port())
+            });
+            cmd_send(&wallet, &node, &to, amount, fee).await?;
         }
         Some(Commands::Miner { threads, port, wallet, data_dir, peer, public_url, no_seeds }) => {
             let data_dir = data_dir.unwrap_or_else(|| "data-miner".to_string());
@@ -707,6 +741,213 @@ async fn cmd_balance(wallet_path: &str, node_url: &str) -> anyhow::Result<()> {
 /// Try to scan wallet via a running node's API.
 /// Uses /blocks/since/:height which returns full ShieldedBlock structs.
 /// Returns (success, notes_found).
+async fn cmd_send(wallet_path: &str, node_url: &str, to: &str, amount: f64, fee: f64) -> anyhow::Result<()> {
+    use tsn::crypto::pq::commitment_pq::NoteCommitmentPQ;
+    use tsn::crypto::pq::proof_pq::{SpendWitnessPQ, OutputWitnessPQ, TransactionProver};
+    use tsn::crypto::note::encrypt_note_pq;
+    use tsn::core::{SpendDescriptionV2, OutputDescriptionV2, ShieldedTransactionV2};
+    use rand::RngCore;
+
+    let green = "\x1b[1;32m";
+    let cyan = "\x1b[1;36m";
+    let reset = "\x1b[0m";
+
+    // Validate recipient
+    if to.len() != 64 || hex::decode(to).is_err() {
+        anyhow::bail!("Invalid recipient address. Must be 64 hex characters (pk_hash).");
+    }
+    let mut recipient_pk_hash = [0u8; 32];
+    hex::decode_to_slice(to, &mut recipient_pk_hash)?;
+
+    // Convert amounts to base units (1 TSN = 10^9)
+    let decimals = config::COIN_DECIMALS;
+    let multiplier = 10u64.pow(decimals);
+    let amount_base = (amount * multiplier as f64) as u64;
+    let fee_base = (fee * multiplier as f64) as u64;
+    let total_needed = amount_base + fee_base;
+
+    // Load and scan wallet
+    let mut wallet = ShieldedWallet::load(wallet_path)?;
+    try_scan_via_api(&mut wallet, node_url, wallet_path).await;
+
+    let balance = wallet.balance();
+    println!();
+    println!("  Wallet:    {}", wallet_path);
+    println!("  Balance:   {}{:.4} TSN{}", green, balance as f64 / multiplier as f64, reset);
+    println!("  Sending:   {}{:.4} TSN{} to {}...{}", cyan, amount, reset, &to[..8], &to[56..]);
+    println!("  Fee:       {:.4} TSN", fee);
+
+    if balance < total_needed {
+        anyhow::bail!("Insufficient balance: have {:.4} TSN, need {:.4} TSN",
+            balance as f64 / multiplier as f64,
+            total_needed as f64 / multiplier as f64
+        );
+    }
+
+    // Select notes (greedy: largest first)
+    let unspent = wallet.unspent_notes();
+    let mut selected = Vec::new();
+    let mut selected_total = 0u64;
+
+    let mut sorted: Vec<_> = unspent.iter().collect();
+    sorted.sort_by(|a, b| b.note.value.cmp(&a.note.value));
+
+    for note in sorted {
+        if selected_total >= total_needed { break; }
+        selected.push(note);
+        selected_total += note.note.value;
+    }
+
+    let change = selected_total - total_needed;
+    println!("  Notes:     {} selected ({:.4} TSN, change: {:.4} TSN)",
+        selected.len(),
+        selected_total as f64 / multiplier as f64,
+        change as f64 / multiplier as f64
+    );
+
+    // Get merkle witnesses from node
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let nullifier_key = wallet.nullifier_key_bytes();
+    let pk_hash = wallet.pk_hash();
+    let keypair = wallet.keypair();
+
+    let mut spend_witnesses = Vec::new();
+    for note in &selected {
+        let pos = note.position;
+        let url = format!("{}/witness/v2/position/{}", node_url, pos);
+        let resp = client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to get witness for position {}: HTTP {}", pos, resp.status());
+        }
+
+        // Parse witness manually (API returns hex strings, not raw bytes)
+        let v: serde_json::Value = resp.json().await?;
+        let root_hex = v["root"].as_str().unwrap_or("");
+        let mut root = [0u8; 32];
+        if let Ok(bytes) = hex::decode(root_hex) {
+            if bytes.len() == 32 { root.copy_from_slice(&bytes); }
+        }
+        let empty = vec![];
+        let path_arr = v["path"].as_array().unwrap_or(&empty);
+        let indices_arr = v["indices"].as_array().unwrap_or(&empty);
+        let siblings: Vec<[u8; 32]> = path_arr.iter().filter_map(|s| {
+            let h = s.as_str()?;
+            let b = hex::decode(h).ok()?;
+            if b.len() == 32 { let mut a = [0u8;32]; a.copy_from_slice(&b); Some(a) } else { None }
+        }).collect();
+        let indices: Vec<u8> = indices_arr.iter().filter_map(|i| i.as_u64().map(|n| n as u8)).collect();
+
+        let witness = tsn::crypto::pq::merkle_pq::MerkleWitnessPQ {
+            path: tsn::crypto::pq::merkle_pq::MerklePathPQ { siblings, indices },
+            position: pos,
+            root,
+        };
+
+        // Reconstruct randomness from the note
+        let mut randomness = [0u8; 32];
+        use ark_serialize::CanonicalSerialize;
+        note.note.randomness.serialize_compressed(&mut randomness[..]).ok();
+
+        spend_witnesses.push(SpendWitnessPQ {
+            value: note.note.value,
+            recipient_pk_hash: note.note.recipient_pk_hash,
+            randomness,
+            nullifier_key,
+            position: pos,
+            merkle_witness: witness,
+        });
+    }
+
+    // Build output witnesses
+    let mut rng = rand::thread_rng();
+    let mut output_witnesses = Vec::new();
+
+    let mut recipient_randomness = [0u8; 32];
+    rng.fill_bytes(&mut recipient_randomness);
+    output_witnesses.push(OutputWitnessPQ {
+        value: amount_base,
+        recipient_pk_hash,
+        randomness: recipient_randomness,
+    });
+
+    let mut change_randomness = None;
+    if change > 0 {
+        let mut cr = [0u8; 32];
+        rng.fill_bytes(&mut cr);
+        output_witnesses.push(OutputWitnessPQ {
+            value: change,
+            recipient_pk_hash: pk_hash,
+            randomness: cr,
+        });
+        change_randomness = Some(cr);
+    }
+
+    // Generate Plonky2 proof
+    eprint!("  Proof:     generating...");
+    let prover = TransactionProver::new();
+    let proof = prover.prove(&spend_witnesses, &output_witnesses, fee_base)
+        .map_err(|e| anyhow::anyhow!("Proof generation failed: {}", e))?;
+    eprintln!(" done ({} bytes)", proof.size());
+
+    // Build spend descriptions (sign with ML-DSA-65)
+    let mut spends = Vec::new();
+    for sw in &spend_witnesses {
+        let nullifier = sw.nullifier();
+        let anchor = sw.merkle_witness.root;
+        let signature = tsn::crypto::sign(&nullifier, keypair);
+        spends.push(SpendDescriptionV2 {
+            anchor,
+            nullifier,
+            signature,
+            public_key: keypair.public_key_bytes().to_vec(),
+        });
+    }
+
+    // Build output descriptions
+    let mut outputs = Vec::new();
+    let rc = NoteCommitmentPQ::commit(amount_base, &recipient_pk_hash, &recipient_randomness);
+    let re = encrypt_note_pq(amount_base, &recipient_pk_hash, &recipient_randomness);
+    outputs.push(OutputDescriptionV2 {
+        note_commitment: rc.to_bytes(),
+        encrypted_note: re,
+    });
+
+    if let Some(cr) = change_randomness {
+        let cc = NoteCommitmentPQ::commit(change, &pk_hash, &cr);
+        let ce = encrypt_note_pq(change, &pk_hash, &cr);
+        outputs.push(OutputDescriptionV2 {
+            note_commitment: cc.to_bytes(),
+            encrypted_note: ce,
+        });
+    }
+
+    // Assemble and submit transaction
+    let tx = ShieldedTransactionV2::new(spends, outputs, fee_base, proof);
+    let tx_hash = hex::encode(tx.hash());
+
+    eprint!("  Submit:    sending to {}...", node_url);
+    let resp = client.post(&format!("{}/tx/v2", node_url))
+        .json(&serde_json::json!({ "transaction": tx }))
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        eprintln!(" {}confirmed!{}", green, reset);
+        println!();
+        println!("  {}TX: {}{}", green, tx_hash, reset);
+        println!();
+    } else {
+        let err = resp.text().await.unwrap_or_default();
+        eprintln!(" FAILED");
+        anyhow::bail!("Transaction rejected: {}", err);
+    }
+
+    Ok(())
+}
+
 async fn try_scan_via_api(wallet: &mut ShieldedWallet, node_url: &str, wallet_path: &str) -> (bool, usize) {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
