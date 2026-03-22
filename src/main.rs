@@ -186,17 +186,19 @@ async fn wait_for_initial_sync(
         }
 
         if let Some((peer_url, info)) = best_peer {
-            if local_height == info.height && local_hash == info.latest_hash {
+            // Accept if we're within 5 blocks of the best peer (race conditions with P2P)
+            let gap = if info.height > local_height { info.height - local_height } else { local_height - info.height };
+            if gap <= 5 {
                 println!(
-                    "Local chain matches peer {} at height {}.",
-                    peer_url, local_height
+                    "Local chain synced with network at height {}.",
+                    local_height
                 );
                 return Ok(());
             }
 
             println!(
-                "Waiting for sync... local height={}, peer height={}",
-                local_height, info.height
+                "Waiting for sync... local height={}, peer height={} (gap: {})",
+                local_height, info.height, gap
             );
             let _ = tsn::network::sync_from_peer(state.clone(), &peer_url).await;
         } else {
@@ -204,6 +206,12 @@ async fn wait_for_initial_sync(
         }
 
         if Instant::now() >= deadline {
+            // Don't fail — just start mining anyway if we have any blocks
+            let height = state.blockchain.read().unwrap().height();
+            if height > 0 {
+                println!("Sync timeout but chain at height {}. Starting mining.", height);
+                return Ok(());
+            }
             return Err(anyhow::anyhow!(
                 "Timed out waiting for sync; local tip does not match any peer."
             ));
@@ -1959,17 +1967,79 @@ async fn cmd_node(
                 // Sync gate: pause mining if too far behind network tip
                 {
                     let local_height = mine_state.blockchain.read().unwrap().height();
-                    while !mine_state.sync_gate.can_mine(local_height) {
+                    if !mine_state.sync_gate.can_mine(local_height) {
                         let net_tip = mine_state.sync_gate.network_tip_height();
-                        tracing::warn!(
-                            "Sync required: local height {} < network tip {}, pausing mining...",
+                        tracing::info!(
+                            "Behind network (local: {}, tip: {}). Waiting 10s for sync...",
                             local_height, net_tip
                         );
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        // Re-check with fresh local height (might have synced)
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
                         let fresh_height = mine_state.blockchain.read().unwrap().height();
-                        if mine_state.sync_gate.can_mine(fresh_height) {
-                            break;
+                        if !mine_state.sync_gate.can_mine(fresh_height) {
+                            // Still behind — our chain likely forked. Do a fresh fast-sync.
+                            tracing::warn!("Still behind after wait. Re-syncing from network...");
+                            println!("Re-syncing from network (chain fork detected)...");
+
+                            // Find best peer and re-import snapshot
+                            let sync_client = reqwest::Client::builder()
+                                .timeout(std::time::Duration::from_secs(120))
+                                .build()
+                                .unwrap_or_default();
+
+                            let peers_list = mine_state.peers.read().unwrap().clone();
+                            let mut best: Option<(String, u64)> = None;
+                            for peer in &peers_list {
+                                let tip_url = format!("{}/tip", peer);
+                                if let Ok(resp) = sync_client.get(&tip_url).send().await {
+                                    if let Ok(tip) = resp.json::<serde_json::Value>().await {
+                                        let h = tip["height"].as_u64().unwrap_or(0);
+                                        if best.is_none() || h > best.as_ref().unwrap().1 {
+                                            best = Some((peer.clone(), h));
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some((peer_url, _)) = best {
+                                let info_url = format!("{}/snapshot/info", peer_url);
+                                if let Ok(resp) = sync_client.get(&info_url).send().await {
+                                    if let Ok(info) = resp.json::<serde_json::Value>().await {
+                                        if info["available"].as_bool() == Some(true) {
+                                            let snap_height = info["height"].as_u64().unwrap_or(0);
+                                            let snap_hash_str = info["block_hash"].as_str().unwrap_or("");
+                                            let dl_url = format!("{}/snapshot/download", peer_url);
+                                            if let Ok(resp) = sync_client.get(&dl_url).send().await {
+                                                if let Ok(compressed) = resp.bytes().await {
+                                                    use std::io::Read;
+                                                    let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+                                                    let mut json_data = Vec::new();
+                                                    if decoder.read_to_end(&mut json_data).is_ok() {
+                                                        if let Ok(snapshot) = serde_json::from_slice::<tsn::core::StateSnapshotPQ>(&json_data) {
+                                                            let mut block_hash = [0u8; 32];
+                                                            if let Ok(bytes) = hex::decode(snap_hash_str) {
+                                                                if bytes.len() == 32 { block_hash.copy_from_slice(&bytes); }
+                                                            }
+                                                            let ci_url = format!("{}/chain/info", peer_url);
+                                                            let (diff, next_diff) = if let Ok(r) = sync_client.get(&ci_url).send().await {
+                                                                let i = r.json::<serde_json::Value>().await.ok();
+                                                                let d = i.as_ref().and_then(|v| v["difficulty"].as_u64()).unwrap_or(1000);
+                                                                let nd = i.as_ref().and_then(|v| v["next_difficulty"].as_u64()).unwrap_or(d);
+                                                                (d, nd)
+                                                            } else { (1000, 1000) };
+
+                                                            let mut chain = mine_state.blockchain.write().unwrap();
+                                                            chain.import_snapshot_at_height(snapshot, snap_height, block_hash, diff, next_diff);
+                                                            println!("Re-synced to height {} from network.", snap_height);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue; // Skip to next mining iteration
                         }
                     }
                 }

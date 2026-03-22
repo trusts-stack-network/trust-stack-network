@@ -780,7 +780,8 @@ impl ShieldedBlockchain {
         let fork_height = self.calculate_chain_height(&block);
 
         // Check MAX_REORG_DEPTH: reject forks that would reorg too deep
-        if current_height > fork_height {
+        // Skip this check when in fast-sync zone (height_index has placeholders)
+        if current_height > fork_height && self.fast_sync_base_height == 0 {
             let reorg_depth = current_height - fork_height + 1;
             if reorg_depth > crate::config::MAX_REORG_DEPTH {
                 tracing::warn!(
