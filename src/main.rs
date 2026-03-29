@@ -965,7 +965,7 @@ async fn cmd_wallet_menu(wallet_path: &str, node_url: &str) -> anyhow::Result<()
 
         println!();
         println!("  {}╔══════════════════════════════════════════════════════════════════════╗{}", cyan, reset);
-        println!("  {}║  TSN Wallet v1.2.0║{}", cyan, reset);
+        println!("  {}║  TSN Wallet v1.3.0║{}", cyan, reset);
         println!("  {}╚══════════════════════════════════════════════════════════════════════╝{}", cyan, reset);
         println!("  Your address (share this to receive TSN):");
         println!("  {}{}{}", green, pk_hash_hex, reset);
@@ -1790,7 +1790,7 @@ async fn cmd_node(
 
     println!();
     println!("╔═══════════════════════════════════════════╗");
-    println!("║     TSN Shielded Node v1.2.0              ║");
+    println!("║     TSN Shielded Node v1.3.0              ║");
     println!("╚═══════════════════════════════════════════╝");
     println!();
     // ANSI color codes

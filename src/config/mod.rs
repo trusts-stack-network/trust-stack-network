@@ -57,9 +57,9 @@ pub const BLOCK_REWARD: u64 = 50_000_000_000;
 pub const COIN_DECIMALS: u32 = 9;
 
 /// Halving interval in blocks.
-/// At ~10s/block: 210_000 blocks ≈ 24.3 days per halving era.
-/// Schedule: 50 → 25 → 12.5 → 6.25 → ... TSN/block (like Bitcoin).
-pub const HALVING_INTERVAL: u64 = 210_000;
+/// At ~10s/block: 4_200_000 blocks ≈ 16 months per halving era.
+/// Supply max reached in ~10 years. Schedule: 50 → 25 → 12.5 → 6.25 → ... TSN/block.
+pub const HALVING_INTERVAL: u64 = 4_200_000;
 
 /// Calculate the block reward at a given height, accounting for halving.
 /// Reward halves every HALVING_INTERVAL blocks.

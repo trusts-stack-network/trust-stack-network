@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.0-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.0-blue">
   <img alt="Rust" src="https://img.shields.io/badge/rust-94k+_lines-orange">
   <img alt="Tests" src="https://img.shields.io/badge/tests-369_passing-brightgreen">
   <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
@@ -96,7 +96,7 @@ Merkle Node     = Poseidon(domain=5, left, right)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         TSN Node v1.2.0                              │
+│                         TSN Node v1.3.0                              │
 ├──────────────┬──────────────┬──────────────┬─────────────────────────┤
 │    Core      │    Crypto    │  Consensus   │        Network          │
 │  Block       │  Poseidon2   │  PoW Mining  │  libp2p (GossipSub)     │
@@ -259,6 +259,7 @@ TSN includes a **stack-based zkVM** with gas metering and ZK execution traces:
 |-----------|-------|
 | Default Port | 9333 |
 | Block Reward | 50 TSN (92% miner, 5% dev fees, 3% relay pool) |
+| Halving Interval | 4,200,000 blocks (~16 months) |
 | Target Block Time | ~10 seconds |
 | Difficulty Adjustment | LWMA per-block (N=45 window) |
 | P2P Protocol | libp2p GossipSub mesh (D=6, heartbeat 700ms) |
@@ -266,6 +267,7 @@ TSN includes a **stack-based zkVM** with gas metering and ZK execution traces:
 | Min Difficulty | 1000 |
 | Nonce Size | 512 bits |
 | Max TX Size | 1 MB |
+| Max Supply | ~420,000,000 TSN (~10 years to reach) |
 
 ## Synchronization & Anti-Fork System
 
@@ -381,6 +383,17 @@ A cross-chain anonymous DEX built on TSN with AMM pools, escrow P2P, yield farmi
 - **Privacy** — anonymous trading via TSN shielded transactions
 
 ## Changelog
+
+### v1.3.0 — Chain Reset, Halving Fix & Sync Stability
+
+- **Halving interval**: 210,000 → **4,200,000 blocks** (~16 months per halving, supply max in ~10 years)
+- **Chain reset**: fresh genesis block with correct economics
+- **Critical fix**: rollback `canonical_height` bug causing infinite sync loops
+- **P2P Auto-Update**: nodes detect + download + verify + self-update
+- **Explorer URL**: points to `explorer.tsnchain.com`
+- **Default mode**: `./tsn` auto-creates wallet and mines (no subcommand needed)
+- **Verification keys**: searched next to binary + parent dirs (build from source works)
+- **Firewall**: port 9333 open on all nodes for HTTP sync
 
 ### v1.1.0 — Performance & Production Hardening
 

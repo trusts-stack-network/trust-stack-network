@@ -509,6 +509,7 @@ impl ShieldedBlockchain {
                 tracing::info!("Rollback: instant restore from cached state at height {} (depth={})", cached_height, depth);
                 self.state = cached_state;
                 self.height_index.truncate((target_height + 1) as usize);
+                self.canonical_height = target_height;
                 // Recalculate difficulty and cumulative work from target block
                 if let Some(hash) = self.height_index.last() {
                     if let Some(block) = self.get_block(hash) {
@@ -577,8 +578,9 @@ impl ShieldedBlockchain {
             }
         }
 
-        // Truncate height_index
+        // Truncate height_index and update canonical height
         self.height_index.truncate((target_height + 1) as usize);
+        self.canonical_height = target_height;
         self.state = new_state;
         self.difficulty = new_difficulty;
         self.cumulative_work = new_cumulative_work;
