@@ -16,7 +16,7 @@ light-poseidon = "0.2"
 pbkdf2 = "0.12"
 
 # zk-SNARKs (Groth16 on BN254 for compatibility with circomlibjs/snarkjs) - V1 LEGACY
-ark-groth16 = "0.4"
+ark-groth16 = "0.5"
 ark-bls12-381 = "0.4"
 ark-bn254 = "0.4"
 ark-ff = "0.4"
