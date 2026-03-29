@@ -49,7 +49,7 @@ impl Default for P2pConfig {
             bootstrap_peers: Vec::new(),
             dial_seeds: Vec::new(),
             relay_server: false,
-            protocol_version: "tsn/1.1.0".to_string(),
+            protocol_version: format!("tsn/{}", env!("CARGO_PKG_VERSION")),
         }
     }
 }
