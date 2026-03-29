@@ -163,24 +163,40 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 
     // Find common ancestor by checking recent blocks
     let sync_from_height = if is_fork {
-        let ancestor = find_common_ancestor(&state, &client, peer_url, local_height).await?;
+        match find_common_ancestor(&state, &client, peer_url, local_height).await {
+            Ok(ancestor) => {
+                // IMMEDIATELY cancel mining and set reorg height BEFORE rollback
+                state.last_reorg_height.store(ancestor, std::sync::atomic::Ordering::Relaxed);
+                if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
 
-        // IMMEDIATELY cancel mining and set reorg height BEFORE rollback
-        // This prevents the miner from mining a fork block while we rollback
-        state.last_reorg_height.store(ancestor, std::sync::atomic::Ordering::Relaxed);
-        if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Rollback to common ancestor so peer's blocks can be added as tip extensions
+                let mut chain = state.blockchain.write()
+                    .map_err(|e| SyncError::LockPoisoned(format!("Blockchain write lock poisoned: {}", e)))?;
+                if let Err(e) = chain.rollback_to_height(ancestor) {
+                    warn!("Rollback to height {} failed: {}", ancestor, e);
+                    return Err(SyncError::HttpError(format!("Rollback failed: {}", e)));
+                }
+                info!("Rolled back to common ancestor at height {}", ancestor);
+                ancestor
+            }
+            Err(_) => {
+                // No common ancestor found — chains are incompatible.
+                // If peer has a heavier chain, wipe local state and fast-sync from scratch.
+                // This is the "majority consensus" rule: if we can't merge, take the network's chain.
+                warn!("No common ancestor with peer {}. Force re-sync from network (reset local chain).", peer_id(peer_url));
+                if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                {
+                    let mut chain = state.blockchain.write()
+                        .map_err(|e| SyncError::LockPoisoned(format!("Blockchain write lock poisoned: {}", e)))?;
+                    chain.reset_for_resync();
+                }
+                0 // Start sync from genesis
+            }
         }
-
-        // Rollback to common ancestor so peer's blocks can be added as tip extensions
-        let mut chain = state.blockchain.write()
-            .map_err(|e| SyncError::LockPoisoned(format!("Blockchain write lock poisoned: {}", e)))?;
-        if let Err(e) = chain.rollback_to_height(ancestor) {
-            warn!("Rollback to height {} failed: {}", ancestor, e);
-            return Err(SyncError::HttpError(format!("Rollback failed: {}", e)));
-        }
-        info!("Rolled back to common ancestor at height {}", ancestor);
-        ancestor
     } else {
         local_height
     };
