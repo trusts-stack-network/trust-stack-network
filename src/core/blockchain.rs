@@ -725,6 +725,21 @@ impl ShieldedBlockchain {
             return Err(BlockchainError::InvalidPrevHash);
         }
 
+        // Minimum block interval: reject blocks with timestamp too close to previous block
+        const MIN_BLOCK_INTERVAL_SECS: u64 = 5;
+        if self.height() > 0 {
+            if let Some(prev_block) = self.get_block_by_height(self.height()) {
+                if block.header.timestamp < prev_block.header.timestamp + MIN_BLOCK_INTERVAL_SECS {
+                    return Err(BlockchainError::InvalidTransaction(
+                        format!(
+                            "Block timestamp {} is less than {}s after previous block timestamp {}",
+                            block.header.timestamp, MIN_BLOCK_INTERVAL_SECS, prev_block.header.timestamp
+                        )
+                    ));
+                }
+            }
+        }
+
         // Check block structure and proof-of-work
         block.verify().map_err(BlockchainError::BlockError)?;
 
@@ -1557,6 +1572,7 @@ impl ShieldedBlockchain {
             assume_valid_height: self.assume_valid_height,
             last_checkpoint_height: self.last_checkpoint_height,
             network_hashrate: self.estimate_network_hashrate(),
+            cumulative_work: self.cumulative_work,
         }
     }
 
@@ -1748,6 +1764,9 @@ pub struct ChainInfo {
     pub last_checkpoint_height: u64,
     /// Estimated network hashrate in H/s (Bitcoin-style: sum(difficulty) / time_span over last N blocks)
     pub network_hashrate: f64,
+    /// Cumulative proof-of-work (sum of all block difficulties from genesis to tip)
+    #[serde(default)]
+    pub cumulative_work: u128,
 }
 
 #[derive(Debug, thiserror::Error)]

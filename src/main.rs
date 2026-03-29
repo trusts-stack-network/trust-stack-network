@@ -2301,28 +2301,24 @@ async fn cmd_node(
                                             p2p_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
                                         Ok(false) => {
-                                            // Stored as orphan or side chain — trigger immediate sync
-                                            // to fetch missing blocks and resolve potential fork
+                                            // Stored as orphan or side chain — trigger sync but do NOT cancel mining.
+                                            // Mining continues on current tip. If sync changes our tip,
+                                            // the block acceptance handler above (Ok(true)) will cancel mining.
                                             let local_height = p2p_blockchain.blockchain.read().unwrap().height();
-                                            {
-                                                // Any orphan block means potential fork — trigger sync regardless
-                                                tracing::info!("P2P: block #{} stored as orphan (local: {}), triggering sync", height, local_height);
-                                                // Cancel mining during sync to prevent fork divergence
-                                                p2p_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                                let sync_state = p2p_blockchain.clone();
-                                                let sync_peers = p2p_blockchain.peers.read().unwrap().clone();
-                                                tokio::spawn(async move {
-                                                    for peer in &sync_peers {
-                                                        match tsn::network::sync_from_peer(sync_state.clone(), peer).await {
-                                                            Ok(n) if n > 0 => {
-                                                                tracing::info!("Orphan sync: got {} blocks from {}", n, tsn::network::peer_id(peer));
-                                                                break;
-                                                            }
-                                                            _ => {}
+                                            tracing::info!("P2P: block #{} stored as orphan (local: {}), triggering sync", height, local_height);
+                                            let sync_state = p2p_blockchain.clone();
+                                            let sync_peers = p2p_blockchain.peers.read().unwrap().clone();
+                                            tokio::spawn(async move {
+                                                for peer in &sync_peers {
+                                                    match tsn::network::sync_from_peer(sync_state.clone(), peer).await {
+                                                        Ok(n) if n > 0 => {
+                                                            tracing::info!("Orphan sync: got {} blocks from {}", n, tsn::network::peer_id(peer));
+                                                            break;
                                                         }
+                                                        _ => {}
                                                     }
-                                                });
-                                            }
+                                                }
+                                            });
                                         }
                                         Err(e) => tracing::debug!("P2P: block #{} rejected: {}", height, e),
                                     }
@@ -2533,6 +2529,8 @@ async fn cmd_node(
                 stats.last_updated = now;
             }
 
+            let mut unaccepted_count: u32 = 0;
+
             loop {
                 // Post-reorg cooldown: wait once for network to stabilize before mining
                 {
@@ -2653,6 +2651,29 @@ async fn cmd_node(
                     }
                     (v1, v2)
                 };
+
+                // Minimum block interval: wait if previous block is too recent
+                {
+                    const MIN_BLOCK_INTERVAL_SECS: u64 = 5;
+                    let wait_secs = {
+                        let chain = mine_state.blockchain.read().unwrap();
+                        let tip_height = chain.height();
+                        if tip_height > 0 {
+                            if let Some(prev_block) = chain.get_block_by_height(tip_height) {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
+                                let earliest = prev_block.header.timestamp + MIN_BLOCK_INTERVAL_SECS;
+                                if now < earliest { earliest - now } else { 0 }
+                            } else { 0 }
+                        } else { 0 }
+                    };
+                    if wait_secs > 0 {
+                        tracing::debug!("Waiting {}s for minimum block interval", wait_secs);
+                        tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                    }
+                }
 
                 // Create block template with both V1 and V2 transactions
                 let mut block = {
@@ -2825,19 +2846,32 @@ async fn cmd_node(
                                 let peer_hash = info.get("hash").and_then(|v| v.as_str()).unwrap_or("");
                                 if peer_hash == mined_block.hash_hex() {
                                     tracing::info!("Peer accepted block at height {}.", height);
+                                    unaccepted_count = 0;
                                 } else {
-                                    tracing::warn!("FORK DETECTED: peer has different block at height {}. Pausing mining and re-syncing...", height);
-                                    // Force re-sync from this peer to resolve the fork
-                                    let resync_state = mine_state.clone();
-                                    let resync_peer = peer.clone();
-                                    tokio::spawn(async move {
-                                        let _ = tsn::network::sync_from_peer(resync_state, &resync_peer).await;
-                                    });
-                                    // Cancel current mining attempt to pick up the re-synced chain
-                                    if let Some(cancel) = mine_state.mining_cancel.read().unwrap().as_ref() {
-                                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    unaccepted_count += 1;
+                                    if unaccepted_count >= 3 {
+                                        tracing::warn!(
+                                            "FORK DETECTED: {} consecutive blocks not accepted. Pausing mining and re-syncing...",
+                                            unaccepted_count
+                                        );
+                                        // Force re-sync from this peer to resolve the fork
+                                        let resync_state = mine_state.clone();
+                                        let resync_peer = peer.clone();
+                                        tokio::spawn(async move {
+                                            let _ = tsn::network::sync_from_peer(resync_state, &resync_peer).await;
+                                        });
+                                        // Cancel current mining attempt to pick up the re-synced chain
+                                        if let Some(cancel) = mine_state.mining_cancel.read().unwrap().as_ref() {
+                                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        unaccepted_count = 0;
+                                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                    } else {
+                                        tracing::info!(
+                                            "Peer has different block at height {} (orphan {}/3). Continuing mining.",
+                                            height, unaccepted_count
+                                        );
                                     }
-                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                                 }
                             }
                         }

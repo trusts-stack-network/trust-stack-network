@@ -78,10 +78,11 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 
     // FORK PROTECTION: reject peers with incompatible genesis
     // Skip check if either side has a placeholder genesis (fast-sync nodes)
+    // Also skip if local height is 0 — fresh node should accept any peer's chain
     let placeholder = "0".repeat(64);
     let peer_has_real_genesis = !peer_info.genesis_hash.is_empty() && peer_info.genesis_hash != placeholder;
     let local_has_real_genesis = !local_genesis.is_empty() && local_genesis != placeholder;
-    if peer_has_real_genesis && local_has_real_genesis && peer_info.genesis_hash != local_genesis {
+    if local_height > 0 && peer_has_real_genesis && local_has_real_genesis && peer_info.genesis_hash != local_genesis {
         warn!(
             "Rejecting peer {} — incompatible genesis hash (peer: {}…, local: {}…)",
             peer_id(peer_url),
@@ -122,13 +123,32 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     }
 
     if is_fork {
-        // SECURITY: Never rollback to a shorter or equal chain
-        if peer_info.height <= local_height {
+        // SECURITY: Never rollback to a shorter chain
+        if peer_info.height < local_height {
             warn!(
-                "Ignoring fork from peer {} — peer height {} <= local height {}. Never rollback to shorter chain.",
+                "Ignoring fork from peer {} — peer height {} < local height {}. Never rollback to shorter chain.",
                 peer_id(peer_url), peer_info.height, local_height
             );
             return Ok(0);
+        }
+        // Same height: compare cumulative work — take the heavier chain
+        if peer_info.height == local_height {
+            let local_work = {
+                let chain = state.blockchain.read()
+                    .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?;
+                chain.cumulative_work()
+            };
+            if peer_info.cumulative_work <= local_work {
+                warn!(
+                    "Ignoring fork from peer {} — same height {} but peer work {} <= local work {}.",
+                    peer_id(peer_url), peer_info.height, peer_info.cumulative_work, local_work
+                );
+                return Ok(0);
+            }
+            info!(
+                "Fork from peer {} at same height {} but heavier chain (peer work: {}, local: {}). Switching.",
+                peer_id(peer_url), peer_info.height, peer_info.cumulative_work, local_work
+            );
         }
         info!(
             "Fork detected with peer {} at height {} (peer: {}..., local: {}...)",
@@ -386,6 +406,8 @@ struct PeerChainInfo {
     commitment_count: u64,
     #[serde(default)]
     genesis_hash: String,
+    #[serde(default)]
+    cumulative_work: u128,
 }
 
 #[derive(Debug, serde::Deserialize)]

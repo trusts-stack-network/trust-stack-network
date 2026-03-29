@@ -7,7 +7,7 @@
 /// This MUST be the same for all nodes on the network.
 /// Changing this creates an incompatible chain.
 /// Numeric difficulty: hash_prefix (u64 big-endian) must be < u64::MAX / difficulty.
-pub const GENESIS_DIFFICULTY: u64 = 10000;
+pub const GENESIS_DIFFICULTY: u64 = 1_000_000;
 
 /// Activation height for Poseidon Goldilocks PoW hash.
 /// Blocks at height >= this value use Poseidon over GoldilocksField (plonky2).

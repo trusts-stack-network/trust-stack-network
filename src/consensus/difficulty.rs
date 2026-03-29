@@ -22,7 +22,8 @@ pub const LWMA_WINDOW: u64 = 45;
 pub const SOLVETIME_CAP: u64 = 6 * TARGET_BLOCK_TIME_SECS;
 
 /// Minimum numeric difficulty (prevents instant mining).
-pub const MIN_DIFFICULTY: u64 = 1000;
+/// At 150 KH/s with 1 miner, 1_500_000 yields ~10s blocks.
+pub const MIN_DIFFICULTY: u64 = 1_500_000;
 
 /// Maximum numeric difficulty (prevents impossible mining).
 pub const MAX_DIFFICULTY: u64 = u64::MAX / 2;
@@ -167,36 +168,39 @@ mod tests {
     fn test_lwma_difficulty_increase_when_blocks_too_fast() {
         // 45 blocks at 5s each (target is 10s) → difficulty should ~double
         let n = 45;
-        let difficulties: Vec<u64> = vec![10000; n];
+        let base_diff: u64 = 3_000_000;
+        let difficulties: Vec<u64> = vec![base_diff; n];
         let timestamps: Vec<u64> = (0..=n).map(|i| 1000 + i as u64 * 5).collect();
 
         let new_diff = calculate_next_difficulty_lwma(&difficulties, &timestamps);
-        assert!(new_diff > 10000, "Should increase: got {}", new_diff);
-        assert!(new_diff > 18000, "Should roughly double: got {}", new_diff);
+        assert!(new_diff > base_diff, "Should increase: got {}", new_diff);
+        assert!(new_diff > base_diff * 18 / 10, "Should roughly double: got {}", new_diff);
     }
 
     #[test]
     fn test_lwma_difficulty_decrease_when_blocks_too_slow() {
         // 45 blocks at 20s each (target is 10s) → difficulty should ~halve
         let n = 45;
-        let difficulties: Vec<u64> = vec![10000; n];
+        let base_diff: u64 = 3_000_000;
+        let difficulties: Vec<u64> = vec![base_diff; n];
         let timestamps: Vec<u64> = (0..=n).map(|i| 1000 + i as u64 * 20).collect();
 
         let new_diff = calculate_next_difficulty_lwma(&difficulties, &timestamps);
-        assert!(new_diff < 10000, "Should decrease: got {}", new_diff);
-        assert!(new_diff < 6000, "Should roughly halve: got {}", new_diff);
+        assert!(new_diff < base_diff, "Should decrease: got {}", new_diff);
+        assert!(new_diff < base_diff * 6 / 10, "Should roughly halve: got {}", new_diff);
     }
 
     #[test]
     fn test_lwma_difficulty_stable_when_on_target() {
         // 45 blocks at exactly 10s each → difficulty should stay the same
         let n = 45;
-        let difficulties: Vec<u64> = vec![10000; n];
+        let base_diff: u64 = 3_000_000;
+        let difficulties: Vec<u64> = vec![base_diff; n];
         let timestamps: Vec<u64> = (0..=n).map(|i| 1000 + i as u64 * 10).collect();
 
         let new_diff = calculate_next_difficulty_lwma(&difficulties, &timestamps);
-        assert!((new_diff as i64 - 10000).abs() < 100,
-            "Should be stable: got {} (expected ~10000)", new_diff);
+        assert!((new_diff as i64 - base_diff as i64).abs() < (base_diff as i64 / 100),
+            "Should be stable: got {} (expected ~{})", new_diff, base_diff);
     }
 
     #[test]
@@ -223,7 +227,8 @@ mod tests {
     fn test_lwma_recent_blocks_weighted_more() {
         // First 30 blocks at 10s, last 15 at 2s → should increase more than simple average
         let n = 45;
-        let difficulties: Vec<u64> = vec![10000; n];
+        let base_diff: u64 = 3_000_000;
+        let difficulties: Vec<u64> = vec![base_diff; n];
         let mut timestamps: Vec<u64> = Vec::new();
         let mut t = 1000u64;
         timestamps.push(t);
@@ -234,7 +239,7 @@ mod tests {
 
         let new_diff = calculate_next_difficulty_lwma(&difficulties, &timestamps);
         // Recent blocks are fast → LWMA should weight them more → higher difficulty
-        assert!(new_diff > 12000, "Recent fast blocks should pull difficulty up: got {}", new_diff);
+        assert!(new_diff > base_diff * 12 / 10, "Recent fast blocks should pull difficulty up: got {}", new_diff);
     }
 
     #[test]
