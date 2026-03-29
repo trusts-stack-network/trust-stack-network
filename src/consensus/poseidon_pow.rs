@@ -190,19 +190,15 @@ lazy_static::lazy_static! {
 pub fn poseidon_hash_header_v2(header_bytes: &[u8]) -> [u8; 32] {
     let elements = bytes_to_p3_goldilocks(header_bytes);
 
-    // Build input: domain separator + header elements
     let mut inputs = Vec::with_capacity(elements.len() + 1);
     inputs.push(<Goldilocks as QuotientMap<u64>>::from_int(DOMAIN_POW));
     inputs.extend_from_slice(&elements);
 
-    // Hash through sponge → 4 Goldilocks elements
     let hash_out: [Goldilocks; 4] = POSEIDON2_SPONGE.hash_slice(&inputs);
 
-    // Convert 4 × Goldilocks (each 8 bytes LE) → [u8; 32]
     let mut result = [0u8; 32];
     for (i, elem) in hash_out.iter().enumerate() {
-        let bytes = elem.as_canonical_u64().to_le_bytes();
-        result[i * 8..(i + 1) * 8].copy_from_slice(&bytes);
+        result[i * 8..(i + 1) * 8].copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
     }
     result
 }
@@ -228,6 +224,51 @@ pub fn poseidon_hash_header_parts_v2(
     header_bytes.extend_from_slice(&difficulty.to_le_bytes());
     header_bytes.extend_from_slice(nonce);
     poseidon_hash_header_v2(&header_bytes)
+}
+
+/// Pre-allocated mining context for fast Poseidon2 hashing.
+/// Keeps a reusable 212-byte header buffer to avoid allocations in the hot loop.
+/// Only the nonce bytes (148..212) change each iteration.
+#[derive(Clone)]
+pub struct MiningHashContext {
+    /// Pre-built header bytes (212 bytes). Only nonce portion changes.
+    header_bytes: [u8; 212],
+}
+
+impl MiningHashContext {
+    /// Create a new mining context from the fixed header fields.
+    pub fn new(
+        version: u32,
+        prev_hash: &[u8; 32],
+        merkle_root: &[u8; 32],
+        commitment_root: &[u8; 32],
+        nullifier_root: &[u8; 32],
+    ) -> Self {
+        let mut header_bytes = [0u8; 212];
+        header_bytes[0..4].copy_from_slice(&version.to_le_bytes());
+        header_bytes[4..36].copy_from_slice(prev_hash);
+        header_bytes[36..68].copy_from_slice(merkle_root);
+        header_bytes[68..100].copy_from_slice(commitment_root);
+        header_bytes[100..132].copy_from_slice(nullifier_root);
+        // timestamp (132..140), difficulty (140..148), nonce (148..212) set per-hash
+        Self { header_bytes }
+    }
+
+    /// Hash with the given variable fields. Zero heap allocations in hot path.
+    #[inline]
+    pub fn hash(&self, timestamp: u64, difficulty: u64, nonce: &[u8; 64]) -> [u8; 32] {
+        let mut buf = self.header_bytes;
+        buf[132..140].copy_from_slice(&timestamp.to_le_bytes());
+        buf[140..148].copy_from_slice(&difficulty.to_le_bytes());
+        buf[148..212].copy_from_slice(nonce);
+        poseidon_hash_header_v2(&buf)
+    }
+
+    /// Check if the hash meets the difficulty target.
+    #[inline]
+    pub fn meets_difficulty(&self, timestamp: u64, difficulty: u64, nonce: &[u8; 64]) -> bool {
+        hash_meets_difficulty(&self.hash(timestamp, difficulty, nonce), difficulty)
+    }
 }
 
 // =============================================================================
@@ -312,8 +353,9 @@ pub fn poseidon_hash_header_legacy(header_bytes: &[u8]) -> [u8; 32] {
 /// For difficulty 1, nearly all hashes pass.
 /// For difficulty 10000, roughly 1 in 10000 hashes pass.
 pub fn hash_meets_difficulty(hash: &[u8; 32], difficulty: u64) -> bool {
+    // M1 audit fix: difficulty 0 is invalid — no block should pass with zero difficulty
     if difficulty == 0 {
-        return true;
+        return false;
     }
     let hash_prefix = u64::from_be_bytes(hash[0..8].try_into().unwrap());
     let target = u64::MAX / difficulty;
@@ -366,9 +408,9 @@ mod tests {
         // u64::MAX / 100000 = 184467440737095 → 281474976710656 > 184467440737095 → fails
         assert!(!hash_meets_difficulty(&hash, 100000));
 
-        // Zero difficulty always passes
+        // Zero difficulty is invalid (M1 audit fix) — always rejects
         let full_hash = [0xFF; 32];
-        assert!(hash_meets_difficulty(&full_hash, 0));
+        assert!(!hash_meets_difficulty(&full_hash, 0));
     }
 
     #[test]
@@ -530,4 +572,5 @@ mod tests {
         let elements = bytes_to_p3_goldilocks(&data);
         assert_eq!(elements.len(), 23);
     }
+
 }

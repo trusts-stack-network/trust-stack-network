@@ -542,6 +542,7 @@ mod tests {
             merkle_root: [1u8; 32],
             commitment_root: [2u8; 32],
             nullifier_root: [3u8; 32],
+            state_root: [0u8; 32],
             timestamp: 1000000,
             difficulty: 100,
             nonce: 0,
@@ -568,6 +569,7 @@ mod tests {
             merkle_root: [1u8; 32],
             commitment_root: [2u8; 32],
             nullifier_root: [3u8; 32],
+            state_root: [0u8; 32],
             timestamp: parent.header.timestamp + 600, // 10 minutes later
             difficulty,
             nonce,

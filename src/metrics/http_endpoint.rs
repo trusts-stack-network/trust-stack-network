@@ -30,8 +30,12 @@ pub struct MetricsServerConfig {
 
 impl Default for MetricsServerConfig {
     fn default() -> Self {
+        let port = std::env::var("METRICS_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(9090);
         Self {
-            port: 9090,
+            port,
             bind_address: "127.0.0.1".to_string(),
             enable_cors: false,
         }
@@ -145,38 +149,38 @@ async fn json_metrics_handler() -> Response {
 /// Collecte les métriques et les convertit en JSON
 async fn collect_metrics_as_json() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Collecte des métriques principales
-    let mut metrics = HashMap::new();
-    
+    let mut metrics: HashMap<&str, i64> = HashMap::new();
+
     // Métriques de validation de blocs
-    metrics.insert("blocks_validated_total", 
-        crate::metrics::CONSENSUS_METRICS.blocks_validated_total.get());
-    metrics.insert("blocks_rejected_total", 
-        crate::metrics::CONSENSUS_METRICS.blocks_rejected_total.get());
-    metrics.insert("blocks_validating_current", 
+    metrics.insert("blocks_validated_total",
+        crate::metrics::CONSENSUS_METRICS.blocks_validated_total.get() as i64);
+    metrics.insert("blocks_rejected_total",
+        crate::metrics::CONSENSUS_METRICS.blocks_rejected_total.get() as i64);
+    metrics.insert("blocks_validating_current",
         crate::metrics::CONSENSUS_METRICS.blocks_validating_current.get());
-    
+
     // Métriques de chaîne
-    metrics.insert("chain_height", 
+    metrics.insert("chain_height",
         crate::metrics::CONSENSUS_METRICS.chain_height.get());
-    metrics.insert("chain_reorgs_total", 
-        crate::metrics::CONSENSUS_METRICS.chain_reorgs_total.get());
-    metrics.insert("forks_detected_total", 
-        crate::metrics::CONSENSUS_METRICS.forks_detected_total.get());
-    metrics.insert("orphan_blocks_count", 
+    metrics.insert("chain_reorgs_total",
+        crate::metrics::CONSENSUS_METRICS.chain_reorgs_total.get() as i64);
+    metrics.insert("forks_detected_total",
+        crate::metrics::CONSENSUS_METRICS.forks_detected_total.get() as i64);
+    metrics.insert("orphan_blocks_count",
         crate::metrics::CONSENSUS_METRICS.orphan_blocks_count.get());
-    
+
     // Métriques PoW
-    metrics.insert("pow_validation_failures", 
-        crate::metrics::CONSENSUS_METRICS.pow_validation_failures.get());
-    
+    metrics.insert("pow_validation_failures",
+        crate::metrics::CONSENSUS_METRICS.pow_validation_failures.get() as i64);
+
     // Métriques critiques pour le debug
-    metrics.insert("invalid_commitment_root_errors", 
-        crate::metrics::CONSENSUS_METRICS.invalid_commitment_root_errors.get());
-    metrics.insert("zk_proofs_validated_total", 
-        crate::metrics::CONSENSUS_METRICS.zk_proofs_validated_total.get());
-    
+    metrics.insert("invalid_commitment_root_errors",
+        crate::metrics::CONSENSUS_METRICS.invalid_commitment_root_errors.get() as i64);
+    metrics.insert("zk_proofs_validated_total",
+        crate::metrics::CONSENSUS_METRICS.zk_proofs_validated_total.get() as i64);
+
     // Métriques de performance
-    metrics.insert("mempool_size", 
+    metrics.insert("mempool_size",
         crate::metrics::CONSENSUS_METRICS.mempool_size.get());
     
     let json_response = serde_json::json!({

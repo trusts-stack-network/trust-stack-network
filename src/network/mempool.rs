@@ -3,9 +3,28 @@
 //! Supports both V1 (legacy) and V2 (post-quantum) transactions.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tracing::{info, warn};
 
 use crate::core::{ShieldedState, ShieldedTransaction, Transaction};
 use crate::contract::{ContractDeployTransaction, ContractCallTransaction};
+
+/// Maximum number of transactions in the mempool.
+const MAX_MEMPOOL_SIZE: usize = 5000;
+
+/// Minimum transaction fee (anti-spam). 1000 sats.
+const MIN_TX_FEE: u64 = 1000;
+
+/// Maximum age of a transaction in seconds (1 hour).
+const MAX_TX_AGE_SECS: u64 = 3600;
+
+/// Transaction metadata for eviction decisions.
+#[derive(Debug, Clone)]
+struct TxMeta {
+    fee: u64,
+    added_at: u64,
+}
 
 /// The mempool holds pending shielded transactions waiting to be mined.
 #[derive(Debug, Default)]
@@ -20,6 +39,8 @@ pub struct Mempool {
     contract_calls: HashMap<[u8; 32], ContractCallTransaction>,
     /// Pending nullifiers (to detect double-spends before confirmation).
     pending_nullifiers: HashSet<[u8; 32]>,
+    /// Transaction metadata for eviction (fee + timestamp).
+    tx_meta: HashMap<[u8; 32], TxMeta>,
 }
 
 impl Mempool {
@@ -30,14 +51,71 @@ impl Mempool {
             contract_deploys: HashMap::new(),
             contract_calls: HashMap::new(),
             pending_nullifiers: HashSet::new(),
+            tx_meta: HashMap::new(),
         }
     }
 
+    fn now_secs() -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    }
+
+    /// Total transaction count across all types.
+    fn total_count(&self) -> usize {
+        self.v1_transactions.len() + self.v2_transactions.len()
+            + self.contract_deploys.len() + self.contract_calls.len()
+    }
+
+    /// Evict the lowest-fee transaction to make room. Returns true if eviction succeeded.
+    fn evict_lowest_fee(&mut self) -> bool {
+        // Find the tx with the lowest fee
+        let lowest = self.tx_meta.iter()
+            .min_by_key(|(_, meta)| meta.fee)
+            .map(|(hash, _)| *hash);
+
+        if let Some(hash) = lowest {
+            self.remove(&hash);
+            self.remove_v2(&hash);
+            self.remove_contract_tx(&hash);
+            self.tx_meta.remove(&hash);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Evict transactions older than MAX_TX_AGE_SECS. Returns count removed.
+    pub fn evict_expired(&mut self) -> usize {
+        let now = Self::now_secs();
+        let expired: Vec<[u8; 32]> = self.tx_meta.iter()
+            .filter(|(_, meta)| now.saturating_sub(meta.added_at) > MAX_TX_AGE_SECS)
+            .map(|(hash, _)| *hash)
+            .collect();
+
+        let count = expired.len();
+        for hash in &expired {
+            self.remove(hash);
+            self.remove_v2(hash);
+            self.remove_contract_tx(hash);
+            self.tx_meta.remove(hash);
+        }
+        if count > 0 {
+            info!("Mempool: evicted {} expired transactions", count);
+        }
+        count
+    }
+
     /// Add a V1 transaction to the mempool.
-    /// Returns false if transaction already exists or would cause double-spend.
+    /// Returns false if transaction already exists, would cause double-spend,
+    /// fee is too low, or mempool is full and can't evict.
     pub fn add(&mut self, tx: ShieldedTransaction) -> bool {
         let hash = tx.hash();
         if self.v1_transactions.contains_key(&hash) || self.v2_transactions.contains_key(&hash) {
+            return false;
+        }
+
+        // Enforce minimum fee
+        if tx.fee < MIN_TX_FEE {
+            warn!("Mempool: rejected tx {} — fee {} < min {}", hex::encode(&hash[..4]), tx.fee, MIN_TX_FEE);
             return false;
         }
 
@@ -48,20 +126,46 @@ impl Mempool {
             }
         }
 
+        // Enforce size limit — evict expired first, then lowest-fee
+        if self.total_count() >= MAX_MEMPOOL_SIZE {
+            self.evict_expired();
+            if self.total_count() >= MAX_MEMPOOL_SIZE {
+                // Only accept if fee is higher than the lowest in pool
+                let min_fee = self.tx_meta.values().map(|m| m.fee).min().unwrap_or(0);
+                if tx.fee <= min_fee {
+                    warn!("Mempool full: rejected tx {} (fee {} <= min {})", hex::encode(&hash[..4]), tx.fee, min_fee);
+                    return false;
+                }
+                self.evict_lowest_fee();
+            }
+        }
+
+        let fee = tx.fee;
+
         // Add nullifiers to pending set
         for nullifier in tx.nullifiers() {
             self.pending_nullifiers.insert(nullifier.0);
         }
 
         self.v1_transactions.insert(hash, tx);
+        self.tx_meta.insert(hash, TxMeta { fee, added_at: Self::now_secs() });
         true
     }
 
     /// Add a V2 or Migration transaction to the mempool.
-    /// Returns false if transaction already exists or would cause double-spend.
+    /// Returns false if transaction already exists, would cause double-spend,
+    /// fee is too low, or mempool is full and can't evict.
     pub fn add_v2(&mut self, tx: Transaction) -> bool {
         let hash = tx.hash();
         if self.v1_transactions.contains_key(&hash) || self.v2_transactions.contains_key(&hash) {
+            return false;
+        }
+
+        let fee = tx.fee();
+
+        // Enforce minimum fee
+        if fee < MIN_TX_FEE {
+            warn!("Mempool: rejected v2 tx {} — fee {} < min {}", hex::encode(&hash[..4]), fee, MIN_TX_FEE);
             return false;
         }
 
@@ -72,12 +176,26 @@ impl Mempool {
             }
         }
 
+        // Enforce size limit
+        if self.total_count() >= MAX_MEMPOOL_SIZE {
+            self.evict_expired();
+            if self.total_count() >= MAX_MEMPOOL_SIZE {
+                let min_fee = self.tx_meta.values().map(|m| m.fee).min().unwrap_or(0);
+                if fee <= min_fee {
+                    warn!("Mempool full: rejected v2 tx {} (fee {} <= min {})", hex::encode(&hash[..4]), fee, min_fee);
+                    return false;
+                }
+                self.evict_lowest_fee();
+            }
+        }
+
         // Add nullifiers to pending set
         for nullifier in tx.nullifiers() {
             self.pending_nullifiers.insert(nullifier);
         }
 
         self.v2_transactions.insert(hash, tx);
+        self.tx_meta.insert(hash, TxMeta { fee, added_at: Self::now_secs() });
         true
     }
 
@@ -88,6 +206,7 @@ impl Mempool {
             for nullifier in tx.nullifiers() {
                 self.pending_nullifiers.remove(&nullifier.0);
             }
+            self.tx_meta.remove(hash);
             Some(tx)
         } else {
             None
@@ -101,6 +220,7 @@ impl Mempool {
             for nullifier in tx.nullifiers() {
                 self.pending_nullifiers.remove(&nullifier);
             }
+            self.tx_meta.remove(hash);
             Some(tx)
         } else {
             None
@@ -258,6 +378,7 @@ impl Mempool {
         self.contract_deploys.clear();
         self.contract_calls.clear();
         self.pending_nullifiers.clear();
+        self.tx_meta.clear();
     }
 
     /// Re-validate all V1 transactions against the current chain state.
@@ -328,7 +449,7 @@ mod tests {
     fn test_mempool_add_and_get() {
         let mut mempool = Mempool::new();
 
-        let tx = dummy_v1_tx(10);
+        let tx = dummy_v1_tx(5000); // Above MIN_TX_FEE
         let hash = tx.hash();
 
         assert!(mempool.add(tx));
@@ -337,10 +458,18 @@ mod tests {
     }
 
     #[test]
+    fn test_mempool_rejects_low_fee() {
+        let mut mempool = Mempool::new();
+        let tx = dummy_v1_tx(500); // Below MIN_TX_FEE
+        assert!(!mempool.add(tx));
+        assert_eq!(mempool.len(), 0);
+    }
+
+    #[test]
     fn test_mempool_no_duplicates() {
         let mut mempool = Mempool::new();
 
-        let tx = dummy_v1_tx(10);
+        let tx = dummy_v1_tx(5000);
         assert!(mempool.add(tx.clone()));
         assert!(!mempool.add(tx)); // Should fail, duplicate
         assert_eq!(mempool.len(), 1);
@@ -350,28 +479,28 @@ mod tests {
     fn test_mempool_sorted_by_fee() {
         let mut mempool = Mempool::new();
 
-        let tx1 = dummy_v1_tx(1);
-        let tx2 = dummy_v1_tx(5);
-        let tx3 = dummy_v1_tx(3);
+        let tx1 = dummy_v1_tx(1000);
+        let tx2 = dummy_v1_tx(5000);
+        let tx3 = dummy_v1_tx(3000);
 
         mempool.add(tx1);
         mempool.add(tx2);
         mempool.add(tx3);
 
         let txs = mempool.get_transactions(10);
-        assert_eq!(txs[0].fee, 5);
-        assert_eq!(txs[1].fee, 3);
-        assert_eq!(txs[2].fee, 1);
+        assert_eq!(txs[0].fee, 5000);
+        assert_eq!(txs[1].fee, 3000);
+        assert_eq!(txs[2].fee, 1000);
     }
 
     #[test]
     fn test_mempool_total_fees() {
         let mut mempool = Mempool::new();
 
-        mempool.add(dummy_v1_tx(10));
-        mempool.add(dummy_v1_tx(20));
-        mempool.add(dummy_v1_tx(30));
+        mempool.add(dummy_v1_tx(10000));
+        mempool.add(dummy_v1_tx(20000));
+        mempool.add(dummy_v1_tx(30000));
 
-        assert_eq!(mempool.total_fees(), 60);
+        assert_eq!(mempool.total_fees(), 60000);
     }
 }

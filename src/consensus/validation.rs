@@ -55,8 +55,9 @@ pub enum ValidationError {
     InvalidBlockHeight,
 }
 
-/// Maximum allowed time drift in the future (15 minutes)
-const MAX_FUTURE_TIME_DRIFT: u64 = 15 * 60; // 15 minutes in seconds
+/// Maximum allowed time drift in the future (2 minutes).
+/// M3 audit fix: reduced from 15min to 2min — 15min was 90x the 10s block time.
+const MAX_FUTURE_TIME_DRIFT: u64 = 2 * 60; // 2 minutes in seconds
 
 /// Maximum allowed age for a block (2 hours)
 const MAX_BLOCK_AGE: u64 = 2 * 60 * 60; // 2 hours in seconds
@@ -196,10 +197,11 @@ impl Validator {
     fn validate_difficulty_adjustment_timestamp(&self, header: &BlockHeader, parent: &BlockHeader) -> Result<(), ValidationError> {
         let time_diff = header.timestamp.saturating_sub(parent.timestamp);
         
-        // During difficulty adjustment, ensure timestamp progression is reasonable
-        // Allow up to 10x the target block time as maximum interval
+        // Ensure timestamp progression is reasonable (anti-manipulation).
+        // Allow up to 60× target (600s = 10 min) — generous enough for hashrate drops
+        // while still preventing extreme timestamp gaming for difficulty manipulation.
         let max_reasonable_interval = TARGET_BLOCK_TIME_SECS
-            .checked_mul(10)
+            .checked_mul(60)
             .ok_or(ValidationError::TimestampOverflow)?;
 
         if time_diff > max_reasonable_interval {

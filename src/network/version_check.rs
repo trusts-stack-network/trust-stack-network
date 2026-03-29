@@ -1,11 +1,14 @@
 //! Periodic version checker for TSN nodes.
 //!
-//! Queries seed nodes for their `/version.json` endpoint every 6 hours
-//! and warns if the local node is outdated.
+//! Queries seed nodes for their `/version.json` endpoint and **blocks mining**
+//! if the local node is below the network's `minimum_version`.
+//! Nodes that are outdated will stop mining and refuse to produce blocks
+//! until they are upgraded. This prevents forks caused by incompatible versions.
 
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
 use crate::config::SEED_NODES;
 
@@ -18,14 +21,26 @@ struct RemoteVersionInfo {
     protocol_version: u16,
 }
 
-/// Interval between version checks (6 hours).
-const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// Interval between version checks (30 minutes — faster detection of required upgrades).
+const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// Local node version from Cargo.toml.
-const LOCAL_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const LOCAL_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Minimum version this node requires from peers.
+/// Updated at each release to match the network.
+pub const MINIMUM_VERSION: &str = "1.0.0";
+
+/// Global flag: true = node is allowed to mine and sync. false = node is outdated.
+static NODE_VERSION_OK: AtomicBool = AtomicBool::new(true);
+
+/// Check if this node is allowed to mine (version is not outdated).
+pub fn is_version_ok() -> bool {
+    NODE_VERSION_OK.load(Ordering::Relaxed)
+}
 
 /// Parse a semver string into (major, minor, patch) for comparison.
-fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
+pub fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
     let parts: Vec<&str> = v.split('.').collect();
     if parts.len() != 3 {
         return None;
@@ -38,11 +53,16 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// Returns true if `a` is older than `b` (a < b).
-fn version_less_than(a: &str, b: &str) -> bool {
+pub fn version_less_than(a: &str, b: &str) -> bool {
     match (parse_semver(a), parse_semver(b)) {
         (Some(va), Some(vb)) => va < vb,
         _ => false,
     }
+}
+
+/// Returns true if version `v` meets the minimum version requirement.
+pub fn version_meets_minimum(v: &str) -> bool {
+    !version_less_than(v, MINIMUM_VERSION)
 }
 
 /// Check a single seed node for version info.
@@ -69,6 +89,7 @@ async fn check_seed_version(client: &reqwest::Client, seed_url: &str) -> Option<
 }
 
 /// Run a single version check against all seed nodes.
+/// Updates the global NODE_VERSION_OK flag.
 async fn do_version_check() {
     let client = reqwest::Client::new();
     let mut latest_version: Option<String> = None;
@@ -89,24 +110,37 @@ async fn do_version_check() {
 
     if let (Some(latest), Some(minimum)) = (latest_version, latest_minimum) {
         if version_less_than(LOCAL_VERSION, &minimum) {
-            warn!(
-                "TSN node outdated! Please upgrade to v{}. Download at tsnchain.com",
-                latest
+            // CRITICAL: Node is below minimum — block mining
+            NODE_VERSION_OK.store(false, Ordering::SeqCst);
+            error!(
+                "=== NODE OUTDATED === Version {} is below minimum required {}. \
+                 Mining DISABLED. Please upgrade to v{} immediately! \
+                 Download at https://tsnchain.com/",
+                LOCAL_VERSION, minimum, latest
             );
-        } else if version_less_than(LOCAL_VERSION, &latest) {
-            info!("New TSN version available: v{}", latest);
+        } else {
+            // Node is OK — (re-)enable mining if it was previously disabled
+            let was_blocked = !NODE_VERSION_OK.swap(true, Ordering::SeqCst);
+            if was_blocked {
+                info!("Node version {} meets minimum {} — mining RE-ENABLED", LOCAL_VERSION, minimum);
+            }
+            if version_less_than(LOCAL_VERSION, &latest) {
+                info!("New TSN version available: v{} (current: v{})", latest, LOCAL_VERSION);
+            }
         }
     }
 }
 
 /// Start the periodic version check loop.
 ///
-/// Runs an initial check on startup, then every 6 hours.
+/// Runs an initial check on startup, then every 30 minutes.
+/// If the node is outdated, mining is automatically disabled via `is_version_ok()`.
 pub async fn version_check_loop() {
     info!(
-        "Version checker started (local: v{}, checking every {}h)",
+        "Version checker started (local: v{}, minimum: v{}, interval: {}min)",
         LOCAL_VERSION,
-        CHECK_INTERVAL.as_secs() / 3600
+        MINIMUM_VERSION,
+        CHECK_INTERVAL.as_secs() / 60
     );
 
     // Initial check
@@ -139,5 +173,20 @@ mod tests {
         assert!(version_less_than("0.3.0", "1.0.0"));
         assert!(!version_less_than("0.3.0", "0.3.0"));
         assert!(!version_less_than("0.4.0", "0.3.0"));
+    }
+
+    #[test]
+    fn test_version_meets_minimum() {
+        assert!(version_meets_minimum("1.0.0"));
+        assert!(version_meets_minimum("1.0.1"));
+        assert!(version_meets_minimum("2.0.0"));
+        assert!(!version_meets_minimum("0.9.9"));
+        assert!(!version_meets_minimum("0.6.0"));
+    }
+
+    #[test]
+    fn test_is_version_ok_default() {
+        // By default, node is allowed to mine
+        assert!(is_version_ok());
     }
 }

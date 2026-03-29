@@ -91,6 +91,8 @@ impl SimdMode {
 struct MineJob {
     template: ShieldedBlock,
     found: Arc<AtomicBool>,
+    /// External cancel signal (set by P2P when a new block arrives)
+    cancel: Option<Arc<AtomicBool>>,
     attempts_total: Arc<AtomicU64>,
     result: Arc<Mutex<Option<ShieldedBlock>>>,
     done_tx: mpsc::Sender<()>,
@@ -143,6 +145,13 @@ impl MiningPool {
     }
 
     pub fn mine_block(&self, block: &mut ShieldedBlock) -> u64 {
+        self.mine_block_cancellable(block, None)
+    }
+
+    /// Mine a block with an optional external cancel signal.
+    /// When cancel is set to true (e.g. by P2P new block handler), workers stop immediately.
+    /// Returns 0 attempts if cancelled.
+    pub fn mine_block_cancellable(&self, block: &mut ShieldedBlock, cancel: Option<Arc<AtomicBool>>) -> u64 {
         let found = Arc::new(AtomicBool::new(false));
         let attempts_total = Arc::new(AtomicU64::new(0));
         let result = Arc::new(Mutex::new(None));
@@ -155,6 +164,7 @@ impl MiningPool {
             let job = MineJob {
                 template: template.clone(),
                 found: Arc::clone(&found),
+                cancel: cancel.clone(),
                 attempts_total: Arc::clone(&attempts_total),
                 result: Arc::clone(&result),
                 done_tx: done_tx.clone(),
@@ -169,6 +179,11 @@ impl MiningPool {
 
         for _ in 0..active_workers {
             let _ = done_rx.recv();
+        }
+
+        // Check if we were cancelled (no valid block found)
+        if cancel.as_ref().map_or(false, |c| c.load(Ordering::Relaxed)) && !found.load(Ordering::Relaxed) {
+            return 0;
         }
 
         // SECURITY FIX: Remplacement de unwrap() par unwrap_or_default() + log
@@ -199,46 +214,63 @@ impl Drop for MiningPool {
     }
 }
 
-fn run_mining_job(job: MineJob, worker_id: usize) {
+fn run_mining_job(job: MineJob, _worker_id: usize) {
     let MineJob {
         mut template,
         found,
+        cancel,
         attempts_total,
         result,
         done_tx,
     } = job;
 
-    // Each worker gets a unique nonce prefix: first 56 bytes are random per worker.
-    // We use a simple deterministic derivation from worker_id for the first 8 bytes
-    // to guarantee disjoint nonce spaces.
+    // Each worker gets a cryptographically random nonce prefix (bytes 0..56).
     let mut nonce = [0u8; 64];
-    // Set worker ID in the first 8 bytes to ensure disjoint nonce spaces
-    nonce[0..8].copy_from_slice(&(worker_id as u64).to_le_bytes());
-    // Fill bytes 8..56 with pseudo-random data based on worker_id + timestamp
-    let seed = template.header.timestamp.wrapping_mul(worker_id as u64 + 1);
-    for i in (8..56).step_by(8) {
-        let val = seed.wrapping_add(i as u64).wrapping_mul(0x517cc1b727220a95);
-        let end = (i + 8).min(56);
-        nonce[i..end].copy_from_slice(&val.to_le_bytes()[..end - i]);
-    }
-    // Last 8 bytes are the counter, starting at 0
+    use rand::Rng;
+    rand::thread_rng().fill(&mut nonce[0..56]);
 
-    let prefix = BlockHeaderHashPrefix::new_with_height(&template.header, template.height());
+    // Use optimized MiningHashContext: pre-compute fixed header elements ONCE.
+    // Only the nonce (64 bytes) + timestamp/difficulty (16 bytes) are re-converted per hash.
+    let height = template.height();
+    let use_optimized = height >= crate::config::POSEIDON2_V2_ACTIVATION_HEIGHT;
+
+    let mining_ctx = if use_optimized {
+        Some(crate::consensus::poseidon_pow::MiningHashContext::new(
+            template.header.version,
+            &template.header.prev_hash,
+            &template.header.merkle_root,
+            &template.header.commitment_root,
+            &template.header.nullifier_root,
+        ))
+    } else {
+        None
+    };
+
+    // Fallback for legacy blocks
+    let prefix = BlockHeaderHashPrefix::new_with_height(&template.header, height);
     let mut attempts = 0u64;
 
     loop {
         if found.load(Ordering::Relaxed) {
             break;
         }
+        if attempts & 0x3FF == 0 {
+            if let Some(ref c) = cancel {
+                if c.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        }
 
-        if prefix.meets_difficulty(
-            template.header.timestamp,
-            template.header.difficulty,
-            &nonce,
-        ) {
+        let is_valid = if let Some(ref ctx) = mining_ctx {
+            ctx.meets_difficulty(template.header.timestamp, template.header.difficulty, &nonce)
+        } else {
+            prefix.meets_difficulty(template.header.timestamp, template.header.difficulty, &nonce)
+        };
+
+        if is_valid {
             if !found.swap(true, Ordering::Relaxed) {
                 template.header.nonce = nonce;
-                // SECURITY FIX: Gestion sécurisée du Mutex poisoning
                 if let Ok(mut guard) = result.lock() {
                     *guard = Some(template.clone());
                 }
@@ -246,13 +278,12 @@ fn run_mining_job(job: MineJob, worker_id: usize) {
             break;
         }
 
-        // Increment the counter in the last 8 bytes
+        // Increment counter (last 8 bytes)
         let counter = u64::from_le_bytes(nonce[56..64].try_into().unwrap());
         nonce[56..64].copy_from_slice(&counter.wrapping_add(1).to_le_bytes());
         attempts += 1;
 
         if attempts % 1_000_000 == 0 {
-            // SECURITY FIX: Remplacement de unwrap() par une gestion d'erreur sécurisée
             if let Ok(duration) = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH) {
                 template.header.timestamp = duration.as_secs();

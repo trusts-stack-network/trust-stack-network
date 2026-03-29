@@ -49,7 +49,7 @@ impl Default for P2pConfig {
             bootstrap_peers: Vec::new(),
             dial_seeds: Vec::new(),
             relay_server: false,
-            protocol_version: "tsn/0.6.0".to_string(),
+            protocol_version: "tsn/1.1.0".to_string(),
         }
     }
 }
@@ -141,17 +141,31 @@ impl P2pNode {
             .with_relay_client(noise::Config::new, yamux::Config::default)?
             .with_behaviour(|key, relay_client| {
                 // GossipSub with message deduplication
+                // M7 audit fix: use Blake2s (crypto hash) instead of DefaultHasher (SipHash)
+                // SipHash is not collision-resistant — an attacker could craft messages
+                // with the same SipHash to bypass deduplication.
                 let message_id_fn = |message: &gossipsub::Message| {
-                    let mut hasher = DefaultHasher::new();
-                    message.data.hash(&mut hasher);
-                    gossipsub::MessageId::from(hasher.finish().to_string())
+                    use blake2::{Blake2s256, Digest};
+                    let mut hasher = Blake2s256::new();
+                    hasher.update(&message.data);
+                    let hash = hasher.finalize();
+                    gossipsub::MessageId::from(hex::encode(hash))
                 };
 
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_secs(5))
+                    .heartbeat_interval(Duration::from_millis(700)) // ETH2/Polkadot standard (was 5s)
                     .validation_mode(gossipsub::ValidationMode::Strict)
                     .message_id_fn(message_id_fn)
-                    .max_transmit_size(2 * 1024 * 1024) // 2MB max (blocks can be large with ZK proofs)
+                    .max_transmit_size(1 * 1024 * 1024) // M6 audit fix: 1MB max (was 4MB — too large for gossip)
+                    .flood_publish(false) // Mesh-only propagation: O(D×N) instead of O(N²) flood
+                    .mesh_n_low(4)        // ETH2-inspired mesh params for 100+ nodes
+                    .mesh_n(6)            // 6 mesh peers (scales to log_6(500) = 3.5 hops)
+                    .mesh_n_high(12)      // Prune if too many mesh connections
+                    .mesh_outbound_min(2) // Min outbound for partition resistance
+                    .gossip_lazy(6)       // IHAVE/IWANT backup for nodes outside mesh
+                    .history_length(10)   // Keep 10 heartbeats of message history
+                    .history_gossip(3)    // Announce last 3 heartbeats via gossip
+                    .fanout_ttl(Duration::from_secs(60))
                     .build()
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
@@ -249,8 +263,8 @@ impl P2pNode {
         let delayed_bootstrap = !config.dial_seeds.is_empty();
 
         // Create channels for communication with application
-        let (event_tx, event_rx) = mpsc::channel(256);
-        let (command_tx, command_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(1024);
+        let (command_tx, command_rx) = mpsc::channel(1024);
 
         // Spawn the event loop (with seed addresses for periodic redial)
         let seed_addrs = config.dial_seeds.clone();
@@ -351,12 +365,23 @@ async fn p2p_event_loop(
                                 &peer_id.to_string()[..16],
                                 info.protocol_version,
                             );
+
+                            // FORK PROTECTION: disconnect peers with incompatible protocol version
+                            if !info.protocol_version.starts_with("tsn/") {
+                                warn!("P2P: disconnecting peer {} — not a TSN node ({})",
+                                    &peer_id.to_string()[..16], info.protocol_version);
+                                let _ = swarm.disconnect_peer_id(peer_id);
+                                continue;
+                            }
+                            // Signal peer version to auto-update system
+                            if let Some(ver) = info.protocol_version.strip_prefix("tsn/") {
+                                crate::network::auto_update::notify_peer_version(ver);
+                            }
                         }
                         // Add discovered addresses to Kademlia
                         for addr in &info.listen_addrs {
                             swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
                         }
-                        // Parse height from protocol version if present (e.g. "tsn/0.6.0")
                         // Bootstrap Kademlia now that we know a peer
                         let _ = swarm.behaviour_mut().kademlia.bootstrap();
                     }
@@ -388,7 +413,7 @@ async fn p2p_event_loop(
                         event_tx.send(P2pEvent::NatStatus(status_str)).await.ok();
                     }
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                        info!("P2P peer connected: {}", peer_id);
+                        debug!("P2P peer connected: {}", peer_id);
                         event_tx.send(P2pEvent::PeerConnected(peer_id)).await.ok();
                     }
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
@@ -425,7 +450,7 @@ async fn p2p_event_loop(
                             .map(|p| PeerInfo {
                                 peer_id: p.to_string(),
                                 height: peer_heights.get(p).copied(),
-                                protocol: "tsn/0.6.0".to_string(),
+                                protocol: "tsn/1.1.0".to_string(),
                             })
                             .collect();
                         reply.send(peers).ok();
@@ -437,13 +462,20 @@ async fn p2p_event_loop(
 }
 
 /// Convert DNS seed URLs to libp2p multiaddrs.
-/// For backward compatibility with existing seed node URLs like "http://1.2.3.4:9333".
-pub fn seeds_to_bootstrap(seed_urls: &[String], p2p_port: u16) -> Vec<Multiaddr> {
+/// Extracts the IP and HTTP port from each seed URL, then uses HTTP_port + 1 as the P2P port.
+/// This ensures that nodes on any HTTP port correctly dial seeds on their actual P2P port.
+pub fn seeds_to_bootstrap(seed_urls: &[String], _local_p2p_port: u16) -> Vec<Multiaddr> {
     seed_urls.iter().filter_map(|url| {
-        // Extract IP from "http://1.2.3.4:9333"
-        let url = url.trim_start_matches("http://").trim_start_matches("https://");
-        let ip = url.split(':').next()?;
-        let addr: Multiaddr = format!("/ip4/{}/tcp/{}", ip, p2p_port).parse().ok()?;
+        // Extract IP and port from "http://1.2.3.4:9333"
+        let stripped = url.trim_start_matches("http://").trim_start_matches("https://");
+        let mut parts = stripped.split(':');
+        let ip = parts.next()?;
+        // Parse the seed's HTTP port (default 9333), then P2P = HTTP + 1
+        let seed_http_port: u16 = parts.next()
+            .and_then(|p| p.trim_matches('/').parse().ok())
+            .unwrap_or(9333);
+        let seed_p2p_port = seed_http_port + 1;
+        let addr: Multiaddr = format!("/ip4/{}/tcp/{}", ip, seed_p2p_port).parse().ok()?;
         Some(addr)
     }).collect()
 }

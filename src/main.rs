@@ -10,7 +10,7 @@ use tsn::node::NodeRole;
 use tsn::wallet::ShieldedWallet;
 
 #[derive(Parser)]
-#[command(name = "tsn")]
+#[command(name = "tsn", version)]
 #[command(about = "TSN - Trust Stack Network: A privacy-preserving post-quantum cryptocurrency", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -186,21 +186,45 @@ async fn wait_for_initial_sync(
         }
 
         if let Some((peer_url, info)) = best_peer {
-            // Accept if we're within 5 blocks of the best peer (race conditions with P2P)
+            // Accept if we're within 5 blocks AND our tip hash matches the peer's chain
             let gap = if info.height > local_height { info.height - local_height } else { local_height - info.height };
             if gap <= 5 {
+                // Verify we're on the same chain, not a fork
+                let on_same_chain = if info.height == local_height {
+                    info.latest_hash == local_hash
+                } else {
+                    // Check peer's block at our height
+                    let check_url = format!("{}/block/height/{}", peer_url, local_height);
+                    match client.get(&check_url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            match resp.json::<serde_json::Value>().await {
+                                Ok(block) => block["hash"].as_str() == Some(&local_hash),
+                                Err(_) => true, // assume OK if can't parse
+                            }
+                        }
+                        _ => true, // assume OK if can't reach
+                    }
+                };
+                if on_same_chain {
+                    println!(
+                        "Local chain synced with network at height {}.",
+                        local_height
+                    );
+                    return Ok(());
+                } else {
+                    println!(
+                        "Fork detected at height {}. Re-syncing from peer...",
+                        local_height
+                    );
+                    let _ = tsn::network::sync_from_peer(state.clone(), &peer_url).await;
+                }
+            } else {
                 println!(
-                    "Local chain synced with network at height {}.",
-                    local_height
+                    "Waiting for sync... local height={}, peer height={} (gap: {})",
+                    local_height, info.height, gap
                 );
-                return Ok(());
+                let _ = tsn::network::sync_from_peer(state.clone(), &peer_url).await;
             }
-
-            println!(
-                "Waiting for sync... local height={}, peer height={} (gap: {})",
-                local_height, info.height, gap
-            );
-            let _ = tsn::network::sync_from_peer(state.clone(), &peer_url).await;
         } else {
             println!("Waiting for sync... no peer info available yet.");
         }
@@ -223,6 +247,15 @@ async fn wait_for_initial_sync(
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Interactive wallet menu
+    Wallet {
+        /// Wallet file (default: auto-detect)
+        #[arg(short, long)]
+        wallet: Option<String>,
+        /// Node URL (default: auto-detect)
+        #[arg(short, long)]
+        node: Option<String>,
+    },
     /// Generate a new shielded wallet
     NewWallet {
         /// Output file for the wallet (default: wallet.json)
@@ -300,6 +333,15 @@ enum Commands {
         /// Disable connecting to seed nodes
         #[arg(long)]
         no_seeds: bool,
+    },
+    /// Show transaction history from the explorer
+    History {
+        /// Node URL to query (default: auto-detect)
+        #[arg(short, long)]
+        node: Option<String>,
+        /// Number of recent transactions to show (default: 20)
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
     },
     /// Send TSN to an address
     Send {
@@ -397,6 +439,8 @@ enum Commands {
         #[arg(long)]
         faucet_daily_limit: Option<u64>,
     },
+    /// Check for updates and install the latest version
+    Update,
 }
 
 #[tokio::main]
@@ -404,8 +448,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Suppress logs for simple commands (balance, new-wallet)
-    let is_quiet_cmd = matches!(cli.command, Some(Commands::Balance { .. }) | Some(Commands::NewWallet { .. }) | Some(Commands::Send { .. }));
-    let log_level = if is_quiet_cmd { "error" } else { "info" };
+    let is_quiet_cmd = matches!(cli.command, Some(Commands::Wallet { .. }) | Some(Commands::Balance { .. }) | Some(Commands::NewWallet { .. }) | Some(Commands::Send { .. }) | Some(Commands::History { .. }) | Some(Commands::Update));
+    let log_level = if is_quiet_cmd {
+        "error".to_string()
+    } else {
+        "info,yamux=error,libp2p_swarm=warn".to_string()
+    };
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -416,6 +464,22 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
+        Some(Commands::Wallet { wallet, node }) => {
+            let wallet = wallet.or_else(auto_detect_wallet).unwrap_or_else(|| "wallet.json".to_string());
+            let node = node.unwrap_or_else(|| {
+                for port in [9333u16, 9334, 9335, 8333] {
+                    if let Ok(stream) = std::net::TcpStream::connect_timeout(
+                        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                        std::time::Duration::from_millis(200),
+                    ) {
+                        drop(stream);
+                        return format!("http://127.0.0.1:{}", port);
+                    }
+                }
+                format!("http://127.0.0.1:{}", config::get_port())
+            });
+            cmd_wallet_menu(&wallet, &node).await?;
+        }
         Some(Commands::NewWallet { output }) => {
             cmd_new_wallet(&output)?;
         }
@@ -436,6 +500,22 @@ async fn main() -> anyhow::Result<()> {
             });
             cmd_balance(&wallet, &node).await?;
         }
+        Some(Commands::History { node, limit }) => {
+            let wallet_path = auto_detect_wallet().unwrap_or_else(|| "wallet.json".to_string());
+            let node = node.unwrap_or_else(|| {
+                for port in [9333u16, 9334, 9335, 8333] {
+                    if let Ok(stream) = std::net::TcpStream::connect_timeout(
+                        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                        std::time::Duration::from_millis(200),
+                    ) {
+                        drop(stream);
+                        return format!("http://127.0.0.1:{}", port);
+                    }
+                }
+                format!("http://127.0.0.1:{}", config::get_port())
+            });
+            cmd_history(&wallet_path, &node, limit).await?;
+        }
         Some(Commands::Send { to, amount, fee, wallet, node }) => {
             let wallet = wallet.or_else(auto_detect_wallet).unwrap_or_else(|| "wallet.json".to_string());
             let node = node.unwrap_or_else(|| {
@@ -451,6 +531,9 @@ async fn main() -> anyhow::Result<()> {
                 format!("http://127.0.0.1:{}", config::get_port())
             });
             cmd_send(&wallet, &node, &to, amount, fee).await?;
+        }
+        Some(Commands::Update) => {
+            tsn::network::auto_update::cmd_update().await.map_err(|e| anyhow::anyhow!(e))?;
         }
         Some(Commands::Miner { threads, port, wallet, data_dir, peer, public_url, no_seeds }) => {
             let data_dir = data_dir.unwrap_or_else(|| "data-miner".to_string());
@@ -741,12 +824,38 @@ fn auto_detect_wallet() -> Option<String> {
             if wallet_path.exists() {
                 return Some(wallet_path.to_string_lossy().to_string());
             }
+            // Check data* subdirectories next to binary
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("data") && entry.path().is_dir() {
+                        let w = entry.path().join("wallet.json");
+                        if w.exists() {
+                            return Some(w.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
         }
     }
     // Check current directory
     let cwd_wallet = std::path::Path::new("wallet.json");
     if cwd_wallet.exists() {
         return Some("wallet.json".to_string());
+    }
+    // Check data* subdirectories in current directory
+    if let Ok(entries) = std::fs::read_dir(".") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("data") && entry.path().is_dir() {
+                let w = entry.path().join("wallet.json");
+                if w.exists() {
+                    return Some(w.to_string_lossy().to_string());
+                }
+            }
+        }
     }
     None
 }
@@ -775,6 +884,161 @@ fn cmd_new_wallet(output: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn cmd_wallet_menu(wallet_path: &str, node_url: &str) -> anyhow::Result<()> {
+    use std::io::{self, Write};
+
+    let green = "\x1b[1;32m";
+    let cyan = "\x1b[1;36m";
+    let yellow = "\x1b[1;33m";
+    let reset = "\x1b[0m";
+
+    loop {
+        // Load wallet for display
+        let wallet = ShieldedWallet::load(wallet_path);
+        let pk_hash_hex = wallet.as_ref()
+            .map(|w| hex::encode(w.pk_hash()))
+            .unwrap_or_else(|_| "???".to_string());
+
+        println!();
+        println!("  {}╔══════════════════════════════════════════════════════════════════════╗{}", cyan, reset);
+        println!("  {}║  TSN Wallet v1.2.0║{}", cyan, reset);
+        println!("  {}╚══════════════════════════════════════════════════════════════════════╝{}", cyan, reset);
+        println!("  Your address (share this to receive TSN):");
+        println!("  {}{}{}", green, pk_hash_hex, reset);
+        println!();
+        println!("  {}1{} — Balance", yellow, reset);
+        println!("  {}2{} — Transaction history", yellow, reset);
+        println!("  {}3{} — Send TSN", yellow, reset);
+        println!("  {}4{} — Rescan wallet", yellow, reset);
+        println!("  {}0{} — Quit", yellow, reset);
+        println!();
+        print!("  Choice: ");
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let choice = input.trim();
+
+        match choice {
+            "1" => {
+                cmd_balance(wallet_path, node_url).await?;
+            }
+            "2" => {
+                cmd_history(wallet_path, node_url, 20).await?;
+            }
+            "3" => {
+                print!("  Recipient address: ");
+                io::stdout().flush().ok();
+                let mut to = String::new();
+                io::stdin().read_line(&mut to)?;
+                let to = to.trim();
+                if to.len() != 64 {
+                    println!("  {}Invalid address (must be 64 hex chars){}", "\x1b[1;31m", reset);
+                    continue;
+                }
+
+                print!("  Amount (TSN): ");
+                io::stdout().flush().ok();
+                let mut amt = String::new();
+                io::stdin().read_line(&mut amt)?;
+                let amount: f64 = match amt.trim().parse() {
+                    Ok(a) if a > 0.0 => a,
+                    _ => {
+                        println!("  {}Invalid amount{}", "\x1b[1;31m", reset);
+                        continue;
+                    }
+                };
+
+                if let Err(e) = cmd_send(wallet_path, node_url, to, amount, 0.001).await {
+                    println!("  {}Error: {}{}", "\x1b[1;31m", e, reset);
+                }
+            }
+            "4" => {
+                println!("  Rescanning wallet from height 0...");
+                if let Ok(mut w) = ShieldedWallet::load(wallet_path) {
+                    w.clear_notes();
+                    w.save(wallet_path).ok();
+                }
+                cmd_balance(wallet_path, node_url).await?;
+            }
+            "0" | "q" | "quit" | "exit" => {
+                println!("  Bye!");
+                break;
+            }
+            _ => {
+                println!("  Invalid choice");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_history(wallet_path: &str, _node_url: &str, limit: usize) -> anyhow::Result<()> {
+    let green = "\x1b[1;32m";
+    let red = "\x1b[1;31m";
+    let cyan = "\x1b[1;36m";
+    let reset = "\x1b[0m";
+
+    let coin_decimals = config::COIN_DECIMALS;
+    let divisor = 10u64.pow(coin_decimals) as f64;
+
+    // Read TX history from wallet file
+    let wallet = ShieldedWallet::load(wallet_path)?;
+    let history = wallet.tx_history();
+
+    if history.is_empty() {
+        println!("  No transactions yet.");
+        println!();
+        println!("  Transactions will appear here after you send or receive TSN.");
+        println!("  Explorer: https://explorer.tsnchain.com/");
+        return Ok(());
+    }
+
+    println!();
+    println!("  Transaction History ({}):", history.len());
+    println!();
+
+    for (i, tx) in history.iter().rev().take(limit).enumerate() {
+        let arrow = if tx.direction == "sent" {
+            format!("{}SENT{}", red, reset)
+        } else {
+            format!("{}RECEIVED{}", green, reset)
+        };
+
+        let amount_display = tx.amount as f64 / divisor;
+        let fee_display = tx.fee as f64 / divisor;
+
+        let counterparty_short = if tx.counterparty.len() > 16 {
+            format!("{}…{}", &tx.counterparty[..8], &tx.counterparty[tx.counterparty.len()-8..])
+        } else {
+            tx.counterparty.clone()
+        };
+
+        let time_str = if tx.timestamp > 0 {
+            let secs_ago = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .saturating_sub(tx.timestamp);
+            if secs_ago < 60 { format!("{}s ago", secs_ago) }
+            else if secs_ago < 3600 { format!("{}m ago", secs_ago / 60) }
+            else if secs_ago < 86400 { format!("{}h ago", secs_ago / 3600) }
+            else { format!("{}d ago", secs_ago / 86400) }
+        } else {
+            "unknown".to_string()
+        };
+
+        println!("  {} #{}", arrow, i + 1);
+        println!("    {}{:.4} TSN{}  →  {}  |  Fee: {:.4} TSN  |  {}",
+            cyan, amount_display, reset, counterparty_short, fee_display, time_str);
+        println!("    Hash: {}{}{}", green, tx.tx_hash, reset);
+        println!();
+    }
+
+    println!("  Explorer: https://explorer.tsnchain.com/");
+    Ok(())
+}
+
 async fn cmd_balance(wallet_path: &str, node_url: &str) -> anyhow::Result<()> {
     let mut wallet = ShieldedWallet::load(wallet_path)?;
     let coin_decimals = config::COIN_DECIMALS;
@@ -796,9 +1060,26 @@ async fn cmd_balance(wallet_path: &str, node_url: &str) -> anyhow::Result<()> {
             if let Ok(chain) = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY) {
                 let chain_height = chain.height();
                 if chain_height > wallet.last_scanned_height() {
-                    for h in (wallet.last_scanned_height() + 1)..=chain_height {
+                    // Calculate starting position from commitment count
+                    let mut pos = chain.fast_sync_commitment_offset();
+                    // Count outputs from fast_sync_base to scan start
+                    let scan_start = wallet.last_scanned_height() + 1;
+                    let fs_base = chain.fast_sync_base_height();
+                    if fs_base > 0 && scan_start > fs_base {
+                        for h in (fs_base + 1)..scan_start {
+                            if let Some(b) = chain.get_block_by_height(h) {
+                                for tx in &b.transactions { pos += tx.outputs.len() as u64; }
+                                for tx in &b.transactions_v2 { pos += tx.outputs.len() as u64; }
+                                pos += 1; // coinbase
+                            }
+                        }
+                    }
+                    for h in scan_start..=chain_height {
                         if let Some(block) = chain.get_block_by_height(h) {
-                            new_notes += wallet.scan_block(&block, 0);
+                            new_notes += wallet.scan_block(&block, pos);
+                            for tx in &block.transactions { pos += tx.outputs.len() as u64; }
+                            for tx in &block.transactions_v2 { pos += tx.outputs.len() as u64; }
+                            pos += 1; // coinbase
                         }
                     }
                     wallet.save(wallet_path).ok();
@@ -884,6 +1165,55 @@ async fn cmd_send(wallet_path: &str, node_url: &str, to: &str, amount: f64, fee:
         );
     }
 
+    // Check PQ nullifiers against the node to filter already-spent notes
+    {
+        let nk_bytes = wallet.nullifier_key_bytes();
+        let mut nullifier_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut nullifier_hexes: Vec<String> = Vec::new();
+        let notes = wallet.notes_mut();
+        for (i, note) in notes.iter().enumerate() {
+            if !note.is_spent {
+                if let Some(pq_cm) = note.pq_commitment {
+                    let nf = tsn::crypto::pq::commitment_pq::derive_nullifier_pq(
+                        &nk_bytes, &pq_cm, note.position
+                    );
+                    let nf_hex = hex::encode(nf);
+                    nullifier_map.insert(nf_hex.clone(), i);
+                    nullifier_hexes.push(nf_hex);
+                }
+            }
+        }
+        if !nullifier_hexes.is_empty() {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()?;
+            let check_url = format!("{}/nullifiers/check", node_url);
+            if let Ok(resp) = client.post(&check_url)
+                .json(&serde_json::json!({"nullifiers": nullifier_hexes}))
+                .send().await
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(spent_arr) = body["spent"].as_array() {
+                        let notes = wallet.notes_mut();
+                        let mut count = 0;
+                        for s in spent_arr {
+                            if let Some(h) = s.as_str() {
+                                if let Some(&idx) = nullifier_map.get(h) {
+                                    notes[idx].is_spent = true;
+                                    count += 1;
+                                }
+                            }
+                        }
+                        if count > 0 {
+                            eprintln!("  ({} spent notes filtered)", count);
+                            wallet.save(wallet_path).ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Select notes (greedy: largest first)
     let unspent = wallet.unspent_notes();
     let mut selected = Vec::new();
@@ -957,6 +1287,17 @@ async fn cmd_send(wallet_path: &str, node_url: &str, to: &str, amount: f64, fee:
                 r
             }
         };
+
+        // Pre-verify merkle witness before proof generation
+        let stored_pq_cm = note.pq_commitment.unwrap_or([0u8; 32]);
+        if !witness.verify(&tsn::crypto::pq::commitment_pq::NoteCommitmentPQ(stored_pq_cm)) {
+            anyhow::bail!(
+                "Merkle witness verification failed for note at position {}. \
+                 The commitment in your wallet does not match the merkle tree. \
+                 Try rescanning your wallet (delete notes and set last_scanned_height to 0).",
+                pos
+            );
+        }
 
         spend_witnesses.push(SpendWitnessPQ {
             value: note.note.value,
@@ -1062,12 +1403,28 @@ async fn cmd_send(wallet_path: &str, node_url: &str, to: &str, amount: f64, fee:
     println!("  {}TX: {}{}", green, tx_hash, reset);
     println!();
 
+    // Record TX in wallet history
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    wallet.add_tx(tsn::wallet::WalletTxRecord {
+        tx_hash: tx_hash.clone(),
+        direction: "sent".to_string(),
+        amount: amount_base,
+        fee: fee_base,
+        counterparty: to.to_string(),
+        height: 0, // will be updated when mined
+        timestamp: now,
+    });
+    wallet.save(wallet_path).ok();
+
     Ok(())
 }
 
 async fn try_scan_via_api(wallet: &mut ShieldedWallet, node_url: &str, wallet_path: &str) -> (bool, usize) {
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(120))
         .connect_timeout(std::time::Duration::from_secs(3))
         .build()
     {
@@ -1080,10 +1437,7 @@ async fn try_scan_via_api(wallet: &mut ShieldedWallet, node_url: &str, wallet_pa
     let chain_height: u64 = match client.get(&info_url).send().await {
         Ok(r) if r.status().is_success() => {
             match r.json::<serde_json::Value>().await {
-                Ok(v) => {
-                    let h = v["height"].as_u64().unwrap_or(0);
-                    h
-                }
+                Ok(v) => v["height"].as_u64().unwrap_or(0),
                 Err(_) => return (false, 0),
             }
         }
@@ -1097,77 +1451,144 @@ async fn try_scan_via_api(wallet: &mut ShieldedWallet, node_url: &str, wallet_pa
 
     let blocks_to_scan = chain_height - scanned_height;
     if blocks_to_scan > 50 {
-        eprint!("  Scanning {} blocks...", blocks_to_scan);
+        eprint!("  Scanning {} blocks via outputs API...", blocks_to_scan);
     }
 
-    // Fetch full blocks via /blocks/since/:height (returns Vec<ShieldedBlock>)
-    let mut new_notes = 0usize;
-    let mut current = scanned_height;
-
-    // Fetch blocks from the node. After fast-sync, the node may only have recent blocks.
-    // Try scanned_height first, then fall back to height 0 (which returns from earliest available).
-    let url = format!("{}/blocks/since/{}", node_url, scanned_height);
-    let body = match client.get(&url).send().await {
+    // Use /outputs/since/ API — returns each output with its CORRECT position
+    // from the server's merkle tree. This avoids position mismatch after fast-sync.
+    let url = format!("{}/outputs/since/{}", node_url, scanned_height);
+    let resp = match client.get(&url).send().await {
         Ok(r) if r.status().is_success() => {
-            match r.text().await {
-                Ok(b) => b,
+            match r.json::<serde_json::Value>().await {
+                Ok(v) => v,
                 Err(_) => return (false, 0),
             }
         }
         _ => return (false, 0),
     };
 
-    // If empty, the node doesn't have blocks from our scanned_height (fast-sync).
-    // Binary search for the first available block.
-    let body = if body == "[]" {
-        // The node did fast-sync — blocks before the snapshot don't exist.
-        // Skip ahead: wallet can't scan blocks it doesn't have, so jump to what's available.
-        let mut try_height = chain_height.saturating_sub(200);
-        let mut found_body = String::from("[]");
-        // Binary search for first available block
-        let mut lo = scanned_height;
-        let mut hi = chain_height;
-        while lo + 1 < hi {
-            let mid = (lo + hi) / 2;
-            if let Ok(r) = client.get(&format!("{}/blocks/since/{}", node_url, mid)).send().await {
-                if let Ok(b) = r.text().await {
-                    if b != "[]" {
-                        hi = mid;
-                        found_body = b;
-                    } else {
-                        lo = mid;
-                    }
-                } else { break; }
-            } else { break; }
-        }
-        // Also update scanned_height to skip the gap (we can't scan blocks we don't have)
-        wallet.set_last_scanned_height(hi);
-        found_body
-    } else {
-        body
+    let outputs = match resp["outputs"].as_array() {
+        Some(arr) => arr,
+        None => return (false, 0),
     };
 
-    if let Ok(blocks) = serde_json::from_str::<Vec<tsn::core::ShieldedBlock>>(&body) {
-        for (i, block) in blocks.iter().enumerate() {
-            let block_h = if block.coinbase.height > 0 {
-                block.coinbase.height
-            } else {
-                wallet.last_scanned_height() + 1 + i as u64
-            };
-            new_notes += wallet.scan_block(block, 0);
-            wallet.set_last_scanned_height(block_h);
+    let mut new_notes = 0usize;
+    let mut max_height = scanned_height;
+
+    for output in outputs {
+        let position = output["position"].as_u64().unwrap_or(0);
+        let block_height = output["block_height"].as_u64().unwrap_or(0);
+        let note_commitment = output["note_commitment"].as_str().unwrap_or("");
+        let note_commitment_pq = output["note_commitment_pq"].as_str().unwrap_or("");
+        let ephemeral_pk_hex = output["ephemeral_pk"].as_str().unwrap_or("");
+        let ciphertext_hex = output["ciphertext"].as_str().unwrap_or("");
+
+        // Reconstruct EncryptedNote from hex data
+        let ephemeral_pk = match hex::decode(ephemeral_pk_hex) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let ciphertext = match hex::decode(ciphertext_hex) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let encrypted_note = tsn::crypto::note::EncryptedNote {
+            ciphertext,
+            ephemeral_pk,
+        };
+
+        if wallet.scan_encrypted_output(
+            &encrypted_note,
+            note_commitment,
+            note_commitment_pq,
+            position,
+            block_height,
+        ) {
+            new_notes += 1;
+
+            // Detect received TX (not mining reward)
+            // Mining rewards are exactly miner_reward or dev_fee amounts
+            let miner_rwd = config::miner_reward(config::BLOCK_REWARD);
+            let dev_rwd = config::dev_fee(config::BLOCK_REWARD);
+            let last_note = wallet.notes().last();
+            if let Some(note) = last_note {
+                let val = note.note.value;
+                if val != miner_rwd && val != dev_rwd && val > 0 {
+                    // This is a received transfer, not a mining reward
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    wallet.add_tx(tsn::wallet::WalletTxRecord {
+                        tx_hash: format!("received-at-height-{}", block_height),
+                        direction: "received".to_string(),
+                        amount: val,
+                        fee: 0,
+                        counterparty: "unknown".to_string(),
+                        height: block_height,
+                        timestamp: now,
+                    });
+                }
+            }
+        }
+
+        if block_height > max_height {
+            max_height = block_height;
+        }
+    }
+
+    // Update scanned height to the chain height (we scanned all available outputs)
+    wallet.set_last_scanned_height(chain_height);
+
+    // Check PQ nullifiers to mark spent notes
+    {
+        let nk_bytes = wallet.nullifier_key_bytes();
+        let mut nullifier_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut nullifier_hexes: Vec<String> = Vec::new();
+        let notes = wallet.notes_mut();
+        for (i, note) in notes.iter().enumerate() {
+            if !note.is_spent {
+                if let Some(pq_cm) = note.pq_commitment {
+                    let nf = tsn::crypto::pq::commitment_pq::derive_nullifier_pq(
+                        &nk_bytes, &pq_cm, note.position
+                    );
+                    let nf_hex = hex::encode(nf);
+                    nullifier_map.insert(nf_hex.clone(), i);
+                    nullifier_hexes.push(nf_hex);
+                }
+            }
+        }
+        if !nullifier_hexes.is_empty() {
+            let check_url = format!("{}/nullifiers/check", node_url);
+            if let Ok(resp) = client.post(&check_url)
+                .json(&serde_json::json!({"nullifiers": nullifier_hexes}))
+                .send().await
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(spent_arr) = body["spent"].as_array() {
+                        let notes = wallet.notes_mut();
+                        for s in spent_arr {
+                            if let Some(h) = s.as_str() {
+                                if let Some(&idx) = nullifier_map.get(h) {
+                                    notes[idx].is_spent = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     if blocks_to_scan > 50 {
-        eprintln!(" done.");
+        eprintln!(" done ({} new notes).", new_notes);
     }
 
-    let scanned_now = wallet.last_scanned_height();
-    if scanned_now > scanned_height {
+    if chain_height > scanned_height {
         wallet.save(wallet_path).ok();
     }
-    (scanned_now > scanned_height, new_notes)
+    (true, new_notes)
 }
 
 fn cmd_mine(
@@ -1305,7 +1726,7 @@ async fn cmd_node(
 
     println!();
     println!("╔═══════════════════════════════════════════╗");
-    println!("║     TSN Shielded Node v0.6.0              ║");
+    println!("║     TSN Shielded Node v1.2.0              ║");
     println!("╚═══════════════════════════════════════════╝");
     println!();
     // ANSI color codes
@@ -1368,21 +1789,29 @@ async fn cmd_node(
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        // Find best peer
-        let mut best_peer: Option<(String, u64)> = None;
+        // Find sync peer — random selection among peers at max height (load balancing)
+        // Inspired by Cosmos state-sync (multiple providers) and Bitcoin IBD (distributed downloads)
+        let mut eligible_peers: Vec<(String, u64)> = Vec::new();
+        let mut max_height = 0u64;
         for peer_url in &peers {
             let tip_url = format!("{}/tip", peer_url);
             if let Ok(resp) = client.get(&tip_url).send().await {
                 if let Ok(tip) = resp.json::<serde_json::Value>().await {
                     let peer_height = tip["height"].as_u64().unwrap_or(0);
                     if peer_height > local_height + 10 {
-                        if best_peer.is_none() || peer_height > best_peer.as_ref().unwrap().1 {
-                            best_peer = Some((peer_url.clone(), peer_height));
+                        if peer_height > max_height {
+                            max_height = peer_height;
                         }
+                        eligible_peers.push((peer_url.clone(), peer_height));
                     }
                 }
             }
         }
+        // Keep only peers within 5 blocks of the highest (they're all "good enough")
+        eligible_peers.retain(|(_, h)| *h + 5 >= max_height);
+        // Random selection to distribute load across seeds
+        use rand::seq::SliceRandom;
+        let best_peer = eligible_peers.choose(&mut rand::thread_rng()).cloned();
 
         if let Some((peer_url, peer_height)) = best_peer {
             let behind = peer_height - local_height;
@@ -1395,7 +1824,7 @@ async fn cmd_node(
                 println!("Fast sync: {} blocks behind — downloading state snapshot...", behind);
 
                 let snapshot_client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(120))
+                    .timeout(std::time::Duration::from_secs(600))
                     .build()?;
 
                 // Get snapshot info
@@ -1620,6 +2049,15 @@ async fn cmd_node(
         None
     };
 
+    // Shared HTTP client for all outbound requests — prevents FD leaks from per-request clients
+    let http_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(5)
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
     let state = Arc::new(AppState {
         blockchain: RwLock::new(blockchain),
         mempool: RwLock::new(mempool),
@@ -1631,6 +2069,11 @@ async fn cmd_node(
         p2p_broadcast: RwLock::new(None),
         p2p_peer_id: RwLock::new(None),
         node_role: format!("{}", node_role),
+        mining_cancel: RwLock::new(None),
+        http_client,
+        last_reorg_height: std::sync::atomic::AtomicU64::new(0),
+        snapshot_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
+        snapshot_cache: tokio::sync::RwLock::new(None),
     });
 
     // Create router with API (wallet and explorer are served from static React app)
@@ -1657,6 +2100,29 @@ async fn cmd_node(
         }
     });
 
+    // Start Prometheus metrics server on port 9090
+    {
+        let config = tsn::metrics::http_endpoint::MetricsServerConfig {
+            port: 9090,
+            bind_address: "0.0.0.0".to_string(),
+            enable_cors: true,
+        };
+        match tsn::metrics::http_endpoint::start_metrics_server(config).await {
+            Ok(_handle) => println!("Metrics server:  http://0.0.0.0:9090/metrics"),
+            Err(e) => tracing::error!("Failed to start metrics server: {}", e),
+        }
+    }
+
+    // Start version checker — blocks mining if node is outdated
+    tokio::spawn(async {
+        tsn::network::version_check::version_check_loop().await;
+    });
+
+    // Start auto-update loop — checks for new versions and self-updates
+    tokio::spawn(async {
+        tsn::network::auto_update::auto_update_loop().await;
+    });
+
     // Sync from peers in background (non-blocking — API is already running)
     if !peers.is_empty() {
         println!("Peers: [{}]", peers.iter().map(|p| peer_id(p)).collect::<Vec<_>>().join(", "));
@@ -1680,7 +2146,7 @@ async fn cmd_node(
                 match sync_from_peer(sync_state_init.clone(), peer).await {
                     Ok(n) if n > 0 => tracing::info!("Synced {} blocks from {}", n, peer_id(peer)),
                     Ok(_) => {}
-                    Err(e) => tracing::warn!("Sync from {} failed: {}", peer_id(peer), e),
+                    Err(e) => tracing::debug!("Sync from {} failed: {}", peer_id(peer), e),
                 }
             }
         });
@@ -1689,7 +2155,7 @@ async fn cmd_node(
         let sync_state = state.clone();
         let sync_peers = state.peers.read().unwrap().clone();
         tokio::spawn(async move {
-            sync_loop(sync_state, sync_peers, 30).await;
+            sync_loop(sync_state, sync_peers, 10).await;
         });
 
         // Start peer discovery loop (checks every 60 seconds)
@@ -1717,7 +2183,7 @@ async fn cmd_node(
                 bootstrap_peers: Vec::new(),
                 dial_seeds,
                 relay_server: node_role == NodeRole::Miner,
-                protocol_version: "tsn/0.6.0".to_string(),
+                protocol_version: "tsn/1.1.0".to_string(),
             };
 
             let p2p = P2pNode::start(p2p_config).await
@@ -1741,8 +2207,17 @@ async fn cmd_node(
                 *p2p_tx = Some(p2p.command_tx.clone());
             }
 
+            // Shared cancel signal: P2P handler sets this when a new block arrives,
+            // causing the miner to immediately abort and restart on the new tip.
+            let mining_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut mc = state.mining_cancel.write().unwrap();
+                *mc = Some(Arc::clone(&mining_cancel));
+            }
+
             // Spawn task to handle incoming P2P events
             let p2p_blockchain = state.clone();
+            let p2p_cancel = Arc::clone(&mining_cancel);
             let mut p2p_events = p2p.event_rx;
             tokio::spawn(async move {
                 while let Some(event) = p2p_events.recv().await {
@@ -1751,13 +2226,41 @@ async fn cmd_node(
                             match serde_json::from_slice::<tsn::core::ShieldedBlock>(&data) {
                                 Ok(block) => {
                                     let height = block.coinbase.height;
-                                    let mut chain = p2p_blockchain.blockchain.write().unwrap();
-                                    match chain.add_block(block) {
-                                        Ok(_) => info!("P2P: new block {} accepted", height),
-                                        Err(e) => debug!("P2P: block rejected: {}", e),
+                                    let result = {
+                                        let mut chain = p2p_blockchain.blockchain.write().unwrap();
+                                        chain.try_add_block(block)
+                                    };
+                                    match result {
+                                        Ok(true) => {
+                                            info!("P2P: new block #{} accepted", height);
+                                            // Signal miner to cancel and restart on new tip
+                                            p2p_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        Ok(false) => {
+                                            // Stored as orphan or side chain — trigger immediate sync
+                                            // to fetch missing blocks and resolve potential fork
+                                            let local_height = p2p_blockchain.blockchain.read().unwrap().height();
+                                            if height > local_height {
+                                                tracing::info!("P2P: block #{} stored as orphan (local: {}), triggering sync", height, local_height);
+                                                let sync_state = p2p_blockchain.clone();
+                                                let sync_peers = p2p_blockchain.peers.read().unwrap().clone();
+                                                tokio::spawn(async move {
+                                                    for peer in &sync_peers {
+                                                        match tsn::network::sync_from_peer(sync_state.clone(), peer).await {
+                                                            Ok(n) if n > 0 => {
+                                                                tracing::info!("Orphan sync: got {} blocks from {}", n, tsn::network::peer_id(peer));
+                                                                break;
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        Err(e) => tracing::debug!("P2P: block #{} rejected: {}", height, e),
                                     }
                                 }
-                                Err(e) => debug!("P2P: invalid block data: {}", e),
+                                Err(e) => tracing::debug!("P2P: invalid block data: {}", e),
                             }
                         }
                         P2pEvent::NewTransaction(data) => {
@@ -1769,7 +2272,7 @@ async fn cmd_node(
                             }
                         }
                         P2pEvent::PeerConnected(peer) => {
-                            info!("P2P: peer {} connected", peer);
+                            debug!("P2P: peer {} connected", peer);
                         }
                         P2pEvent::PeerDisconnected(peer) => {
                             debug!("P2P: peer {} disconnected", peer);
@@ -1950,7 +2453,7 @@ async fn cmd_node(
         let pool = Arc::new(MiningPool::new_with_simd(jobs, simd));
 
         tokio::spawn(async move {
-            let client = reqwest::Client::new();
+            let client = mine_state.http_client.clone();
             println!("Starting integrated miner...");
             println!("Mining threads: {}", jobs);
             {
@@ -1964,6 +2467,28 @@ async fn cmd_node(
             }
 
             loop {
+                // Post-reorg cooldown: wait once for network to stabilize before mining
+                {
+                    let last_reorg = mine_state.last_reorg_height.load(std::sync::atomic::Ordering::Relaxed);
+                    if last_reorg > 0 {
+                        tracing::info!("Post-reorg cooldown: waiting 3s after reorg at height {}", last_reorg);
+                        // Reset immediately so we only wait ONCE per reorg
+                        mine_state.last_reorg_height.store(0, std::sync::atomic::Ordering::Relaxed);
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        continue;
+                    }
+                }
+
+                // Version gate: refuse to mine if node is outdated
+                if !tsn::network::version_check::is_version_ok() {
+                    tracing::warn!(
+                        "Mining PAUSED — node version {} is below network minimum. Please upgrade!",
+                        tsn::network::version_check::LOCAL_VERSION
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    continue;
+                }
+
                 // Sync gate: pause mining if too far behind network tip
                 {
                     let local_height = mine_state.blockchain.read().unwrap().height();
@@ -1982,10 +2507,7 @@ async fn cmd_node(
                             println!("Re-syncing from network (chain fork detected)...");
 
                             // Find best peer and re-import snapshot
-                            let sync_client = reqwest::Client::builder()
-                                .timeout(std::time::Duration::from_secs(120))
-                                .build()
-                                .unwrap_or_default();
+                            let sync_client = mine_state.http_client.clone();
 
                             let peers_list = mine_state.peers.read().unwrap().clone();
                             let mut best: Option<(String, u64)> = None;
@@ -2048,7 +2570,17 @@ async fn cmd_node(
                 let (mempool_txs, mempool_txs_v2) = {
                     let mempool = mine_state.mempool.read().unwrap();
                     let v1 = mempool.get_transactions(100);
-                    let v2 = mempool.get_shielded_v2_transactions(100);
+                    let all_v2 = mempool.get_shielded_v2_transactions(100);
+                    drop(mempool);
+
+                    // Filter V2 transactions: only include those with valid anchors
+                    // This prevents invalid TX anchors from blocking mining
+                    let chain = mine_state.blockchain.read().unwrap();
+                    let v2: Vec<_> = all_v2.into_iter().filter(|tx| {
+                        tx.spends.iter().all(|spend| chain.state().is_valid_anchor_pq(&spend.anchor))
+                    }).collect();
+                    drop(chain);
+
                     if !v2.is_empty() {
                         println!("  Including {} V2 transactions in block template", v2.len());
                     }
@@ -2073,13 +2605,28 @@ async fn cmd_node(
                     println!("Mining block {} (difficulty: {})...", height, difficulty);
                 }
 
+                // Get or create the mining cancel signal
+                let cancel_signal = {
+                    let mc = mine_state.mining_cancel.read().unwrap();
+                    mc.clone().unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+                };
+                // Reset cancel before starting
+                cancel_signal.store(false, std::sync::atomic::Ordering::Relaxed);
+
                 // Mine in a blocking task to not block the async runtime
                 let mine_state_for_stats = mine_state.clone();
                 let pool = Arc::clone(&pool);
+                let cancel_for_mine = Arc::clone(&cancel_signal);
                 let mined_block = tokio::task::spawn_blocking(move || {
                     let start = std::time::Instant::now();
-                    let attempts = pool.mine_block(&mut block);
+                    let attempts = pool.mine_block_cancellable(&mut block, Some(cancel_for_mine));
                     let elapsed = start.elapsed();
+
+                    if attempts == 0 {
+                        // Cancelled by P2P new block — return None
+                        return None;
+                    }
+
                     let hashrate = if elapsed.as_secs_f64() > 0.0 {
                         (attempts as f64 / elapsed.as_secs_f64()) as u64
                     } else {
@@ -2098,8 +2645,27 @@ async fn cmd_node(
                         stats.last_updated = now;
                     }
 
-                    block
+                    // Display hashrate info
+                    let hr_display = if hashrate > 1_000_000 {
+                        format!("{:.2} MH/s", hashrate as f64 / 1_000_000.0)
+                    } else if hashrate > 1_000 {
+                        format!("{:.2} KH/s", hashrate as f64 / 1_000.0)
+                    } else {
+                        format!("{} H/s", hashrate)
+                    };
+                    eprintln!("  ⛏ {} ({} attempts in {:.1}s)", hr_display, attempts, elapsed.as_secs_f64());
+
+                    Some(block)
                 }).await.expect("CRITICAL: mining task panicked");
+
+                // If cancelled, restart on new tip (with cooldown after reorg)
+                let mined_block = match mined_block {
+                    Some(b) => b,
+                    None => {
+                        tracing::debug!("Mining cancelled — restarting on new tip");
+                        continue;
+                    }
+                };
 
                 // Add to local chain
                 {
@@ -2107,9 +2673,9 @@ async fn cmd_node(
                     match chain.add_block(mined_block.clone()) {
                         Ok(()) => {
                             println!(
-                                "Mined block {} (hash: {}...)",
+                                "💎 Mined block #{} (hash: {})",
                                 chain.height(),
-                                &mined_block.hash_hex()[..16]
+                                mined_block.hash_hex()
                             );
 
                             // Save mined coinbase note to wallet (so balance updates immediately)
@@ -2178,7 +2744,7 @@ async fn cmd_node(
                     peer != &announce_url && peer != &local_url && peer != &local_ip_url
                 });
                 if !current_peers.is_empty() {
-                    broadcast_block(&mined_block, &current_peers).await;
+                    broadcast_block(&mined_block, &current_peers, &client).await;
                 }
 
                 // Best-effort: check whether a peer accepted the mined block
@@ -2198,7 +2764,7 @@ async fn cmd_node(
                             }
                         }
                         _ => {
-                            tracing::warn!("Could not confirm peer acceptance for height {}.", height);
+                            tracing::debug!("Could not confirm peer acceptance for height {}.", height);
                         }
                     }
                 }

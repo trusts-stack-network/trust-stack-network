@@ -59,6 +59,8 @@ struct DownloadJob {
     peer_url: String,
     /// Number of retry attempts.
     retry_count: usize,
+    /// Shared HTTP client (prevents FD leaks).
+    client: reqwest::Client,
 }
 
 /// Result of a block download operation.
@@ -196,7 +198,7 @@ impl ParallelSyncManager {
             return Err(SyncError::NoPeersAvailable);
         }
 
-        let client = reqwest::Client::new();
+        let client = self.state.http_client.clone();
         let mut max_height = 0u64;
 
         // Query multiple peers for their heights
@@ -263,6 +265,7 @@ impl ParallelSyncManager {
                         count: batch_size,
                         peer_url: peer.clone(),
                         retry_count: 0,
+                        client: state.http_client.clone(),
                     };
                     job_queue.push_back(job);
                     break; // Only one job per height range initially
@@ -323,7 +326,7 @@ impl ParallelSyncManager {
 
     /// Download a batch of blocks from a peer.
     async fn download_block_batch(job: DownloadJob) -> DownloadResult {
-        let client = reqwest::Client::new();
+        let client = job.client.clone();
         let url = format!("{}/blockchain/blocks", job.peer_url);
         
         let request_body = BlockRangeRequest {

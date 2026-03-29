@@ -20,9 +20,10 @@ pub mod scoring;
 pub mod sync;
 pub mod sync_gate;
 pub mod transport;
+pub mod auto_update;
 pub mod version_check;
 
-pub use api::{AppState, MinerStats, create_router};
+pub use api::{AppState, CachedSnapshot, MinerStats, create_router};
 pub use sync_gate::SyncGate;
 pub use mempool::Mempool;
 pub use discovery::discovery_loop;

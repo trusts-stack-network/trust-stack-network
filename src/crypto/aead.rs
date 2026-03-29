@@ -1,5 +1,5 @@
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
     Aes256Gcm, Key, Nonce, Error as AesError
 };
 use thiserror::Error;
@@ -32,9 +32,14 @@ impl AeadCipher {
     
     pub fn encrypt(&self, plaintext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, AeadError> {
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-        
+
+        let payload = Payload {
+            msg: plaintext,
+            aad: associated_data,
+        };
+
         self.cipher
-            .encrypt(&nonce, plaintext)
+            .encrypt(&nonce, payload)
             .map(|ciphertext| {
                 let mut result = nonce.to_vec();
                 result.extend_from_slice(&ciphertext);
@@ -42,17 +47,22 @@ impl AeadCipher {
             })
             .map_err(|e| AeadError::EncryptionFailed(e.to_string()))
     }
-    
+
     pub fn decrypt(&self, ciphertext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, AeadError> {
         if ciphertext.len() < 12 {
             return Err(AeadError::DecryptionFailed("Ciphertext too short".to_string()));
         }
-        
+
         let (nonce_bytes, encrypted) = ciphertext.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
-        
+
+        let payload = Payload {
+            msg: encrypted,
+            aad: associated_data,
+        };
+
         self.cipher
-            .decrypt(nonce, encrypted)
+            .decrypt(nonce, payload)
             .map_err(|e| AeadError::DecryptionFailed(e.to_string()))
     }
 }

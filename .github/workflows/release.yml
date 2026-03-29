@@ -1,156 +1,107 @@
-# TSN Release Pipeline
-# Triggered on version tags (v*)
-
 name: Release
 
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+      - 'v*'
 
-env:
-  CARGO_TERM_COLOR: always
+permissions:
+  contents: write
 
 jobs:
-  # ==========================================================================
-  # Job 1: Create Release
-  # ==========================================================================
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-      
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: TSN ${{ steps.get_version.outputs.version }}
-          draft: true
-          prerelease: ${{ contains(steps.get_version.outputs.version, '-') }}
-          body: |
-            ## TSN ${{ steps.get_version.outputs.version }}
-            
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
-            
-            ### Downloads
-            - Linux x86_64: `tsn-x86_64-unknown-linux-gnu`
-            
-            ### Verification
-            All binaries are signed and have SHA256 checksums.
-
-  # ==========================================================================
-  # Job 2: Build Release Binaries
-  # ==========================================================================
-  build-release:
-    name: Build Release
-    needs: create-release
-    runs-on: ${{ matrix.os }}
+  build:
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            binary_name: tsn
+            os: ubuntu-22.04
+            name: linux-x86_64
+            ext: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13
+            name: macos-x86_64
+            ext: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-14
+            name: macos-aarch64
+            ext: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            name: windows-x86_64
+            ext: zip
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
-      
-      - name: Cache cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
-      
-      - name: Strip binary
-        run: |
-          strip target/${{ matrix.target }}/release/${{ matrix.binary_name }}
-      
-      - name: Calculate checksum
-        run: |
-          cd target/${{ matrix.target }}/release
-          sha256sum ${{ matrix.binary_name }} > ${{ matrix.binary_name }}.sha256
-      
-      - name: Upload binary
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
-          asset_name: tsn-${{ matrix.target }}
-          asset_content_type: application/octet-stream
-      
-      - name: Upload checksum
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}.sha256
-          asset_name: tsn-${{ matrix.target }}.sha256
-          asset_content_type: text/plain
 
-  # ==========================================================================
-  # Job 3: Build and Push Docker Image
-  # ==========================================================================
-  docker:
-    name: Docker Build
-    needs: create-release
-    runs-on: ubuntu-latest
+      - name: Strip binary (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: strip target/${{ matrix.target }}/release/tsn
+
+      - name: Strip binary (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: strip target/${{ matrix.target }}/release/tsn
+
+      - name: Package (Unix)
+        if: matrix.ext == 'tar.gz'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          DIR=tsn-${VERSION}-${{ matrix.name }}
+          mkdir -p ${DIR}/circuits/keys
+          cp target/${{ matrix.target }}/release/tsn ${DIR}/
+          cp circuits/keys/*.json ${DIR}/circuits/keys/ 2>/dev/null || true
+          cp circuits/keys/checksums.sha256 ${DIR}/circuits/keys/ 2>/dev/null || true
+          cp README.md ${DIR}/
+          tar czf tsn-${VERSION}-${{ matrix.name }}.tar.gz ${DIR}
+          sha256sum tsn-${VERSION}-${{ matrix.name }}.tar.gz > tsn-${VERSION}-${{ matrix.name }}.tar.gz.sha256
+
+      - name: Package (Windows)
+        if: matrix.ext == 'zip'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ github.ref_name }}".TrimStart('v')
+          $DIR = "tsn-${VERSION}-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path "${DIR}/circuits/keys" -Force
+          Copy-Item "target/${{ matrix.target }}/release/tsn.exe" "${DIR}/"
+          Copy-Item "circuits/keys/*.json" "${DIR}/circuits/keys/" -ErrorAction SilentlyContinue
+          Copy-Item "README.md" "${DIR}/"
+          Compress-Archive -Path "${DIR}" -DestinationPath "tsn-${VERSION}-${{ matrix.name }}.zip"
+          (Get-FileHash "tsn-${VERSION}-${{ matrix.name }}.zip" -Algorithm SHA256).Hash.ToLower() + "  tsn-${VERSION}-${{ matrix.name }}.zip" | Out-File "tsn-${VERSION}-${{ matrix.name }}.zip.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsn-${{ matrix.name }}
+          path: |
+            tsn-*.${{ matrix.ext }}
+            tsn-*.${{ matrix.ext }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-      
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
+      - uses: actions/download-artifact@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Extract version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-      
-      - name: Build and push
-        uses: docker/build-push-action@v4
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          generate_release_notes: true
+          files: |
+            tsn-*.tar.gz
+            tsn-*.zip
+            tsn-*.sha256

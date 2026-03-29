@@ -90,6 +90,8 @@ pub struct ShieldedWallet {
     notes: Vec<WalletNote>,
     /// Last scanned block height.
     last_scanned_height: u64,
+    /// Transaction history (sent + received).
+    tx_history: Vec<WalletTxRecord>,
 }
 
 impl ShieldedWallet {
@@ -109,6 +111,7 @@ impl ShieldedWallet {
             pk_hash,
             notes: Vec::new(),
             last_scanned_height: 0,
+            tx_history: Vec::new(),
         }
     }
 
@@ -165,6 +168,7 @@ impl ShieldedWallet {
             pk_hash,
             notes,
             last_scanned_height: stored.last_scanned_height,
+            tx_history: stored.tx_history,
         })
     }
 
@@ -191,6 +195,7 @@ impl ShieldedWallet {
             pk_hash: hex::encode(self.pk_hash),
             notes: stored_notes,
             last_scanned_height: self.last_scanned_height,
+            tx_history: self.tx_history.clone(),
         };
 
         let data =
@@ -252,6 +257,30 @@ impl ShieldedWallet {
     /// Get all notes.
     pub fn notes(&self) -> &[WalletNote] {
         &self.notes
+    }
+
+    /// Mutable access to notes (for marking spent).
+    pub fn notes_mut(&mut self) -> &mut Vec<WalletNote> {
+        &mut self.notes
+    }
+
+    /// Clear all notes (for rescanning from scratch).
+    pub fn clear_notes(&mut self) {
+        self.notes.clear();
+        self.last_scanned_height = 0;
+    }
+
+    /// Add a transaction to the wallet history.
+    pub fn add_tx(&mut self, record: WalletTxRecord) {
+        // Don't add duplicates
+        if !self.tx_history.iter().any(|t| t.tx_hash == record.tx_hash) {
+            self.tx_history.push(record);
+        }
+    }
+
+    /// Get the transaction history.
+    pub fn tx_history(&self) -> &[WalletTxRecord] {
+        &self.tx_history
     }
 
     /// Get the number of unspent notes.
@@ -353,6 +382,83 @@ impl ShieldedWallet {
         new_notes
     }
 
+    /// Scan a single encrypted output (from /outputs/since API) and add if it belongs to us.
+    /// Returns true if the note was added to the wallet.
+    pub fn scan_encrypted_output(
+        &mut self,
+        encrypted_note: &crate::crypto::note::EncryptedNote,
+        note_commitment_hex: &str,
+        note_commitment_pq_hex: &str,
+        position: u64,
+        height: u64,
+    ) -> bool {
+        let decryption_key = ViewingKey::from_pk_hash(self.pk_hash);
+
+        // Try V1 decryption first
+        if let Some(note) = decryption_key.decrypt_note(encrypted_note) {
+            if note.recipient_pk_hash == self.pk_hash {
+                // Parse V1 commitment from hex (server-provided, matches merkle tree)
+                let commitment = if !note_commitment_hex.is_empty() {
+                    if let Ok(bytes) = hex::decode(note_commitment_hex) {
+                        if bytes.len() == 32 {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&bytes);
+                            NoteCommitment(arr)
+                        } else {
+                            note.commitment()
+                        }
+                    } else {
+                        note.commitment()
+                    }
+                } else {
+                    note.commitment()
+                };
+
+                let mut wallet_note = WalletNote::new(note, commitment, position, height);
+
+                // Also extract PQ data if available
+                if let Some((_, _, pq_rand)) = decrypt_note_pq(encrypted_note, &self.pk_hash) {
+                    wallet_note.pq_randomness = Some(pq_rand);
+                    if !note_commitment_pq_hex.is_empty() {
+                        if let Ok(bytes) = hex::decode(note_commitment_pq_hex) {
+                            if bytes.len() == 32 {
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&bytes);
+                                wallet_note.pq_commitment = Some(arr);
+                            }
+                        }
+                    }
+                }
+
+                self.notes.push(wallet_note);
+                return true;
+            }
+        }
+
+        // Try PQ-only decryption (V2 transactions)
+        if let Some((value, pk_hash, pq_rand)) = decrypt_note_pq(encrypted_note, &self.pk_hash) {
+            if pk_hash == self.pk_hash {
+                let note = Note::with_randomness(value, pk_hash, ark_bn254::Fr::from(0u64));
+                let dummy_commitment = note.commitment();
+                let mut wallet_note = WalletNote::new(note, dummy_commitment, position, height);
+                wallet_note.pq_randomness = Some(pq_rand);
+                if !note_commitment_pq_hex.is_empty() {
+                    if let Ok(bytes) = hex::decode(note_commitment_pq_hex) {
+                        if bytes.len() == 32 {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&bytes);
+                            wallet_note.pq_commitment = Some(arr);
+                        }
+                    }
+                }
+                self.notes.push(wallet_note);
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Mark notes as spent based on observed nullifiers.
     pub fn mark_spent_nullifiers(&mut self, nullifiers: &[Nullifier]) {
         for note in &mut self.notes {
@@ -414,6 +520,7 @@ impl ShieldedWallet {
             pk_hash,
             notes: Vec::new(),
             last_scanned_height: 0,
+            tx_history: Vec::new(),
         })
     }
 
@@ -465,6 +572,18 @@ impl ShieldedWallet {
     }
 }
 
+/// A recorded transaction in the wallet history.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WalletTxRecord {
+    pub tx_hash: String,
+    pub direction: String, // "sent" or "received"
+    pub amount: u64,       // in base units
+    pub fee: u64,
+    pub counterparty: String, // pk_hash of recipient (sent) or sender (received, if known)
+    pub height: u64,       // block height (0 = pending)
+    pub timestamp: u64,    // unix timestamp
+}
+
 /// Stored wallet format for serialization.
 #[derive(Serialize, Deserialize)]
 struct StoredShieldedWallet {
@@ -474,6 +593,8 @@ struct StoredShieldedWallet {
     pk_hash: String,
     notes: Vec<StoredNote>,
     last_scanned_height: u64,
+    #[serde(default)]
+    tx_history: Vec<WalletTxRecord>,
 }
 
 /// Stored note format.

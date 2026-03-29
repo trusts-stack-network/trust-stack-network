@@ -202,8 +202,12 @@ mod tests {
     
     #[test]
     fn test_encode_decode_roundtrip() {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
         let original_msg = TsnMessage::Heartbeat {
-            timestamp_ns: 1234567890,
+            timestamp_ns: now_ns,
             sequence: 42,
         };
         
@@ -213,11 +217,10 @@ mod tests {
         let (decoded_msg, consumed) = decode_message(&mut buf).unwrap().unwrap();
         
         assert_eq!(consumed, encoded.len());
-        match (original_msg, decoded_msg) {
-            (TsnMessage::Heartbeat { timestamp_ns: orig_ts, sequence: orig_seq }, 
-             TsnMessage::Heartbeat { timestamp_ns: dec_ts, sequence: dec_seq }) => {
-                assert_eq!(orig_ts, dec_ts);
-                assert_eq!(orig_seq, dec_seq);
+        match decoded_msg {
+            TsnMessage::Heartbeat { timestamp_ns: dec_ts, sequence: dec_seq } => {
+                assert_eq!(now_ns, dec_ts);
+                assert_eq!(42, dec_seq);
             }
             _ => panic!("Message type mismatch"),
         }

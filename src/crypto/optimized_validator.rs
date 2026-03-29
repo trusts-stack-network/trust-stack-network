@@ -410,18 +410,21 @@ impl std::fmt::Display for PerformanceMetrics {
     }
 }
 
-/// Instance globale du validateur optimisé
-static mut GLOBAL_VALIDATOR: Option<OptimizedCryptoValidator> = None;
-static VALIDATOR_INIT: std::sync::Once = std::sync::Once::new();
+/// Thread-safe global validator instance using OnceLock (no unsafe).
+/// Previously used `static mut` which caused Undefined Behavior when
+/// accessed from multiple threads simultaneously.
+static GLOBAL_VALIDATOR: std::sync::OnceLock<std::sync::Mutex<OptimizedCryptoValidator>> = std::sync::OnceLock::new();
 
-/// Accès à l'instance globale du validateur optimisé
-pub fn global_validator() -> &'static mut OptimizedCryptoValidator {
-    unsafe {
-        VALIDATOR_INIT.call_once(|| {
-            GLOBAL_VALIDATOR = Some(OptimizedCryptoValidator::new().expect("Failed to initialize global validator"));
-        });
-        GLOBAL_VALIDATOR.as_mut().unwrap()
-    }
+/// Access the global optimized validator (thread-safe).
+pub fn global_validator() -> std::sync::MutexGuard<'static, OptimizedCryptoValidator> {
+    GLOBAL_VALIDATOR
+        .get_or_init(|| {
+            std::sync::Mutex::new(
+                OptimizedCryptoValidator::new().expect("Failed to initialize global validator")
+            )
+        })
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]

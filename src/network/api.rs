@@ -33,11 +33,18 @@ use super::peer_id;
 /// Maximum request body size (10 MB)
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
-/// Rate limit: requests per second per IP
-const RATE_LIMIT_RPS: u64 = 10000;
+/// Rate limit: requests per second per IP (public routes)
+/// Set high enough that explorer + normal usage never gets blocked.
+const RATE_LIMIT_RPS: u64 = 200;
 
-/// Rate limit: burst size (max requests before throttling)
-const RATE_LIMIT_BURST: u32 = 50000;
+/// Rate limit: burst size for public routes
+const RATE_LIMIT_BURST: u32 = 500;
+
+/// Rate limit: requests per second per IP (sync routes — higher for node sync)
+const SYNC_RATE_LIMIT_RPS: u64 = 200;
+
+/// Rate limit: burst size for sync routes
+const SYNC_RATE_LIMIT_BURST: u32 = 400;
 
 /// Shared application state for the API.
 pub struct AppState {
@@ -59,6 +66,24 @@ pub struct AppState {
     pub p2p_peer_id: RwLock<Option<String>>,
     /// Node role (miner, relay, light)
     pub node_role: String,
+    /// Mining cancel signal — set by P2P when a new block arrives to abort current PoW
+    pub mining_cancel: RwLock<Option<Arc<std::sync::atomic::AtomicBool>>>,
+    /// Shared HTTP client for all outbound requests (connection pooling, prevents FD leaks)
+    pub http_client: reqwest::Client,
+    /// Height of last chain reorganization — used for post-reorg mining cooldown
+    pub last_reorg_height: std::sync::atomic::AtomicU64,
+    /// Semaphore limiting concurrent snapshot downloads (max 3)
+    pub snapshot_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Cached pre-compressed snapshot (refreshed every 100 blocks)
+    pub snapshot_cache: TokioRwLock<Option<CachedSnapshot>>,
+}
+
+/// Pre-generated snapshot cached in memory for fast serving.
+pub struct CachedSnapshot {
+    pub compressed: Vec<u8>,
+    pub height: u64,
+    pub hash: String,
+    pub raw_size: usize,
 }
 
 /// Create the API router with rate limiting and request size limits.
@@ -91,57 +116,88 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     );
     info!("Request body limit: {} bytes", MAX_BODY_SIZE);
 
-    // ALL routes — rate limiter DISABLED (was causing 429 sync deadlocks)
-    let api_routes = Router::new()
+    // Sync routes — separate rate limiter (higher limit for node-to-node sync,
+    // but still protected against DoS — previously had NO rate limit at all)
+    let sync_governor_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(SYNC_RATE_LIMIT_RPS)
+            .burst_size(SYNC_RATE_LIMIT_BURST)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("INIT: sync rate limiter config is invalid"),
+    );
+    let sync_rate_limit_layer = GovernorLayer {
+        config: sync_governor_config,
+    };
+    info!(
+        "Sync rate limiting enabled: {} req/s, burst size {}",
+        SYNC_RATE_LIMIT_RPS, SYNC_RATE_LIMIT_BURST
+    );
+
+    // Sync routes — NO rate limiting (was causing fast-sync failures for new nodes)
+    let sync_routes = Router::new()
         .route("/chain/info", get(chain_info))
-        .route("/miner/stats", get(miner_stats))
-        .route("/block/:hash", get(get_block))
-        .route("/block/height/:height", get(get_block_by_height))
-        .route("/tx", post(submit_transaction))
-        .route("/tx/v2", post(submit_transaction_v2))
-        .route("/tx/:hash", get(get_transaction))
-        .route("/transactions/recent", get(get_recent_transactions))
-        .route("/mempool", get(get_mempool))
         .route("/blocks", post(receive_block))
         .route("/blocks/since/:height", get(get_blocks_since))
         .route("/peers", get(get_peers))
         .route("/peers", post(add_peer))
         .route("/peers/p2p", get(get_p2p_peers))
         .route("/tx/relay", post(receive_transaction))
+        .route("/tip", get(get_tip).post(receive_tip))
+        .route("/sync/status", get(sync_status))
+        .route("/node/info", get(node_info))
+        .route("/snapshot/info", get(snapshot_info))
+        .route("/snapshot/download", get(snapshot_download))
+        .with_state(state.clone());
+
+    // Explorer/read-only routes — NO rate limiting (served by nginx proxy from localhost)
+    let explorer_routes = Router::new()
+        .route("/health", get(health_check))
+        .route("/miner/stats", get(miner_stats))
+        .route("/block/:hash", get(get_block))
+        .route("/block/height/:height", get(get_block_by_height))
+        .route("/tx/:hash", get(get_transaction))
+        .route("/transactions/recent", get(get_recent_transactions))
+        .route("/blocks/list", get(list_blocks_paginated))
+        .route("/mempool", get(get_mempool))
+        .route("/version.json", get(version_info))
+        .route("/faucet/stats", get(faucet_stats))
+        .with_state(state.clone());
+
+    // Write + sensitive routes — rate limited to prevent DoS
+    let limited_routes = Router::new()
+        .route("/tx", post(submit_transaction))
+        .route("/tx/v2", post(submit_transaction_v2))
         .route("/outputs/since/:height", get(get_outputs_since))
         .route("/nullifiers/check", post(check_nullifiers))
         .route("/witness/:commitment", get(get_witness))
         .route("/witness/position/:position", get(get_witness_by_position))
         .route("/witness/v2/position/:position", get(get_witness_by_position_v2))
-        .route("/debug/commitments", get(debug_list_commitments))
-        .route("/debug/poseidon", get(debug_poseidon_test))
-        .route("/debug/poseidon-pq", get(debug_poseidon_pq_test))
-        .route("/debug/merkle-pq", get(debug_merkle_pq))
-        .route("/debug/verify-path", post(debug_verify_path))
+        // Debug endpoints REMOVED from production (H3 audit fix).
+        // These exposed internal crypto structures. Re-enable with --debug flag if needed.
+        // .route("/debug/commitments", get(debug_list_commitments))
+        // .route("/debug/poseidon", get(debug_poseidon_test))
+        // .route("/debug/poseidon-pq", get(debug_poseidon_pq_test))
+        // .route("/debug/merkle-pq", get(debug_merkle_pq))
+        // .route("/debug/verify-path", post(debug_verify_path))
         .route("/wallet/viewing-key", get(wallet_viewing_key))
         .route("/wallet/watch", post(wallet_watch))
         .route("/faucet/status/:pk_hash", get(faucet_status))
         .route("/faucet/claim", post(faucet_claim))
         .route("/faucet/game-claim", post(faucet_game_claim))
-        .route("/faucet/stats", get(faucet_stats))
-        // Sync gate tip endpoints (anti-fork)
-        .route("/tip", get(get_tip).post(receive_tip))
-        .route("/sync/status", get(sync_status))
-        .route("/version.json", get(version_info))
-        .route("/node/info", get(node_info))
         .route("/api/roadmap", get(roadmap_status))
-        // Fast sync: download state snapshot to skip block replay
-        .route("/snapshot/info", get(snapshot_info))
-        .route("/snapshot/download", get(snapshot_download))
-        // Smart contract endpoints
         .route("/contract/deploy", post(contract_deploy))
         .route("/contract/call", post(contract_call))
         .route("/contract/query", post(contract_query))
         .route("/contract/:address", get(contract_info))
         .route("/contract/:address/events", get(contract_events))
         .with_state(state)
-        // Rate limiter REMOVED — was causing 429 deadlocks between nodes
-        // Body size limit still applied
+        .layer(rate_limit_layer);
+
+    // Merge all route groups
+    let api_routes = sync_routes
+        .merge(explorer_routes)
+        .merge(limited_routes)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE));
 
     let ui_routes = Router::new()
@@ -164,8 +220,20 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new().merge(api_routes).merge(ui_routes)
 }
 
+/// GET /health — lightweight health check, never rate limited.
+async fn health_check(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let height = state.blockchain.read().unwrap_or_else(|e| e.into_inner()).height();
+    let peers = state.peers.read().unwrap_or_else(|e| e.into_inner()).len();
+    Json(serde_json::json!({
+        "status": "ok",
+        "height": height,
+        "peers": peers,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
 async fn chain_info(State(state): State<Arc<AppState>>) -> Json<ChainInfo> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     Json(chain.info())
 }
 
@@ -181,11 +249,11 @@ struct SyncStatusResponse {
 
 /// GET /sync/status — returns current sync progress.
 async fn sync_status(State(state): State<Arc<AppState>>) -> Json<SyncStatusResponse> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let local_height = chain.height();
     drop(chain);
 
-    let peers = state.peers.read().unwrap();
+    let peers = state.peers.read().unwrap_or_else(|e| e.into_inner());
     let peers_connected = peers.len();
     drop(peers);
 
@@ -221,22 +289,22 @@ struct VersionInfoResponse {
 async fn version_info() -> Json<VersionInfoResponse> {
     Json(VersionInfoResponse {
         version: env!("CARGO_PKG_VERSION"),
-        minimum_version: "0.6.0",
+        minimum_version: crate::network::version_check::MINIMUM_VERSION,
         protocol_version: 3,
     })
 }
 
 /// Node identity and status.
 async fn node_info(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let height = state.blockchain.read().unwrap().height();
-    let peer_id = state.p2p_peer_id.read().unwrap().clone();
-    let http_peers = state.peers.read().unwrap().len();
+    let height = state.blockchain.read().unwrap_or_else(|e| e.into_inner()).height();
+    let peer_id = state.p2p_peer_id.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let http_peers = state.peers.read().unwrap_or_else(|e| e.into_inner()).len();
 
     Json(serde_json::json!({
         "peer_id": peer_id,
         "role": state.node_role,
         "version": env!("CARGO_PKG_VERSION"),
-        "protocol": "tsn/0.6.0",
+        "protocol": "tsn/1.1.0",
         "height": height,
         "http_peers": http_peers,
         "signatures": "ML-DSA-65 (FIPS 204)",
@@ -267,16 +335,16 @@ struct RoadmapStatusResponse {
 
 /// GET /api/roadmap — returns dynamic roadmap status with real-time metrics.
 async fn roadmap_status(State(state): State<Arc<AppState>>) -> Json<RoadmapStatusResponse> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let chain_info = chain.info();
     let height = chain.height();
     drop(chain);
 
-    let peers = state.peers.read().unwrap();
+    let peers = state.peers.read().unwrap_or_else(|e| e.into_inner());
     let peers_connected = peers.len();
     drop(peers);
 
-    let miner_stats = state.miner_stats.read().unwrap().clone();
+    let miner_stats = state.miner_stats.read().unwrap_or_else(|e| e.into_inner()).clone();
 
     // Calculate progress for each milestone based on real metrics
     let mut milestones = vec![];
@@ -375,7 +443,7 @@ pub struct MinerStats {
 }
 
 async fn miner_stats(State(state): State<Arc<AppState>>) -> Json<MinerStats> {
-    let stats = state.miner_stats.read().unwrap().clone();
+    let stats = state.miner_stats.read().unwrap_or_else(|e| e.into_inner()).clone();
     Json(stats)
 }
 
@@ -409,7 +477,7 @@ async fn get_block(
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let block = chain.get_block(&hash_bytes).ok_or(StatusCode::NOT_FOUND)?;
 
     // Find block height
@@ -424,7 +492,7 @@ async fn get_block_by_height(
     State(state): State<Arc<AppState>>,
     Path(height): Path<u64>,
 ) -> Result<Json<BlockResponse>, StatusCode> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let block = chain
         .get_block_by_height(height)
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -453,6 +521,78 @@ fn block_to_response(block: &ShieldedBlock, height: u64) -> BlockResponse {
     }
 }
 
+/// Query parameters for paginated block listing.
+#[derive(Deserialize)]
+struct BlockListParams {
+    page: Option<u64>,
+    limit: Option<u64>,
+}
+
+/// Paginated block list response.
+#[derive(Serialize)]
+struct BlockListResponse {
+    blocks: Vec<BlockSummaryItem>,
+    total: u64,
+    page: u64,
+    limit: u64,
+    total_pages: u64,
+}
+
+/// Lightweight block summary for list views.
+#[derive(Serialize)]
+struct BlockSummaryItem {
+    height: u64,
+    hash: String,
+    tx_count: usize,
+    timestamp: u64,
+    difficulty: u64,
+    coinbase_reward: u64,
+}
+
+/// List blocks with pagination — page 1 = most recent.
+async fn list_blocks_paginated(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<BlockListParams>,
+) -> Json<BlockListResponse> {
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
+    let chain_height = chain.height();
+    let total = chain_height + 1; // heights 0..=chain_height
+
+    let page = params.page.unwrap_or(1).max(1);
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let total_pages = (total + limit - 1) / limit;
+
+    let offset = (page - 1) * limit;
+    // Page 1 = most recent blocks (descending)
+    let start_height = chain_height.saturating_sub(offset);
+
+    let mut blocks = Vec::with_capacity(limit as usize);
+    for i in 0..limit {
+        if start_height < i {
+            break;
+        }
+        let h = start_height - i;
+        if let Some(block) = chain.get_block_by_height(h) {
+            blocks.push(BlockSummaryItem {
+                height: h,
+                hash: hex::encode(block.hash()),
+                tx_count: block.transactions.len() + block.transactions_v2.len(),
+                timestamp: block.header.timestamp,
+                difficulty: block.header.difficulty,
+                coinbase_reward: block.coinbase.reward,
+            });
+        }
+    }
+
+    Json(BlockListResponse {
+        blocks,
+        total,
+        page,
+        limit,
+        total_pages,
+    })
+}
+
 /// Shielded transaction response - only public data is exposed.
 #[derive(Serialize)]
 struct TransactionResponse {
@@ -462,6 +602,7 @@ struct TransactionResponse {
     output_count: usize,
     status: String,
     block_height: Option<u64>,
+    confirmations: Option<u64>,
 }
 
 async fn get_transaction(
@@ -475,7 +616,7 @@ async fn get_transaction(
 
     // Check mempool first
     {
-        let mempool = state.mempool.read().unwrap();
+        let mempool = state.mempool.read().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = mempool.get(&hash_bytes) {
             return Ok(Json(TransactionResponse {
                 hash: hex::encode(tx.hash()),
@@ -484,13 +625,15 @@ async fn get_transaction(
                 output_count: tx.outputs.len(),
                 status: "pending".to_string(),
                 block_height: None,
+                confirmations: Some(0),
             }));
         }
     }
 
     // Search in blockchain
-    let chain = state.blockchain.read().unwrap();
-    for h in (0..=chain.height()).rev() {
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
+    let current_height = chain.height();
+    for h in (0..=current_height).rev() {
         if let Some(block) = chain.get_block_by_height(h) {
             for tx in &block.transactions {
                 if tx.hash() == hash_bytes {
@@ -501,6 +644,7 @@ async fn get_transaction(
                         output_count: tx.outputs.len(),
                         status: "confirmed".to_string(),
                         block_height: Some(h),
+                        confirmations: Some(current_height.saturating_sub(h) + 1),
                     }));
                 }
             }
@@ -517,7 +661,7 @@ async fn get_recent_transactions(
 
     // Get pending V1 transactions from mempool
     {
-        let mempool = state.mempool.read().unwrap();
+        let mempool = state.mempool.read().unwrap_or_else(|e| e.into_inner());
         for tx in mempool.get_transactions(10) {
             transactions.push(TransactionResponse {
                 hash: hex::encode(tx.hash()),
@@ -526,6 +670,7 @@ async fn get_recent_transactions(
                 output_count: tx.outputs.len(),
                 status: "pending".to_string(),
                 block_height: None,
+                confirmations: Some(0),
             });
         }
         // Get pending V2 transactions from mempool
@@ -545,16 +690,19 @@ async fn get_recent_transactions(
                 output_count,
                 status: "pending (v2)".to_string(),
                 block_height: None,
+                confirmations: Some(0),
             });
         }
     }
 
-    // Get recent confirmed transactions from last few blocks
-    let chain = state.blockchain.read().unwrap();
-    let start_height = chain.height().saturating_sub(5);
+    // Get recent confirmed transactions from recent blocks
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
+    let current_height = chain.height();
+    let start_height = current_height.saturating_sub(500);
 
-    for h in (start_height..=chain.height()).rev() {
+    for h in (start_height..=current_height).rev() {
         if let Some(block) = chain.get_block_by_height(h) {
+            let confs = current_height.saturating_sub(h) + 1;
             // V1 transactions
             for tx in &block.transactions {
                 transactions.push(TransactionResponse {
@@ -564,6 +712,7 @@ async fn get_recent_transactions(
                     output_count: tx.outputs.len(),
                     status: "confirmed".to_string(),
                     block_height: Some(h),
+                    confirmations: Some(confs),
                 });
             }
             // V2 transactions
@@ -575,6 +724,7 @@ async fn get_recent_transactions(
                     output_count: tx.outputs.len(),
                     status: "confirmed (v2)".to_string(),
                     block_height: Some(h),
+                    confirmations: Some(confs),
                 });
             }
         }
@@ -607,7 +757,7 @@ async fn submit_transaction(
 
     // Validate transaction
     {
-        let chain = state.blockchain.read().unwrap();
+        let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
         if let Some(params) = chain.verifying_params() {
             // Full validation with proof verification
             chain
@@ -632,7 +782,7 @@ async fn submit_transaction(
 
     // Add to mempool
     let added = {
-        let mut mempool = state.mempool.write().unwrap();
+        let mut mempool = state.mempool.write().unwrap_or_else(|e| e.into_inner());
         mempool.add(tx.clone())
     };
 
@@ -644,11 +794,12 @@ async fn submit_transaction(
     }
 
     // Relay to peers (fire and forget)
-    let peers = state.peers.read().unwrap().clone();
+    let peers = state.peers.read().unwrap_or_else(|e| e.into_inner()).clone();
     if !peers.is_empty() {
         let tx_clone = tx.clone();
+        let client = state.http_client.clone();
         tokio::spawn(async move {
-            relay_transaction(&tx_clone, &peers).await;
+            relay_transaction(&tx_clone, &peers, &client).await;
         });
     }
 
@@ -679,7 +830,7 @@ async fn submit_transaction_v2(
 
     // Validate V2 transaction
     {
-        let chain = state.blockchain.read().unwrap();
+        let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
         chain
             .state()
             .validate_transaction_v2(&tx)
@@ -691,7 +842,7 @@ async fn submit_transaction_v2(
 
     // Add to mempool
     let added = {
-        let mut mempool = state.mempool.write().unwrap();
+        let mut mempool = state.mempool.write().unwrap_or_else(|e| e.into_inner());
         mempool.add_v2(wrapped_tx.clone())
     };
 
@@ -706,7 +857,7 @@ async fn submit_transaction_v2(
 
     // Relay V2 transaction to peers via P2P GossipSub
     {
-        let p2p_tx = state.p2p_broadcast.read().unwrap().clone();
+        let p2p_tx = state.p2p_broadcast.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(sender) = p2p_tx {
             if let Ok(tx_data) = serde_json::to_vec(&tx) {
                 let _ = sender.try_send(super::p2p::P2pCommand::BroadcastTransaction(tx_data));
@@ -716,13 +867,10 @@ async fn submit_transaction_v2(
 
     // Relay V2 transaction to peers via HTTP (fallback for non-upgraded nodes)
     {
-        let peers = state.peers.read().unwrap().clone();
+        let peers = state.peers.read().unwrap_or_else(|e| e.into_inner()).clone();
         let tx_clone = tx.clone();
+        let client = state.http_client.clone();
         tokio::spawn(async move {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default();
             for peer in &peers {
                 let url = format!("{}/tx/v2", peer);
                 let _ = client.post(&url)
@@ -747,7 +895,7 @@ struct MempoolResponse {
 }
 
 async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse> {
-    let mempool = state.mempool.read().unwrap();
+    let mempool = state.mempool.read().unwrap_or_else(|e| e.into_inner());
     let v1_txs = mempool.get_transactions(100);
     let v2_txs = mempool.get_v2_transactions(100);
 
@@ -774,7 +922,7 @@ async fn receive_block(
 
     // Try to add the block (handles forks and reorgs automatically)
     let (accepted, status) = {
-        let mut chain = state.blockchain.write().unwrap();
+        let mut chain = state.blockchain.write().unwrap_or_else(|e| e.into_inner());
         let old_height = chain.height();
         let old_tip = chain.latest_hash();
 
@@ -798,7 +946,7 @@ async fn receive_block(
                     .map(|tx| tx.hash())
                     .collect();
 
-                let mut mempool = state.mempool.write().unwrap();
+                let mut mempool = state.mempool.write().unwrap_or_else(|e| e.into_inner());
                 mempool.remove_confirmed(&tx_hashes);
 
                 // Remove transactions with now-spent nullifiers
@@ -827,11 +975,22 @@ async fn receive_block(
 
     // Relay to other peers (gossip protocol) if accepted
     if accepted {
-        let peers = state.peers.read().unwrap().clone();
+        // Invalidate snapshot cache every 100 blocks so new nodes get fresh state
+        let block_height = block.height();
+        if block_height % 100 == 0 {
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                let mut cache = state_clone.snapshot_cache.write().await;
+                *cache = None;
+            });
+        }
+
+        let peers = state.peers.read().unwrap_or_else(|e| e.into_inner()).clone();
         if !peers.is_empty() {
             let block_clone = block.clone();
+            let client = state.http_client.clone();
             tokio::spawn(async move {
-                relay_block(&block_clone, &peers).await;
+                relay_block(&block_clone, &peers, &client).await;
             });
         }
     }
@@ -854,7 +1013,7 @@ async fn get_blocks_since(
     Path(since_height): Path<u64>,
     Query(params): Query<BlocksSinceParams>,
 ) -> Json<Vec<ShieldedBlock>> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let current_height = chain.height();
     // Default limit of 50 blocks per request to avoid HTTP timeouts
     let max_blocks: u64 = params.limit.unwrap_or(50).min(200) as u64;
@@ -892,7 +1051,7 @@ struct PeersResponse {
 
 /// Get the list of known peers.
 async fn get_peers(State(state): State<Arc<AppState>>) -> Json<PeersResponse> {
-    let peers = state.peers.read().unwrap();
+    let peers = state.peers.read().unwrap_or_else(|e| e.into_inner());
     // Deduplicate peers using normalized URLs before returning
     let mut seen = std::collections::HashSet::new();
     let unique_peers: Vec<String> = peers
@@ -911,21 +1070,54 @@ async fn get_peers(State(state): State<Arc<AppState>>) -> Json<PeersResponse> {
 
 /// Get P2P peers connected via libp2p (identified by PeerID).
 async fn get_p2p_peers(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let p2p_tx = state.p2p_broadcast.read().unwrap().clone();
+    let local_height = {
+        let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
+        chain.height()
+    };
+
+    let p2p_tx = state.p2p_broadcast.read().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(tx) = p2p_tx {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if tx.try_send(super::p2p::P2pCommand::GetPeers(reply_tx)).is_ok() {
-            if let Ok(Ok(peers)) = tokio::time::timeout(
+            if let Ok(Ok(mut peers)) = tokio::time::timeout(
                 std::time::Duration::from_millis(500), reply_rx
             ).await {
+                // For peers without height, fetch heights from HTTP peers
+                let http_peers = state.peers.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let client = &state.http_client;
+
+                // Collect known HTTP peer heights
+                let mut http_heights: Vec<u64> = Vec::new();
+                for peer_url in &http_peers {
+                    let url = format!("{}/chain/info", peer_url);
+                    if let Ok(resp) = client.get(&url).send().await {
+                        if let Ok(info) = resp.json::<serde_json::Value>().await {
+                            if let Some(h) = info.get("height").and_then(|h| h.as_u64()) {
+                                http_heights.push(h);
+                            }
+                        }
+                    }
+                }
+
+                // Fill missing P2P peer heights with HTTP peer data
+                // Assign heights round-robin from HTTP peers (best-effort mapping)
+                let mut http_idx = 0;
+                for peer in &mut peers {
+                    if peer.height.is_none() && !http_heights.is_empty() {
+                        peer.height = Some(http_heights[http_idx % http_heights.len()]);
+                        http_idx += 1;
+                    }
+                }
+
                 return Json(serde_json::json!({
                     "count": peers.len(),
                     "peers": peers,
+                    "local_height": local_height,
                 }));
             }
         }
     }
-    Json(serde_json::json!({ "count": 0, "peers": [] }))
+    Json(serde_json::json!({ "count": 0, "peers": [], "local_height": local_height }))
 }
 
 #[derive(Deserialize)]
@@ -970,9 +1162,43 @@ async fn add_peer(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddPeerRequest>,
 ) -> Json<AddPeerResponse> {
-    let mut peers = state.peers.write().unwrap();
-
     let normalized = normalize_peer_url(&req.url);
+
+    // H4 audit fix: validate URL scheme (only HTTP/HTTPS allowed — blocks file://, ftp://, etc.)
+    if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
+        warn!("Rejected peer with invalid scheme: {}", peer_id(&normalized));
+        return Json(AddPeerResponse {
+            status: "rejected: invalid scheme".to_string(),
+            peer_count: state.peers.read().unwrap_or_else(|e| e.into_inner()).len(),
+        });
+    }
+
+    // Block private/reserved IP ranges (anti-SSRF)
+    let is_private = normalized.contains("://127.") || normalized.contains("://0.")
+        || normalized.contains("://10.") || normalized.contains("://192.168.")
+        || normalized.contains("://172.16.") || normalized.contains("://172.17.")
+        || normalized.contains("://172.18.") || normalized.contains("://172.19.")
+        || normalized.contains("://172.2") || normalized.contains("://172.30.")
+        || normalized.contains("://172.31.") || normalized.contains("://169.254.")
+        || normalized.contains("://[::1]") || normalized.contains("://localhost");
+    if is_private {
+        warn!("Rejected peer with private IP: {}", peer_id(&normalized));
+        return Json(AddPeerResponse {
+            status: "rejected: private IP".to_string(),
+            peer_count: state.peers.read().unwrap_or_else(|e| e.into_inner()).len(),
+        });
+    }
+
+    let mut peers = state.peers.write().unwrap_or_else(|e| e.into_inner());
+
+    // Limit max peers to prevent memory exhaustion
+    const MAX_PEERS: usize = 200;
+    if peers.len() >= MAX_PEERS {
+        return Json(AddPeerResponse {
+            status: "rejected: max peers reached".to_string(),
+            peer_count: peers.len(),
+        });
+    }
 
     // Build list of our own addresses for self-detection
     let our_addresses: Vec<String> = Vec::new(); // Basic localhost check covers most cases
@@ -1005,7 +1231,7 @@ async fn receive_transaction(
 
     // Check if already in mempool
     {
-        let mempool = state.mempool.read().unwrap();
+        let mempool = state.mempool.read().unwrap_or_else(|e| e.into_inner());
         if mempool.contains(&tx.hash()) {
             return Ok(Json(SubmitTxResponse {
                 hash,
@@ -1016,7 +1242,7 @@ async fn receive_transaction(
 
     // Validate transaction
     {
-        let chain = state.blockchain.read().unwrap();
+        let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
         if let Some(params) = chain.verifying_params() {
             chain
                 .state()
@@ -1037,7 +1263,7 @@ async fn receive_transaction(
 
     // Add to mempool
     let added = {
-        let mut mempool = state.mempool.write().unwrap();
+        let mut mempool = state.mempool.write().unwrap_or_else(|e| e.into_inner());
         mempool.add(tx.clone())
     };
 
@@ -1045,11 +1271,12 @@ async fn receive_transaction(
         info!("Added relayed transaction {} to mempool", &hash[..16]);
 
         // Continue relaying to other peers
-        let peers = state.peers.read().unwrap().clone();
+        let peers = state.peers.read().unwrap_or_else(|e| e.into_inner()).clone();
         if !peers.is_empty() {
             let tx_clone = tx.clone();
+            let client = state.http_client.clone();
             tokio::spawn(async move {
-                relay_transaction(&tx_clone, &peers).await;
+                relay_transaction(&tx_clone, &peers, &client).await;
             });
         }
     }
@@ -1062,34 +1289,42 @@ async fn receive_transaction(
 
 // ============ Relay Helper Functions ============
 
-/// Relay a block to all known peers.
-async fn relay_block(block: &ShieldedBlock, peers: &[String]) {
-    let client = reqwest::Client::new();
-    let block_hash = &block.hash_hex()[..16];
+/// Relay a block to all known peers concurrently (futures::join_all).
+/// Previously sequential (O(N) × latency), now parallel (~1× latency).
+async fn relay_block(block: &ShieldedBlock, peers: &[String], client: &reqwest::Client) {
+    let block_hash_str = block.hash_hex()[..16].to_string();
 
+    let mut handles = Vec::with_capacity(peers.len());
     for peer in peers {
         let url = format!("{}/blocks", peer);
-        match client.post(&url).json(block).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                info!("Relayed block {} to {}", block_hash, peer_id(peer));
-            }
-            Ok(resp) => {
-                // Peer might already have it (duplicate) - not an error
-                let status = resp.status();
-                if status != StatusCode::BAD_REQUEST {
-                    warn!("Relay to {} returned {}", peer_id(peer), status);
+        let client = client.clone();
+        let block = block.clone();
+        let peer_name = peer_id(peer);
+        let bh = block_hash_str.clone();
+        handles.push(tokio::spawn(async move {
+            match client.post(&url).json(&block).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    info!("Relayed block {} to {}", bh, peer_name);
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status != StatusCode::BAD_REQUEST {
+                        warn!("Relay to {} returned {}", peer_name, status);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to relay block to {}: {}", peer_name, e);
                 }
             }
-            Err(e) => {
-                warn!("Failed to relay block to {}: {}", peer_id(peer), e);
-            }
-        }
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
     }
 }
 
 /// Relay a transaction to all known peers.
-async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String]) {
-    let client = reqwest::Client::new();
+async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String], client: &reqwest::Client) {
     let tx_hash = &hex::encode(tx.hash())[..16];
 
     for peer in peers {
@@ -1143,7 +1378,7 @@ async fn get_outputs_since(
     Path(since_height): Path<u64>,
     Query(params): Query<OutputsSinceParams>,
 ) -> Json<OutputsSinceResponse> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let current_height = chain.height();
     let commitment_root = hex::encode(chain.commitment_root());
     let end_height = match params.limit {
@@ -1159,21 +1394,66 @@ async fn get_outputs_since(
     // Otherwise, we want outputs from since_height+1 onwards
     let start_height = if since_height == 0 { 0 } else { since_height + 1 };
 
-    // First, count all commitments before start_height to get starting position
-    for h in 0..start_height.min(current_height + 1) {
-        if let Some(block) = chain.get_block_by_height(h) {
-            for tx in &block.transactions {
-                position += tx.outputs.len() as u64;
+    // Count all commitments before start_height to get starting position.
+    // After fast-sync, blocks before fast_sync_base_height don't exist in DB.
+    // Use the stored commitment offset to get the correct starting position.
+    let fast_sync_base = chain.fast_sync_base_height();
+    let fast_sync_offset = chain.fast_sync_commitment_offset();
+
+    if fast_sync_base > 0 && start_height <= fast_sync_base {
+        // All requested blocks are within fast-sync range — use stored offset.
+        // The offset already accounts for all commitments up to fast_sync_base.
+        position = fast_sync_offset;
+    } else if fast_sync_base > 0 {
+        // Start is after fast-sync: use offset as base, then count outputs
+        // in blocks between fast_sync_base+1 and start_height-1.
+        // The fast_sync_offset already includes ALL commitments up to and
+        // including the fast_sync_base block. Do NOT count genesis or
+        // fast_sync_base again — they are already in the offset.
+        position = fast_sync_offset;
+        for h in (fast_sync_base + 1)..start_height.min(current_height + 1) {
+            if let Some(block) = chain.get_block_by_height(h) {
+                for tx in &block.transactions {
+                    position += tx.outputs.len() as u64;
+                }
+                for tx in &block.transactions_v2 {
+                    position += tx.outputs.len() as u64;
+                }
+                position += 1; // coinbase
+                if block.coinbase.dev_fee_encrypted_note.is_some() {
+                    position += 1; // dev fee
+                }
             }
-            for tx in &block.transactions_v2 {
-                position += tx.outputs.len() as u64;
+        }
+    } else {
+        // No fast-sync — count from genesis normally
+        for h in 0..start_height.min(current_height + 1) {
+            if let Some(block) = chain.get_block_by_height(h) {
+                for tx in &block.transactions {
+                    position += tx.outputs.len() as u64;
+                }
+                for tx in &block.transactions_v2 {
+                    position += tx.outputs.len() as u64;
+                }
+                position += 1; // coinbase
+                if block.coinbase.dev_fee_encrypted_note.is_some() {
+                    position += 1; // dev fee
+                }
             }
-            position += 1; // coinbase
         }
     }
 
-    // Now collect outputs from start_height onwards
-    for h in start_height..=end_height {
+    // Now collect outputs from start_height onwards.
+    // After fast-sync, skip blocks that are within the snapshot range because
+    // their commitments are already in the snapshot offset — the genesis and
+    // fast-sync base blocks still exist in DB but their outputs have positions
+    // inside the snapshot, not after it.
+    let collect_from = if fast_sync_base > 0 && start_height <= fast_sync_base {
+        fast_sync_base + 1
+    } else {
+        start_height
+    };
+    for h in collect_from..=end_height {
         if let Some(block) = chain.get_block_by_height(h) {
             // V1 Transaction outputs (note_commitment_pq not available for legacy tx)
             for tx in &block.transactions {
@@ -1215,6 +1495,25 @@ async fn get_outputs_since(
                 ciphertext: hex::encode(&block.coinbase.encrypted_note.ciphertext),
             });
             position += 1;
+
+            // Dev fee output (also inserted into the commitment tree)
+            if let Some(ref dev_encrypted) = block.coinbase.dev_fee_encrypted_note {
+                let dev_cm = block.coinbase.dev_fee_commitment
+                    .map(|c| hex::encode(c.to_bytes()))
+                    .unwrap_or_default();
+                let dev_cm_pq = block.coinbase.dev_fee_commitment_pq
+                    .map(|c| hex::encode(c))
+                    .unwrap_or_default();
+                outputs.push(EncryptedOutput {
+                    position,
+                    block_height: h,
+                    note_commitment: dev_cm,
+                    note_commitment_pq: dev_cm_pq,
+                    ephemeral_pk: hex::encode(&dev_encrypted.ephemeral_pk),
+                    ciphertext: hex::encode(&dev_encrypted.ciphertext),
+                });
+                position += 1;
+            }
         }
     }
 
@@ -1249,12 +1548,20 @@ async fn check_nullifiers(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CheckNullifiersRequest>,
 ) -> Json<CheckNullifiersResponse> {
-    let chain = state.blockchain.read().unwrap();
+    // M8 audit fix: limit input size to prevent memory/CPU exhaustion
+    const MAX_NULLIFIERS_PER_REQUEST: usize = 500;
+    let nullifiers = if req.nullifiers.len() > MAX_NULLIFIERS_PER_REQUEST {
+        &req.nullifiers[..MAX_NULLIFIERS_PER_REQUEST]
+    } else {
+        &req.nullifiers
+    };
+
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let nullifier_set = chain.state().nullifier_set();
 
     let mut spent = Vec::new();
 
-    for nf_hex in &req.nullifiers {
+    for nf_hex in nullifiers {
         if let Ok(nf_bytes) = hex::decode(nf_hex) {
             if nf_bytes.len() == 32 {
                 let mut arr = [0u8; 32];
@@ -1293,7 +1600,7 @@ async fn get_witness(
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let commitment_tree = chain.state().commitment_tree();
 
     // Find the position of this commitment in the tree
@@ -1329,7 +1636,7 @@ async fn get_witness_by_position(
     State(state): State<Arc<AppState>>,
     Path(position): Path<u64>,
 ) -> Result<Json<WitnessResponse>, StatusCode> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let commitment_tree = chain.state().commitment_tree();
 
     let _commitment = commitment_tree.get_commitment(position)
@@ -1359,6 +1666,9 @@ struct WitnessResponseV2 {
     indices: Vec<u8>,
     /// Position in the tree.
     position: u64,
+    /// The actual leaf commitment at this position (hex). For debugging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leaf: Option<String>,
 }
 
 /// Get V2 witness by position (for quantum-resistant transactions).
@@ -1367,7 +1677,7 @@ async fn get_witness_by_position_v2(
     State(state): State<Arc<AppState>>,
     Path(position): Path<u64>,
 ) -> Result<Json<WitnessResponseV2>, StatusCode> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let commitment_tree_pq = chain.state().commitment_tree_pq();
 
     let witness = commitment_tree_pq.witness(position)
@@ -1391,11 +1701,17 @@ async fn get_witness_by_position_v2(
         path_verifies
     );
 
+    // Include the actual leaf commitment from the tree for debugging
+    let leaf_hex = commitment_tree_pq.leaf_at(position)
+        .map(|l| hex::encode(l))
+        .unwrap_or_default();
+
     Ok(Json(WitnessResponseV2 {
         root: hex::encode(witness.root),
         path: witness.path.siblings.iter().map(|h| hex::encode(h)).collect(),
         indices: witness.path.indices.clone(),
         position: witness.position,
+        leaf: Some(leaf_hex),
     }))
 }
 
@@ -1487,7 +1803,7 @@ async fn debug_poseidon_pq_test() -> Json<serde_json::Value> {
 async fn debug_list_commitments(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let commitment_tree = chain.state().commitment_tree();
     let tree_size = commitment_tree.size();
 
@@ -1512,7 +1828,7 @@ async fn debug_list_commitments(
 async fn debug_merkle_pq(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let tree_pq = chain.state().commitment_tree_pq();
 
     let size = tree_pq.size();
@@ -1716,7 +2032,7 @@ async fn faucet_claim(
 
     // Get witnesses from blockchain state
     let witnesses: HashMap<u64, _> = {
-        let blockchain = state.blockchain.read().unwrap();
+        let blockchain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
         let shielded_state = blockchain.state();
         positions
             .iter()
@@ -1735,7 +2051,7 @@ async fn faucet_claim(
     match result {
         Ok((claim_result, tx)) => {
             // Submit the transaction to the mempool
-            let mut mempool = state.mempool.write().unwrap();
+            let mut mempool = state.mempool.write().unwrap_or_else(|e| e.into_inner());
 
             // Wrap in Transaction::V2 for mempool
             let wrapped_tx = crate::core::Transaction::V2(tx);
@@ -1800,7 +2116,7 @@ async fn faucet_game_claim(
 
     // Get witnesses from blockchain state
     let witnesses: HashMap<u64, _> = {
-        let blockchain = state.blockchain.read().unwrap();
+        let blockchain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
         let shielded_state = blockchain.state();
         positions
             .iter()
@@ -1819,7 +2135,7 @@ async fn faucet_game_claim(
     match result {
         Ok((claim_result, tx)) => {
             // Submit the transaction to the mempool
-            let mut mempool = state.mempool.write().unwrap();
+            let mut mempool = state.mempool.write().unwrap_or_else(|e| e.into_inner());
 
             let wrapped_tx = crate::core::Transaction::V2(tx);
             if !mempool.add_v2(wrapped_tx) {
@@ -1906,7 +2222,7 @@ async fn receive_tip(
     info!("Received tip announcement: height={}, hash={}...", req.height, &req.hash[..16]);
 
     // Return our own tip info
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let local_height = chain.height();
     let local_hash = hex::encode(chain.latest_hash());
     drop(chain);
@@ -1923,7 +2239,7 @@ async fn receive_tip(
 async fn get_tip(
     State(state): State<Arc<AppState>>,
 ) -> Json<TipResponse> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let local_height = chain.height();
     let local_hash = hex::encode(chain.latest_hash());
     drop(chain);
@@ -1949,7 +2265,7 @@ struct SnapshotInfoResponse {
 
 /// GET /snapshot/info — check if a state snapshot is available for download.
 async fn snapshot_info(State(state): State<Arc<AppState>>) -> Json<SnapshotInfoResponse> {
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     match chain.export_snapshot() {
         Some((data, height, hash)) => Json(SnapshotInfoResponse {
             available: true,
@@ -1967,29 +2283,69 @@ async fn snapshot_info(State(state): State<Arc<AppState>>) -> Json<SnapshotInfoR
 }
 
 /// GET /snapshot/download — download the state snapshot as compressed JSON.
-/// New nodes use this to skip replaying all blocks from genesis.
-/// The snapshot contains the full commitment trees (V1+V2) and nullifier set.
+/// Uses a pre-cached snapshot (refreshed every 100 blocks) and semaphore (max 3 concurrent).
+/// Inspired by Cosmos state-sync (pre-generated snapshots) + Substrate (concurrent limits).
 async fn snapshot_download(
     State(state): State<Arc<AppState>>,
 ) -> Result<axum::response::Response, StatusCode> {
     use axum::response::IntoResponse;
     use axum::http::header;
 
-    let chain = state.blockchain.read().unwrap();
-    let (data, height, hash) = chain.export_snapshot()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    drop(chain);
+    // Semaphore: max 3 concurrent snapshot downloads to prevent CPU/RAM saturation
+    let _permit = state.snapshot_semaphore.clone().try_acquire_owned()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    // Compress with gzip for faster transfer
+    // Try to serve from cache first
+    {
+        let cache = state.snapshot_cache.read().await;
+        if let Some(ref cached) = *cache {
+            info!(
+                "Snapshot download (cached): height={}, hash={}, raw={}KB, compressed={}KB",
+                cached.height, &cached.hash[..8.min(cached.hash.len())],
+                cached.raw_size / 1024, cached.compressed.len() / 1024
+            );
+            return Ok((
+                [
+                    (header::CONTENT_TYPE, "application/gzip"),
+                    (header::CONTENT_DISPOSITION, "attachment; filename=\"tsn-snapshot.json.gz\""),
+                ],
+                [
+                    (header::HeaderName::from_static("x-snapshot-height"), header::HeaderValue::from_str(&cached.height.to_string()).unwrap()),
+                    (header::HeaderName::from_static("x-snapshot-hash"), header::HeaderValue::from_str(&cached.hash).unwrap()),
+                ],
+                cached.compressed.clone(),
+            ).into_response());
+        }
+    }
+
+    // Cache miss — generate on the fly (first request or cache expired)
+    // Isolate std::sync::RwLock access in a non-async block to keep future Send
+    let (data, height, hash) = {
+        let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
+        chain.export_snapshot()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+    };
+
     use std::io::Write;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     encoder.write_all(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let compressed = encoder.finish().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     info!(
-        "Snapshot download: height={}, hash={}, raw={}KB, compressed={}KB",
+        "Snapshot download (generated): height={}, hash={}, raw={}KB, compressed={}KB",
         height, &hash[..8], data.len() / 1024, compressed.len() / 1024
     );
+
+    // Store in cache for future requests
+    {
+        let mut cache = state.snapshot_cache.write().await;
+        *cache = Some(CachedSnapshot {
+            raw_size: data.len(),
+            compressed: compressed.clone(),
+            height,
+            hash: hash.clone(),
+        });
+    }
 
     Ok((
         [
@@ -2205,8 +2561,31 @@ async fn contract_deploy(
         (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
     })?;
 
-    let signature = hex::decode(&req.signature).unwrap_or_default();
-    let public_key = hex::decode(&req.public_key).unwrap_or_default();
+    // H5 audit fix: require valid signature and public key (no silent defaults)
+    let signature = hex::decode(&req.signature).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid signature hex: {}", e)})))
+    })?;
+    let public_key = hex::decode(&req.public_key).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid public_key hex: {}", e)})))
+    })?;
+    if signature.is_empty() || public_key.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "signature and public_key are required"}))));
+    }
+
+    // Verify ML-DSA-65 signature over the deployment data
+    {
+        use blake2::{Blake2s256, Digest};
+        let mut hasher = Blake2s256::new();
+        hasher.update(&bytecode);
+        hasher.update(&deployer_pk_hash);
+        hasher.update(&req.nonce.to_le_bytes());
+        let msg_hash = hasher.finalize();
+
+        let sig_valid = crate::crypto::signature::verify_mldsa65(&public_key, &msg_hash, &signature);
+        if !sig_valid {
+            return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid signature: ML-DSA verification failed"}))));
+        }
+    }
 
     let deploy_tx = crate::contract::ContractDeployTransaction {
         bytecode,
@@ -2220,12 +2599,12 @@ async fn contract_deploy(
     };
 
     // Add to mempool
-    let mut mempool = state.mempool.write().unwrap();
+    let mut mempool = state.mempool.write().unwrap_or_else(|e| e.into_inner());
     mempool.add_contract_deploy(deploy_tx.clone());
     drop(mempool);
 
     // Execute immediately for the response (preview)
-    let chain = state.blockchain.read().unwrap();
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let height = chain.height();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2298,7 +2677,7 @@ async fn contract_call(
     };
 
     // Add to mempool
-    let mut mempool = state.mempool.write().unwrap();
+    let mut mempool = state.mempool.write().unwrap_or_else(|e| e.into_inner());
     mempool.add_contract_call(call_tx.clone());
     drop(mempool);
 
@@ -2325,7 +2704,7 @@ async fn contract_query(
         (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})))
     })?;
 
-    let _chain = state.blockchain.read().unwrap();
+    let _chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
     let _height = _chain.height();
     drop(_chain);
 

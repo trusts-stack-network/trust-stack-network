@@ -1,6 +1,7 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::time::{interval, Duration};
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 use crate::core::ShieldedBlock;
 
@@ -25,7 +26,32 @@ fn sanitize_error(e: &dyn std::fmt::Display) -> String {
 /// Sync the local chain from a peer node.
 /// Handles both catching up and chain reorganizations.
 pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64, SyncError> {
-    let client = reqwest::Client::new();
+    let client = state.http_client.clone();
+
+    // Check peer version — reject outdated peers to prevent forks
+    {
+        let version_url = format!("{}/version.json", peer_url);
+        if let Ok(resp) = client.get(&version_url).timeout(Duration::from_secs(5)).send().await {
+            if let Ok(info) = resp.json::<serde_json::Value>().await {
+                if let Some(peer_version) = info["version"].as_str() {
+                    if !crate::network::version_check::version_meets_minimum(peer_version) {
+                        warn!(
+                            "Rejecting sync from {} — outdated version {} (minimum: {})",
+                            crate::network::peer_id(peer_url),
+                            peer_version,
+                            crate::network::version_check::MINIMUM_VERSION
+                        );
+                        return Err(SyncError::HttpError(format!(
+                            "Peer version {} below minimum {}",
+                            peer_version,
+                            crate::network::version_check::MINIMUM_VERSION
+                        )));
+                    }
+                }
+            }
+        }
+        // If we can't check version, proceed anyway (peer might just not expose /version.json yet)
+    }
 
     // Get peer's chain info
     let info_url = format!("{}/chain/info", peer_url);
@@ -43,28 +69,67 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 
     let peer_info: PeerChainInfo = response.json().await?;
 
-    let (local_height, local_hash) = {
-        // SECURITY FIX: Gestion sécurisée du RwLock poisoning
-        // Un thread qui panique en tenant le lock empoisonne le RwLock
-        // → Tous les threads suivants paniquent aussi → DoS total
+    let (local_height, local_hash, local_genesis) = {
         let chain = state.blockchain.read()
             .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?;
-        (chain.height(), hex::encode(chain.latest_hash()))
+        let genesis = chain.info().genesis_hash;
+        (chain.height(), hex::encode(chain.latest_hash()), genesis)
     };
 
+    // FORK PROTECTION: reject peers with incompatible genesis
+    // Skip check if either side has a placeholder genesis (fast-sync nodes)
+    let placeholder = "0".repeat(64);
+    let peer_has_real_genesis = !peer_info.genesis_hash.is_empty() && peer_info.genesis_hash != placeholder;
+    let local_has_real_genesis = !local_genesis.is_empty() && local_genesis != placeholder;
+    if peer_has_real_genesis && local_has_real_genesis && peer_info.genesis_hash != local_genesis {
+        warn!(
+            "Rejecting peer {} — incompatible genesis hash (peer: {}…, local: {}…)",
+            peer_id(peer_url),
+            &peer_info.genesis_hash[..16.min(peer_info.genesis_hash.len())],
+            &local_genesis[..16.min(local_genesis.len())]
+        );
+        return Ok(0);
+    }
+
     // Check if peer is ahead OR if we have a fork at the same height
-    let is_fork = peer_info.height == local_height && peer_info.latest_hash != local_hash;
+    let mut is_fork = peer_info.height == local_height && peer_info.latest_hash != local_hash;
     let peer_ahead = peer_info.height > local_height;
 
     if !peer_ahead && !is_fork {
-        info!(
+        debug!(
             "Peer {} is not ahead (peer: {}, local: {})",
             peer_id(peer_url), peer_info.height, local_height
         );
         return Ok(0);
     }
 
+    // Also detect fork when peer is ahead: compare their block at our height vs ours
+    if peer_ahead && !is_fork {
+        let check_url = format!("{}/block/height/{}", peer_url, local_height);
+        if let Ok(resp) = client.get(&check_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(peer_block) = resp.json::<PeerBlockInfo>().await {
+                    if peer_block.hash != local_hash {
+                        is_fork = true;
+                        info!(
+                            "Fork detected with peer {} (peer ahead at {}, diverged at our height {})",
+                            peer_id(peer_url), peer_info.height, local_height
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     if is_fork {
+        // SECURITY: Never rollback to a shorter or equal chain
+        if peer_info.height <= local_height {
+            warn!(
+                "Ignoring fork from peer {} — peer height {} <= local height {}. Never rollback to shorter chain.",
+                peer_id(peer_url), peer_info.height, local_height
+            );
+            return Ok(0);
+        }
         info!(
             "Fork detected with peer {} at height {} (peer: {}..., local: {}...)",
             peer_id(peer_url), peer_info.height, &peer_info.latest_hash[..16], &local_hash[..16]
@@ -78,7 +143,24 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 
     // Find common ancestor by checking recent blocks
     let sync_from_height = if is_fork {
-        find_common_ancestor(&state, &client, peer_url, local_height).await?
+        let ancestor = find_common_ancestor(&state, &client, peer_url, local_height).await?;
+
+        // IMMEDIATELY cancel mining and set reorg height BEFORE rollback
+        // This prevents the miner from mining a fork block while we rollback
+        state.last_reorg_height.store(ancestor, std::sync::atomic::Ordering::Relaxed);
+        if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Rollback to common ancestor so peer's blocks can be added as tip extensions
+        let mut chain = state.blockchain.write()
+            .map_err(|e| SyncError::LockPoisoned(format!("Blockchain write lock poisoned: {}", e)))?;
+        if let Err(e) = chain.rollback_to_height(ancestor) {
+            warn!("Rollback to height {} failed: {}", ancestor, e);
+            return Err(SyncError::HttpError(format!("Rollback failed: {}", e)));
+        }
+        info!("Rolled back to common ancestor at height {}", ancestor);
+        ancestor
     } else {
         local_height
     };
@@ -141,13 +223,16 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     }
 
     if synced > 0 {
-        if reorged {
-            // SECURITY FIX: Gestion sécurisée du RwLock poisoning
+        if is_fork {
             let height = state.blockchain.read()
                 .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?
                 .height();
-            info!("Reorg complete: synced {} blocks from {} (new height: {})",
+            info!("Fork resolved: synced {} blocks from {} (new height: {})",
                 synced, peer_id(peer_url), height);
+            // Signal miner to restart on new tip after fork resolution
+            if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         } else {
             info!("Synced {} blocks from {}", synced, peer_id(peer_url));
         }
@@ -194,15 +279,20 @@ async fn find_common_ancestor(
         }
     }
 
-    // If we can't find common ancestor in recent blocks, sync from beginning
-    // This is a safety fallback - shouldn't normally happen
-    warn!("Could not find common ancestor in last {} blocks, syncing from genesis", check_depth);
-    Ok(0)
+    // SECURITY: If we can't find common ancestor, the peer's chain is incompatible.
+    // NEVER rollback to genesis — this would destroy the entire chain.
+    warn!(
+        "No common ancestor found in last {} blocks — chains are incompatible. Ignoring peer.",
+        check_depth
+    );
+    Err(SyncError::InvalidResponse(format!(
+        "No common ancestor found in last {} blocks — peer chain incompatible",
+        check_depth
+    )))
 }
 
 /// Broadcast a newly mined block to all peers.
-pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String]) -> Vec<Result<(), SyncError>> {
-    let client = reqwest::Client::new();
+pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String], client: &reqwest::Client) -> Vec<Result<(), SyncError>> {
     let mut results = Vec::new();
 
     for peer in peers {
@@ -216,9 +306,9 @@ pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String]) -> Vec<Res
             .map_err(SyncError::from);
 
         if let Err(ref e) = result {
-            warn!("Failed to broadcast block to {}: {}", peer_id(peer), sanitize_error(e));
+            debug!("Failed to broadcast block to {}: {}", peer_id(peer), sanitize_error(e));
         } else {
-            info!("Broadcast block {} to {}", block.hash_hex(), peer_id(peer));
+            debug!("Broadcast block {} to {}", block.hash_hex(), peer_id(peer));
         }
 
         results.push(result);
@@ -227,29 +317,58 @@ pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String]) -> Vec<Res
     results
 }
 
+/// Consecutive failure counter for sync loop (reduces log spam).
+static SYNC_FAIL_COUNT: AtomicU32 = AtomicU32::new(0);
+
 /// Background task that periodically syncs with peers.
-pub async fn sync_loop(state: Arc<AppState>, peers: Vec<String>, sync_interval_secs: u64) {
-    if peers.is_empty() {
+pub async fn sync_loop(state: Arc<AppState>, seed_peers: Vec<String>, sync_interval_secs: u64) {
+    if seed_peers.is_empty() {
         return;
     }
 
     let mut interval = interval(Duration::from_secs(sync_interval_secs));
+    let mut peer_failures: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
 
     loop {
         interval.tick().await;
+
+        // Use current peer list (may have been modified by discovery)
+        let peers = state.peers.read().unwrap().clone();
 
         for peer in &peers {
             // Keep syncing until caught up (not just one batch per cycle)
             loop {
                 match sync_from_peer(state.clone(), peer).await {
                     Ok(n) if n > 0 => {
+                        SYNC_FAIL_COUNT.store(0, Ordering::Relaxed);
+                        peer_failures.remove(peer);
                         info!("Synced {} blocks from {}", n, peer_id(peer));
                         // If we got blocks, immediately try again (peer may have more)
                         continue;
                     }
-                    Ok(_) => break, // caught up with this peer
+                    Ok(_) => {
+                        peer_failures.remove(peer);
+                        break; // caught up with this peer
+                    }
                     Err(e) => {
-                        warn!("Sync from {} failed: {}", peer_id(peer), sanitize_error(&e));
+                        let count = SYNC_FAIL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                        let peer_count = peer_failures.entry(peer.clone()).or_insert(0);
+                        *peer_count += 1;
+
+                        // Log first failure, then every 10th to reduce spam
+                        if count == 1 {
+                            warn!("Sync from {} failed: {}", peer_id(peer), sanitize_error(&e));
+                        } else if count % 10 == 0 {
+                            warn!("Sync from {} failed ({} consecutive): {}", peer_id(peer), count, sanitize_error(&e));
+                        }
+
+                        // Ghost peer cleanup: remove non-seed peers after 10 consecutive failures
+                        if *peer_count >= 10 && !seed_peers.contains(peer) {
+                            info!("Removing ghost peer {} after {} consecutive failures", peer_id(peer), peer_count);
+                            let mut peers_write = state.peers.write().unwrap();
+                            peers_write.retain(|p| p != peer);
+                            peer_failures.remove(peer);
+                        }
                         break;
                     }
                 }
@@ -265,6 +384,8 @@ struct PeerChainInfo {
     latest_hash: String,
     difficulty: u64,
     commitment_count: u64,
+    #[serde(default)]
+    genesis_hash: String,
 }
 
 #[derive(Debug, serde::Deserialize)]

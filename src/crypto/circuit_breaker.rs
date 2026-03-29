@@ -232,6 +232,8 @@ impl CryptoCircuitBreaker {
                     if opened_time.elapsed() >= self.config.recovery_timeout {
                         drop(last_opened);
                         self.transition_to_half_open();
+                        // Count this first operation as a test operation
+                        *self.test_count.lock().unwrap() += 1;
                         return Ok(OperationGuard::new(self, op));
                     }
                 }
@@ -289,6 +291,8 @@ impl CryptoCircuitBreaker {
     fn transition_to_half_open(&self) {
         *self.state.write().unwrap() = CircuitState::HalfOpen;
         *self.test_count.lock().unwrap() = 0;
+        // Reset stats so HalfOpen test period starts fresh
+        self.stats.lock().unwrap().clear();
     }
 
     /// Enregistrer le résultat d'une opération
@@ -370,6 +374,7 @@ pub struct OperationGuard<'a> {
     breaker: &'a CryptoCircuitBreaker,
     operation: CryptoOperation,
     start_time: Instant,
+    reported: bool,
 }
 
 impl<'a> OperationGuard<'a> {
@@ -377,18 +382,21 @@ impl<'a> OperationGuard<'a> {
         Self {
             breaker,
             operation,
+            reported: false,
             start_time: Instant::now(),
         }
     }
 
     /// Marquer l'opération comme réussie
-    pub fn success(self) {
+    pub fn success(mut self) {
+        self.reported = true;
         let duration = self.start_time.elapsed();
         self.breaker.record_operation(self.operation, duration, true);
     }
 
     /// Marquer l'opération comme échouée
-    pub fn failure(self) {
+    pub fn failure(mut self) {
+        self.reported = true;
         let duration = self.start_time.elapsed();
         self.breaker.record_operation(self.operation, duration, false);
     }
@@ -396,9 +404,11 @@ impl<'a> OperationGuard<'a> {
 
 impl<'a> Drop for OperationGuard<'a> {
     fn drop(&mut self) {
-        // Par défaut, considérer comme un échec si pas explicitement marqué
-        let duration = self.start_time.elapsed();
-        self.breaker.record_operation(self.operation, duration, false);
+        if !self.reported {
+            // Par défaut, considérer comme un échec si pas explicitement marqué
+            let duration = self.start_time.elapsed();
+            self.breaker.record_operation(self.operation, duration, false);
+        }
     }
 }
 
@@ -486,16 +496,18 @@ mod tests {
             ..Default::default()
         };
         let breaker = CryptoCircuitBreaker::new(config);
-        
-        // Simuler des échecs
+
+        // Simuler des échecs — circuit may open before all 5 iterations
         for _ in 0..5 {
-            let guard = breaker.check_operation(CryptoOperation::Halo2ProofGeneration).await.unwrap();
-            guard.failure();
+            match breaker.check_operation(CryptoOperation::Halo2ProofGeneration).await {
+                Ok(guard) => guard.failure(),
+                Err(_) => break, // Circuit already opened
+            }
         }
-        
+
         // Circuit doit être ouvert
         assert_eq!(breaker.state(), CircuitState::Open);
-        
+
         // Nouvelle opération doit être rejetée
         let result = breaker.check_operation(CryptoOperation::Halo2ProofGeneration).await;
         assert!(matches!(result, Err(CircuitBreakerError::CircuitOpen { .. })));
@@ -535,11 +547,13 @@ mod tests {
             ..Default::default()
         };
         let breaker = CryptoCircuitBreaker::new(config);
-        
+
         // Provoquer l'ouverture du circuit
         for _ in 0..3 {
-            let guard = breaker.check_operation(CryptoOperation::MlDsaSignature).await.unwrap();
-            guard.failure();
+            match breaker.check_operation(CryptoOperation::MlDsaSignature).await {
+                Ok(guard) => guard.failure(),
+                Err(_) => break,
+            }
         }
         assert_eq!(breaker.state(), CircuitState::Open);
         

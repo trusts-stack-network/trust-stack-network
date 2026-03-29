@@ -36,6 +36,13 @@ pub struct BlockHeader {
     #[serde(with = "hex_array")]
     pub nullifier_root: [u8; BLOCK_HASH_SIZE],
 
+    /// Hash of the full chain state after applying this block.
+    /// Used for snapshot validation: a peer providing a snapshot must prove
+    /// that the state matches the state_root committed in the block header.
+    /// Blake2s(commitment_count || nullifier_count || commitment_root || nullifier_root || balance_root)
+    #[serde(with = "hex_array", default = "default_hash")]
+    pub state_root: [u8; BLOCK_HASH_SIZE],
+
     /// Block creation timestamp (Unix timestamp).
     pub timestamp: u64,
 
@@ -197,6 +204,7 @@ impl ShieldedBlock {
             merkle_root,
             commitment_root,
             nullifier_root,
+            state_root: [0u8; BLOCK_HASH_SIZE], // Will be set by set_state_root()
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -238,6 +246,7 @@ impl ShieldedBlock {
             merkle_root,
             commitment_root,
             nullifier_root,
+            state_root: [0u8; BLOCK_HASH_SIZE], // Will be set by set_state_root()
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -255,6 +264,11 @@ impl ShieldedBlock {
             contract_receipts: Vec::new(),
             coinbase,
         }
+    }
+
+    /// Set the state root for this block (called after state is computed).
+    pub fn set_state_root(&mut self, state_root: [u8; BLOCK_HASH_SIZE]) {
+        self.header.state_root = state_root;
     }
 
     /// Get the signal bits from the version field (bits 29-31)
@@ -287,6 +301,7 @@ impl ShieldedBlock {
             merkle_root: coinbase.hash(),
             commitment_root,
             nullifier_root: [0u8; BLOCK_HASH_SIZE], // Empty nullifier set
+            state_root: [0u8; BLOCK_HASH_SIZE],      // Genesis has no state_root
             timestamp: 0, // The beginning of time
             difficulty,
             nonce: [0u8; 64],
@@ -326,11 +341,12 @@ impl ShieldedBlock {
 
     /// Get the total fees from all transactions in this block.
     pub fn total_fees(&self) -> u64 {
+        // M2 audit fix: use saturating_add to prevent overflow
         let v1_fees: u64 = self.transactions.iter().map(|tx| tx.fee).sum();
         let v2_fees: u64 = self.transactions_v2.iter().map(|tx| tx.fee).sum();
         let deploy_fees: u64 = self.contract_deploys.iter().map(|tx| tx.fee).sum();
         let call_fees: u64 = self.contract_calls.iter().map(|tx| tx.fee).sum();
-        v1_fees + v2_fees + deploy_fees + call_fees
+        v1_fees.saturating_add(v2_fees).saturating_add(deploy_fees).saturating_add(call_fees)
     }
 
     /// Get all nullifiers introduced by this block.
@@ -499,6 +515,11 @@ fn compute_merkle_root(hashes: &[[u8; 32]]) -> [u8; 32] {
     level[0]
 }
 
+/// Default state_root for backward compatibility with pre-v0.7.1 blocks.
+fn default_hash() -> [u8; BLOCK_HASH_SIZE] {
+    [0u8; BLOCK_HASH_SIZE]
+}
+
 /// Helper module for hex serialization of byte arrays.
 mod hex_array {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -572,6 +593,7 @@ mod tests {
             merkle_root: [1u8; 32],
             commitment_root: [2u8; 32],
             nullifier_root: [3u8; 32],
+            state_root: [0u8; 32],
             timestamp: 1234567890,
             difficulty: 10000,
             nonce: [42u8; 64],
@@ -605,9 +627,9 @@ mod tests {
 
     #[test]
     fn test_numeric_difficulty() {
-        // Zero difficulty always passes
+        // Zero difficulty is invalid (M1 audit fix) — always rejects
         let mut hash = [0xFF; 32];
-        assert!(poseidon_pow::hash_meets_difficulty(&hash, 0));
+        assert!(!poseidon_pow::hash_meets_difficulty(&hash, 0));
 
         // Very low hash should pass high difficulty
         hash = [0u8; 32];
@@ -646,9 +668,9 @@ mod tests {
             0,
         );
 
-        let block = ShieldedBlock::genesis(0, coinbase); // Zero difficulty for testing
+        let block = ShieldedBlock::genesis(1, coinbase); // Min difficulty for testing
 
-        // Should verify with correct merkle root and zero difficulty
+        // Should verify with correct merkle root and minimum difficulty
         assert!(block.verify().is_ok());
     }
 
@@ -660,6 +682,7 @@ mod tests {
             merkle_root: [1u8; 32],
             commitment_root: [2u8; 32],
             nullifier_root: [3u8; 32],
+            state_root: [0u8; 32],
             timestamp: 1234567890,
             difficulty: 10000,
             nonce: [0xAB; 64],

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import './Explorer.css';
 
@@ -14,6 +14,16 @@ interface Block {
   hash: string;
   tx_count: number;
   timestamp: number;
+  difficulty: number;
+  coinbase_reward: number;
+}
+
+interface BlockListResponse {
+  blocks: Block[];
+  total: number;
+  page: number;
+  limit: number;
+  total_pages: number;
 }
 
 interface BlockDetail {
@@ -46,6 +56,7 @@ type DetailView =
   | { type: 'transaction'; data: Transaction }
 
 const COIN = 1_000_000_000;
+const BLOCKS_PER_PAGE = 50;
 
 function formatAmount(amount: number): string {
   return (amount / COIN).toFixed(2);
@@ -59,6 +70,11 @@ export default function Explorer() {
   const [search, setSearch] = useState('');
   const [detailView, setDetailView] = useState<DetailView>({ type: 'none' });
   const [loading, setLoading] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalBlocks, setTotalBlocks] = useState(0);
+  const [goToHeight, setGoToHeight] = useState('');
+  const autoRefreshRef = useRef(true);
 
   const fetchBlockDetail = async (hash: string) => {
     setLoading(true);
@@ -100,30 +116,31 @@ export default function Explorer() {
     setDetailView({ type: 'none' });
   };
 
+  const fetchBlocks = useCallback(async (page: number) => {
+    try {
+      const res = await fetch(`/blocks/list?page=${page}&limit=${BLOCKS_PER_PAGE}`);
+      if (res.ok) {
+        const data: BlockListResponse = await res.json();
+        setBlocks(data.blocks);
+        setTotalPages(data.total_pages);
+        setTotalBlocks(data.total);
+      }
+    } catch (e) {
+      console.error('Failed to fetch blocks:', e);
+    }
+  }, []);
+
   const fetchData = useCallback(async () => {
     try {
-      // Fetch chain info
-      const infoRes = await fetch('/chain/info');
+      const [infoRes, mempoolRes, txRes] = await Promise.all([
+        fetch('/chain/info'),
+        fetch('/mempool'),
+        fetch('/transactions/recent'),
+      ]);
       const info: ChainInfo = await infoRes.json();
       setChainInfo(info);
-
-      // Fetch mempool
-      const mempoolRes = await fetch('/mempool');
       const mempool = await mempoolRes.json();
       setMempoolCount(mempool.count);
-
-      // Fetch recent blocks
-      const fetchedBlocks: Block[] = [];
-      for (let h = info.height; h >= Math.max(0, info.height - 9); h--) {
-        const blockRes = await fetch(`/block/height/${h}`);
-        if (blockRes.ok) {
-          fetchedBlocks.push(await blockRes.json());
-        }
-      }
-      setBlocks(fetchedBlocks);
-
-      // Fetch recent transactions (privacy-preserving: only shows fees, not amounts)
-      const txRes = await fetch('/transactions/recent');
       const txs: Transaction[] = await txRes.json();
       setTransactions(txs);
     } catch (e) {
@@ -131,21 +148,73 @@ export default function Explorer() {
     }
   }, []);
 
+  // Initial load + auto-refresh
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 10000);
+    fetchBlocks(currentPage);
+    const interval = setInterval(() => {
+      fetchData();
+      // Only auto-refresh blocks on page 1
+      if (autoRefreshRef.current) {
+        fetchBlocks(currentPage);
+      }
+    }, 10000);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [fetchData, fetchBlocks, currentPage]);
+
+  // Track if on page 1 for auto-refresh
+  useEffect(() => {
+    autoRefreshRef.current = currentPage === 1;
+  }, [currentPage]);
+
+  const goToPage = (page: number) => {
+    const p = Math.max(1, Math.min(page, totalPages));
+    setCurrentPage(p);
+    fetchBlocks(p);
+  };
+
+  const handleGoToHeight = () => {
+    const height = parseInt(goToHeight, 10);
+    if (!isNaN(height) && height >= 0 && totalBlocks > 0) {
+      // Calculate which page contains this height
+      const maxHeight = totalBlocks - 1;
+      const clampedHeight = Math.max(0, Math.min(height, maxHeight));
+      const offset = maxHeight - clampedHeight;
+      const page = Math.floor(offset / BLOCKS_PER_PAGE) + 1;
+      goToPage(page);
+      setGoToHeight('');
+    }
+  };
 
   const handleSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       const query = search.trim();
-      if (query.length === 64) {
-        window.location.href = `/block/${query}`;
+      if (/^\d+$/.test(query)) {
+        // Numeric = go to block height
+        fetchBlockByHeight(parseInt(query, 10));
+      } else if (query.length === 64) {
+        fetchBlockDetail(query);
       } else if (query.length === 40) {
         window.location.href = `/account/${query}`;
       }
     }
+  };
+
+  // Generate page numbers to display
+  const getPageNumbers = (): (number | '...')[] => {
+    const pages: (number | '...')[] = [];
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages.push(1);
+      if (currentPage > 3) pages.push('...');
+      const start = Math.max(2, currentPage - 1);
+      const end = Math.min(totalPages - 1, currentPage + 1);
+      for (let i = start; i <= end; i++) pages.push(i);
+      if (currentPage < totalPages - 2) pages.push('...');
+      pages.push(totalPages);
+    }
+    return pages;
   };
 
   return (
@@ -165,7 +234,7 @@ export default function Explorer() {
         <input
         type="text"
         className="search"
-        placeholder="Search by block hash or address..."
+        placeholder="Search by block height, hash, or address..."
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         onKeyPress={handleSearch}
@@ -196,32 +265,92 @@ export default function Explorer() {
         </div>
       </div>
 
-      <h2>Recent Blocks</h2>
+      <div className="blocks-header">
+        <h2>Blocks</h2>
+        <div className="blocks-jump">
+          <input
+            type="text"
+            className="jump-input"
+            placeholder="Go to height..."
+            value={goToHeight}
+            onChange={(e) => setGoToHeight(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && handleGoToHeight()}
+          />
+          <button className="jump-btn" onClick={handleGoToHeight}>Go</button>
+        </div>
+      </div>
       <div className="card">
         <table>
           <thead>
             <tr>
               <th>Height</th>
               <th>Hash</th>
-              <th>Transactions</th>
+              <th>Txs</th>
+              <th>Reward</th>
               <th>Time</th>
             </tr>
           </thead>
           <tbody>
             {blocks.length === 0 ? (
-              <tr><td colSpan={4} className="loading">Loading...</td></tr>
+              <tr><td colSpan={5} className="loading">Loading...</td></tr>
             ) : (
               blocks.map((b) => (
                 <tr key={b.hash} className="clickable" onClick={() => handleBlockClick(b)}>
-                  <td>{b.height}</td>
+                  <td className="height-cell">{b.height}</td>
                   <td className="hash">{b.hash.substring(0, 16)}...</td>
                   <td>{b.tx_count}</td>
+                  <td>{formatAmount(b.coinbase_reward)} TSN</td>
                   <td>{new Date(b.timestamp * 1000).toLocaleString()}</td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
+
+        {/* Pagination */}
+        <div className="pagination">
+          <button
+            className="page-btn"
+            disabled={currentPage === 1}
+            onClick={() => goToPage(1)}
+            title="First page (latest blocks)"
+          >&#171; First</button>
+          <button
+            className="page-btn"
+            disabled={currentPage === 1}
+            onClick={() => goToPage(currentPage - 1)}
+          >&#8249; Prev</button>
+
+          <div className="page-numbers">
+            {getPageNumbers().map((p, i) =>
+              p === '...' ? (
+                <span key={`ellipsis-${i}`} className="page-ellipsis">...</span>
+              ) : (
+                <button
+                  key={p}
+                  className={`page-num ${p === currentPage ? 'active' : ''}`}
+                  onClick={() => goToPage(p)}
+                >{p}</button>
+              )
+            )}
+          </div>
+
+          <button
+            className="page-btn"
+            disabled={currentPage === totalPages}
+            onClick={() => goToPage(currentPage + 1)}
+          >Next &#8250;</button>
+          <button
+            className="page-btn"
+            disabled={currentPage === totalPages}
+            onClick={() => goToPage(totalPages)}
+            title="Last page (genesis)"
+          >Last &#187;</button>
+
+          <span className="page-info">
+            Page {currentPage} / {totalPages} ({totalBlocks} blocks)
+          </span>
+        </div>
       </div>
 
       <h2>Recent Transactions</h2>

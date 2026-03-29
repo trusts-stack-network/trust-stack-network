@@ -112,26 +112,61 @@ impl<'de> Deserialize<'de> for ValueCommitment {
     }
 }
 
+/// Hash-to-curve using try-and-increment (Elligator-like).
+/// Derives a curve point from a domain tag such that the discrete log
+/// relative to other generators is unknown. This is critical for Pedersen
+/// commitment binding: if log_G(H) were known, an attacker could forge
+/// commitments and inflate the supply.
+///
+/// Method: Hash(tag || counter) → x-coordinate, test if on curve, increment counter.
+/// This is deterministic and produces a valid G1 point with unknown discrete log
+/// relative to the standard generator or any other hash-derived point.
+fn hash_to_curve_g1(domain_tag: &[u8]) -> G1 {
+    use ark_bn254::{Fq, G1Affine};
+    use ark_ec::AffineRepr;
+
+    for counter in 0u32..256 {
+        let mut hasher = Blake2s256::new();
+        hasher.update(domain_tag);
+        hasher.update(&counter.to_le_bytes());
+        let hash = hasher.finalize();
+
+        // Interpret hash as x-coordinate on BN254 G1
+        let x = Fq::from_le_bytes_mod_order(&hash);
+
+        // Try to decompress: find y such that y² = x³ + 3 (BN254 curve equation)
+        if let Some(point) = G1Affine::get_point_from_x_unchecked(x, false) {
+            // Ensure point is on the curve and in the correct subgroup
+            if point.is_on_curve() && point.is_in_correct_subgroup_assuming_on_curve() {
+                let projective: G1 = point.into();
+                // Ensure not the identity point
+                if projective != G1::default() {
+                    return projective;
+                }
+            }
+        }
+    }
+    // Statistically impossible to reach here with a good hash function
+    panic!("BUG: hash_to_curve failed after 256 attempts — should never happen");
+}
+
 lazy_static::lazy_static! {
     // Generator points for Pedersen commitment.
-    // These are fixed points on BN254 derived from nothing-up-my-sleeve values.
-    /// Generator G for value component: HASH_TO_CURVE("TSN_ValueCommitment_G")
+    // These are fixed points on BN254 derived via hash-to-curve (try-and-increment).
+    // The discrete log between G and H is UNKNOWN by construction — this is critical
+    // for the binding property of Pedersen commitments.
+    //
+    // SECURITY: Previously used scalar*Generator which made log_G(H) = s_H/s_G publicly
+    // computable, breaking binding. Fixed in v0.7.1 audit remediation.
+
+    /// Generator G for value component: hash-to-curve("TSN_PedersenG_v2")
     pub static ref VALUE_GENERATOR_G: G1 = {
-        // Use a hash-to-group derivation for the value generator
-        let mut hasher = Blake2s256::new();
-        hasher.update(b"TSN_ValueCommitment_G");
-        let hash = hasher.finalize();
-        let scalar = Fr::from_le_bytes_mod_order(&hash);
-        G1::generator() * scalar
+        hash_to_curve_g1(b"TSN_PedersenG_v2")
     };
 
-    /// Generator H for randomness component: HASH_TO_CURVE("TSN_ValueCommitment_H")
+    /// Generator H for randomness component: hash-to-curve("TSN_PedersenH_v2")
     pub static ref VALUE_GENERATOR_H: G1 = {
-        let mut hasher = Blake2s256::new();
-        hasher.update(b"TSN_ValueCommitment_H");
-        let hash = hasher.finalize();
-        let scalar = Fr::from_le_bytes_mod_order(&hash);
-        G1::generator() * scalar
+        hash_to_curve_g1(b"TSN_PedersenH_v2")
     };
 }
 

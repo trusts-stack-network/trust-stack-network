@@ -353,6 +353,16 @@ impl CommitmentTreePQ {
         })
     }
 
+    /// Get the leaf commitment bytes at a given position.
+    pub fn leaf_at(&self, position: u64) -> Option<[u8; 32]> {
+        let pos = position as usize;
+        if pos < self.leaves.len() {
+            Some(hash_out_to_bytes(&self.leaves[pos]))
+        } else {
+            None
+        }
+    }
+
     /// Create a snapshot of the tree state for persistence.
     pub fn snapshot(&self) -> CommitmentTreeSnapshot {
         CommitmentTreeSnapshot {

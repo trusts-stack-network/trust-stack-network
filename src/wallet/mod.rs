@@ -2,7 +2,7 @@
 
 mod wallet;
 
-pub use wallet::{ShieldedWallet, WalletNote, WalletError};
+pub use wallet::{ShieldedWallet, WalletNote, WalletError, WalletTxRecord};
 
 // Legacy support
 pub use wallet::LegacyWallet;

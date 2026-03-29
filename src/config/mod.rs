@@ -44,13 +44,8 @@ pub const NETWORK_NAME: &str = "tsn-mainnet";
 /// After downloading blocks in trusted mode, the node verifies that these
 /// block hashes match. If any mismatch is found, the chain is rejected.
 /// Updated with each release.
-pub const FAST_SYNC_CHECKPOINTS: &[(u64, &str)] = &[
-    (1000, "00001b2472680fc639ed26e3685be505f447d5985feb9d34127a7403bca3fbca"),
-    (2000, "0000032433f0ae800c405fae727b0e77986aad79c44f24a115ffe966c87f465b"),
-    (4000, "000006323dc2bedeab8bb05fb1e872beadd94f21c32f9072c6cdbc5919de3bda"),
-    (6000, "0000017367102785e9d72b5004d8b9f6470920982efcfdb85cf3e9a8d8ba75bd"),
-    (8000, "000004897656bbcf66d38b35ac017edce417d5d4025a197944918af839a77808"),
-];
+/// Fast-sync checkpoints — will be populated after chain stabilizes.
+pub const FAST_SYNC_CHECKPOINTS: &[(u64, &str)] = &[];
 
 /// Default port for nodes
 pub const DEFAULT_PORT: u16 = 9333;
@@ -248,4 +243,8 @@ pub const MAX_REORG_DEPTH: u64 = 100;
 ///
 /// Set to empty string to disable verification (first launch / testnet reset).
 /// Reset after PoW refactor to numeric difficulty + 64-byte nonce.
-pub const EXPECTED_GENESIS_HASH: &str = "8b6f36791b8ad50d871cb5444299b397b724e005a902d2d3789bcee9a63398f2";
+/// Updated for v1.0.0: matches genesis produced by all live nodes.
+/// Previous value (42b5af19...) was from dev environment with different parameters.
+/// Genesis hash — empty string disables verification (will be set after mainnet launch).
+/// Previous values: "8b6f36..." (v0.7.1), "42b5af..." (dev)
+pub const EXPECTED_GENESIS_HASH: &str = "";

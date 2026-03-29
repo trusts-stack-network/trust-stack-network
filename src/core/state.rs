@@ -68,14 +68,23 @@ impl ShieldedState {
         self.skip_v1_tree
     }
 
+    /// Force skip V1 tree validation. Used after fast-sync where the V1 tree
+    /// may be inconsistent. The V2 (PQ) tree is always authoritative.
+    pub fn force_skip_v1_tree(&mut self) {
+        self.skip_v1_tree = true;
+    }
+
     /// Get the current V2 commitment tree root.
     pub fn commitment_root_pq(&self) -> TreeHashPQ {
         self.commitment_tree_pq.root()
     }
 
     /// Get the number of commitments in the tree.
+    /// Returns the max of V1 and V2 tree sizes (V2-only fast-sync leaves V1 at 0).
     pub fn commitment_count(&self) -> u64 {
-        self.commitment_tree.size()
+        let v1 = self.commitment_tree.size();
+        let v2 = self.commitment_tree_pq.size();
+        v1.max(v2)
     }
 
     /// Get the number of spent nullifiers.
@@ -86,6 +95,39 @@ impl ShieldedState {
     /// Check if a nullifier has been spent.
     pub fn is_nullifier_spent(&self, nullifier: &Nullifier) -> bool {
         self.nullifier_set.contains(nullifier)
+    }
+
+    /// Compute a deterministic state root hash from the current chain state.
+    /// state_root = Blake2s("TSN_StateRoot" || commitment_count || nullifier_count ||
+    ///              commitment_root_pq || nullifier_hashes_sorted_hash)
+    ///
+    /// This is used for snapshot validation: a peer providing a fast-sync snapshot
+    /// must produce a state that matches the state_root in the block header.
+    pub fn compute_state_root(&self) -> [u8; 32] {
+        use blake2::{Blake2s256, Digest};
+
+        let mut hasher = Blake2s256::new();
+        hasher.update(b"TSN_StateRoot_v1");
+        hasher.update(&self.commitment_count().to_le_bytes());
+        hasher.update(&(self.nullifier_count() as u64).to_le_bytes());
+
+        // Include PQ commitment root (authoritative tree)
+        let pq_root = self.commitment_root_pq();
+        hasher.update(&pq_root);
+
+        // Include a sorted hash of all nullifiers for deterministic ordering
+        let mut nullifier_bytes: Vec<[u8; 32]> = self.nullifier_set.iter()
+            .map(|n| n.to_bytes())
+            .collect();
+        nullifier_bytes.sort();
+        for nb in &nullifier_bytes {
+            hasher.update(nb);
+        }
+
+        let hash = hasher.finalize();
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&hash);
+        result
     }
 
     /// Check if a root is a valid recent root (V1).

@@ -433,10 +433,11 @@ fn count_total_fees(blockchain: &ShieldedBlockchain) -> u64 {
 }
 
 fn estimate_hash_rate(difficulty: u64) -> f64 {
-    // Simplified estimation: hash_rate ≈ difficulty * 2^32 / block_time
-    // Using average block time of 600 seconds (10 minutes)
-    const TARGET_BLOCK_TIME: f64 = 600.0;
-    (difficulty as f64 * 4_294_967_296.0) / TARGET_BLOCK_TIME
+    // hashrate ≈ difficulty / target_block_time
+    // TSN uses Poseidon2 PoW with numeric difficulty and 10s block target.
+    // Formula: difficulty = hashrate * block_time, so hashrate = difficulty / block_time
+    const TARGET_BLOCK_TIME: f64 = 10.0;
+    difficulty as f64 / TARGET_BLOCK_TIME
 }
 
 #[cfg(test)]

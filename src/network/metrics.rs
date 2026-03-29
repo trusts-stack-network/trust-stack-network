@@ -524,16 +524,23 @@ mod tests {
     #[tokio::test]
     async fn test_tps_calculation() {
         let collector = MetricsCollector::new();
-        
-        // Send multiple transactions
-        for _ in 0..10 {
+
+        // Send initial transactions to establish baseline
+        for _ in 0..5 {
             collector.transaction_received(100).await;
-            sleep(Duration::from_millis(10)).await;
         }
-        
-        // TPS should be calculated
+
+        // Wait > 1s so update_tps() actually computes TPS on next call
+        sleep(Duration::from_millis(1100)).await;
+
+        // Send more transactions — this triggers TPS calculation
+        for _ in 0..5 {
+            collector.transaction_received(100).await;
+        }
+
+        // TPS should now be calculated (10 tx over ~1.1s)
         let tps = collector.metrics.transactions_per_second.load(Ordering::Relaxed);
-        assert!(tps > 0);
+        assert!(tps > 0, "TPS should be > 0 after sending transactions over 1+ second");
     }
     
     #[tokio::test]

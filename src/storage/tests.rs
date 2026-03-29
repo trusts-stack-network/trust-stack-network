@@ -37,6 +37,7 @@ mod database_tests {
             merkle_root: [0u8; TEST_BLOCK_HASH_SIZE],
             commitment_root: [1u8; TEST_BLOCK_HASH_SIZE],
             nullifier_root: [2u8; TEST_BLOCK_HASH_SIZE],
+            state_root: [0u8; 32],
             timestamp: TEST_TIMESTAMP + height * 600, // 10 minutes par bloc
             difficulty: TEST_DIFFICULTY,
             nonce: height * 12345,
@@ -277,6 +278,7 @@ mod sled_backend_tests {
             merkle_root: [0xCDu8; TEST_BLOCK_HASH_SIZE],
             commitment_root: [0xEFu8; TEST_BLOCK_HASH_SIZE],
             nullifier_root: [0x12u8; TEST_BLOCK_HASH_SIZE],
+            state_root: [0u8; 32],
             timestamp: 1234567890,
             difficulty: 999999,
             nonce: 0xDEADBEEF,
@@ -339,6 +341,7 @@ mod sled_backend_tests {
             merkle_root: [0u8; TEST_BLOCK_HASH_SIZE],
             commitment_root: [0u8; TEST_BLOCK_HASH_SIZE],
             nullifier_root: [0u8; TEST_BLOCK_HASH_SIZE],
+            state_root: [0u8; 32],
             timestamp: 1640995200,
             difficulty: 1000,
             nonce: 0,
