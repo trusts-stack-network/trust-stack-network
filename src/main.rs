@@ -1804,7 +1804,7 @@ async fn cmd_node(
     println!("  Port:         {}", port);
     println!("  Data:         {}", data_dir);
     if node_role.stores_full_chain() {
-        println!("  Explorer:     http://localhost:{}/explorer", port);
+        println!("  Explorer:     https://explorer.tsnchain.com");
     }
     if let Some((ref pk_hash, _)) = miner_info {
         println!();
