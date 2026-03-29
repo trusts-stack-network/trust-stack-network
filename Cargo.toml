@@ -44,7 +44,7 @@ p3-air = "0.4"
 p3-challenger = "0.4"
 p3-commit = "0.4"
 p3-fri = "0.4"
-p3-merkle-tree = "0.4"
+p3-merkle-tree = "0.5"
 p3-matrix = "0.4"
 
 # Encryption (for note encryption)
