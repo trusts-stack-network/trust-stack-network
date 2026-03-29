@@ -1,0 +1,12 @@
+[package]
+name = "crypto-pq"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fips204 = { version = "0.2.0-rc.4", features = ["std"] }
+slh-dsa = { version = "0.2.0-rc.4", default-features = true, features = ["alloc", "zeroize"] }
+sha3 = "0.10"
+rand = "0.8"
+thiserror = "1.0"
+hex = "0.4"
