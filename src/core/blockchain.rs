@@ -1702,6 +1702,7 @@ impl ShieldedBlockchain {
         block_hash: [u8; 32],
         difficulty: u64,
         next_difficulty: u64,
+        peer_cumulative_work: u128,
     ) {
         // Restore state
         self.state.restore_pq_from_snapshot(snapshot.clone());
@@ -1724,7 +1725,12 @@ impl ShieldedBlockchain {
 
         // Set chain metadata — use next_difficulty so validation works after fast-sync
         self.difficulty = next_difficulty;
-        self.cumulative_work = difficulty as u128 * height as u128; // approximate
+        // Use peer's actual cumulative_work if available, otherwise estimate
+        self.cumulative_work = if peer_cumulative_work > 0 {
+            peer_cumulative_work
+        } else {
+            difficulty as u128 * height as u128
+        };
         self.fast_sync_base_height = height;
         // Save commitment count at snapshot time for correct position calculation
         self.fast_sync_commitment_offset = self.state.commitment_count();
