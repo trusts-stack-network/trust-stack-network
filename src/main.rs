@@ -681,12 +681,28 @@ async fn main() -> anyhow::Result<()> {
             ).await?;
         }
         None => {
-            // ---- DEFAULT MODE: auto-detect everything and run ----
+            // ---- DEFAULT MODE: auto-detect everything and run as miner ----
             let node_role = auto_detect_role();
-            let wallet = cli.wallet.or_else(auto_detect_wallet);
-            let port = cli.port.unwrap_or_else(config::get_port);
-            let data_dir = cli.data_dir.unwrap_or_else(config::get_data_dir);
+            let data_dir = cli.data_dir.unwrap_or_else(|| {
+                match node_role {
+                    NodeRole::Miner => "data-miner".to_string(),
+                    NodeRole::Relay => "data-relay".to_string(),
+                    NodeRole::LightClient => "data-light".to_string(),
+                }
+            });
+            let port = cli.port.unwrap_or_else(|| find_free_port(config::get_port()));
             let jobs = cli.threads.unwrap_or(1);
+
+            // Auto-detect or auto-create wallet (same behavior as `tsn miner`)
+            let wallet = cli.wallet.or_else(auto_detect_wallet);
+            let wallet = match wallet {
+                Some(w) => Some(w),
+                None if matches!(node_role, NodeRole::Miner) => {
+                    // Auto-create wallet for mining, just like `tsn miner` does
+                    Some(auto_wallet_for_mining(&data_dir))
+                }
+                None => None,
+            };
 
             let mut peers = if cli.no_seeds { Vec::new() } else { config::get_seed_nodes() };
             peers.extend(cli.peer);
