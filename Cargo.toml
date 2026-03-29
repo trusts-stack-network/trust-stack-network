@@ -117,7 +117,7 @@ crossbeam-queue = "0.3"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # TUI
-ratatui = "0.27"
+ratatui = "0.30"
 crossterm = "0.28"
 
 [[bin]]
