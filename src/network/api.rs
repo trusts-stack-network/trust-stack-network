@@ -76,6 +76,10 @@ pub struct AppState {
     pub snapshot_semaphore: Arc<tokio::sync::Semaphore>,
     /// Cached pre-compressed snapshot (refreshed every 100 blocks)
     pub snapshot_cache: TokioRwLock<Option<CachedSnapshot>>,
+    /// Orphan/fork counter for monitoring network health
+    pub orphan_count: std::sync::atomic::AtomicU64,
+    /// Total blocks received that triggered a reorg
+    pub reorg_count: std::sync::atomic::AtomicU64,
 }
 
 /// Pre-generated snapshot cached in memory for fast serving.
@@ -162,6 +166,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/mempool", get(get_mempool))
         .route("/version.json", get(version_info))
         .route("/faucet/stats", get(faucet_stats))
+        .route("/network/health", get(network_health))
         .with_state(state.clone());
 
     // Write + sensitive routes — rate limited to prevent DoS
@@ -304,7 +309,7 @@ async fn node_info(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
         "peer_id": peer_id,
         "role": state.node_role,
         "version": env!("CARGO_PKG_VERSION"),
-        "protocol": "tsn/1.1.0",
+        "protocol": format!("tsn/{}", env!("CARGO_PKG_VERSION")),
         "height": height,
         "http_peers": http_peers,
         "signatures": "ML-DSA-65 (FIPS 204)",
@@ -445,6 +450,51 @@ pub struct MinerStats {
 async fn miner_stats(State(state): State<Arc<AppState>>) -> Json<MinerStats> {
     let stats = state.miner_stats.read().unwrap_or_else(|e| e.into_inner()).clone();
     Json(stats)
+}
+
+/// Network health endpoint — exposes fork/orphan stats and peer versions.
+async fn network_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
+    let height = chain.height();
+    let difficulty = chain.info().difficulty;
+    let cumulative_work = chain.cumulative_work();
+    let avg_block_time = {
+        let ts = chain.recent_timestamps(20);
+        if ts.len() >= 2 {
+            let span = ts.last().unwrap_or(&0).saturating_sub(*ts.first().unwrap_or(&0));
+            span as f64 / (ts.len() - 1) as f64
+        } else {
+            0.0
+        }
+    };
+    drop(chain);
+
+    let orphan_count = state.orphan_count.load(std::sync::atomic::Ordering::Relaxed);
+    let reorg_count = state.reorg_count.load(std::sync::atomic::Ordering::Relaxed);
+    let miner_stats = state.miner_stats.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let peer_count = state.peers.read().unwrap_or_else(|e| e.into_inner()).len();
+
+    // Orphan rate: orphans per 100 blocks
+    let orphan_rate = if height > 0 {
+        (orphan_count as f64 / height as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    Json(serde_json::json!({
+        "height": height,
+        "difficulty": difficulty,
+        "cumulative_work": cumulative_work.to_string(),
+        "avg_block_time_secs": avg_block_time,
+        "target_block_time_secs": 10u64,
+        "orphan_count": orphan_count,
+        "reorg_count": reorg_count,
+        "orphan_rate_pct": format!("{:.2}", orphan_rate),
+        "peer_count": peer_count,
+        "hashrate_hps": miner_stats.hashrate_hps,
+        "is_mining": miner_stats.is_mining,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 #[derive(Serialize)]

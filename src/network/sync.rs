@@ -152,11 +152,16 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     }
 
     // Find common ancestor by checking recent blocks
-    let sync_from_height = if is_fork {
+    // If local height is 0, skip ancestor search — just sync from genesis/fast-sync
+    let sync_from_height = if local_height == 0 {
+        info!("Local height is 0, syncing from scratch (fast-sync)");
+        0
+    } else if is_fork {
         match find_common_ancestor(&state, &client, peer_url, local_height).await {
             Ok(ancestor) => {
                 // IMMEDIATELY cancel mining and set reorg height BEFORE rollback
                 state.last_reorg_height.store(ancestor, std::sync::atomic::Ordering::Relaxed);
+                state.reorg_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }

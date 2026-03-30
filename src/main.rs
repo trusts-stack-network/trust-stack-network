@@ -2146,6 +2146,8 @@ async fn cmd_node(
         last_reorg_height: std::sync::atomic::AtomicU64::new(0),
         snapshot_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
         snapshot_cache: tokio::sync::RwLock::new(None),
+        orphan_count: std::sync::atomic::AtomicU64::new(0),
+        reorg_count: std::sync::atomic::AtomicU64::new(0),
     });
 
     // Create router with API (wallet and explorer are served from static React app)
@@ -2255,7 +2257,7 @@ async fn cmd_node(
                 bootstrap_peers: Vec::new(),
                 dial_seeds,
                 relay_server: node_role == NodeRole::Miner,
-                protocol_version: "tsn/1.1.0".to_string(),
+                protocol_version: format!("tsn/{}", env!("CARGO_PKG_VERSION")),
             };
 
             let p2p = P2pNode::start(p2p_config).await
@@ -2822,6 +2824,7 @@ async fn cmd_node(
                         }
                         Err(e) => {
                             println!("Failed to add mined block: {}", e);
+                            mine_state.orphan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             continue;
                         }
                     }
@@ -2846,36 +2849,48 @@ async fn cmd_node(
                     broadcast_block(&mined_block, &current_peers, &client).await;
                 }
 
-                // Non-blocking fork check: verify peer has our block (async, no wait)
+                // Fork check: compare cumulative_work with peers to detect forks
                 if let Some(peer) = current_peers.first() {
                     let height = mined_block.coinbase.height;
-                    let url = format!("{}/block/height/{}", peer, height);
-                    if let Ok(resp) = client.get(&url).send().await {
-                        if resp.status().is_success() {
-                            if let Ok(info) = resp.json::<serde_json::Value>().await {
-                                let peer_hash = info.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-                                if peer_hash == mined_block.hash_hex() {
-                                    tracing::info!("Peer accepted block at height {}.", height);
-                                    unaccepted_count = 0;
-                                } else if !peer_hash.is_empty() {
-                                    unaccepted_count += 1;
-                                    tracing::warn!(
-                                        "FORK: peer has different block at height {} (strike {}/2)",
-                                        height, unaccepted_count
-                                    );
-                                    if unaccepted_count >= 2 {
-                                        tracing::error!("FORK CONFIRMED. Force re-sync...");
-                                        {
-                                            let mut chain = mine_state.blockchain.write().unwrap();
-                                            chain.reset_for_resync();
-                                        }
-                                        let _ = tsn::network::sync_from_peer(mine_state.clone(), peer).await;
-                                        if let Some(cancel) = mine_state.mining_cancel.read().unwrap().as_ref() {
-                                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                        }
-                                        unaccepted_count = 0;
+                    let ci_url = format!("{}/chain/info", peer);
+                    if let Ok(resp) = client.get(&ci_url).timeout(std::time::Duration::from_secs(5)).send().await {
+                        if let Ok(peer_info) = resp.json::<serde_json::Value>().await {
+                            let peer_height = peer_info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let peer_work = peer_info.get("cumulative_work").and_then(|v| v.as_u64()).unwrap_or(0) as u128;
+                            let peer_hash = peer_info.get("latest_hash").and_then(|v| v.as_str()).unwrap_or("");
+
+                            let (local_work, local_hash_hex) = {
+                                let chain = mine_state.blockchain.read().unwrap();
+                                (chain.cumulative_work(), hex::encode(chain.latest_hash()))
+                            };
+
+                            if peer_hash == local_hash_hex {
+                                // Same tip — no fork
+                                unaccepted_count = 0;
+                            } else if peer_work > local_work {
+                                // Peer has heavier chain — resync to them
+                                unaccepted_count += 1;
+                                tracing::warn!(
+                                    "FORK: peer has heavier chain (peer work: {}, local: {}, peer height: {}, strike {}/2)",
+                                    peer_work, local_work, peer_height, unaccepted_count
+                                );
+                                if unaccepted_count >= 2 {
+                                    tracing::error!("FORK CONFIRMED: peer chain is heavier. Re-syncing...");
+                                    mine_state.reorg_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    {
+                                        let mut chain = mine_state.blockchain.write().unwrap();
+                                        chain.reset_for_resync();
                                     }
+                                    let _ = tsn::network::sync_from_peer(mine_state.clone(), peer).await;
+                                    if let Some(cancel) = mine_state.mining_cancel.read().unwrap().as_ref() {
+                                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    unaccepted_count = 0;
                                 }
+                            } else {
+                                // Our chain is heavier or equal — we're fine, peer will follow us
+                                tracing::info!("Block #{} mined, our chain is heaviest (work: {} vs peer: {})", height, local_work, peer_work);
+                                unaccepted_count = 0;
                             }
                         }
                     }

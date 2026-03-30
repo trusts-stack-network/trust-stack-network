@@ -1722,6 +1722,10 @@ impl ShieldedBlockchain {
         // because the peer's V1 tree may have been rebuilt from its own fast-sync.
         // The V2 tree (post-quantum Goldilocks/Poseidon2) is always correct and is the
         // authoritative commitment tree for this quantum-resistant blockchain.
+        // ALWAYS skip V1 tree validation after fast-sync.
+        // The V1 tree (legacy BN254 Poseidon) is NOT reliably reproducible across
+        // different node states. The V2 tree (post-quantum Goldilocks/Poseidon2) is
+        // the authoritative commitment tree. V1 validation causes sync failures.
         self.state.force_skip_v1_tree();
 
         // Set chain metadata — use next_difficulty so validation works after fast-sync

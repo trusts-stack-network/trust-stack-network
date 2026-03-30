@@ -750,10 +750,11 @@ impl ShieldedState {
     pub fn restore_pq_from_snapshot(&mut self, snapshot: StateSnapshotPQ) {
         self.commitment_tree_pq = CommitmentTreePQ::from_snapshot(snapshot.tree_snapshot);
         self.nullifier_set = snapshot.nullifiers.into_iter().map(Nullifier).collect();
-        // Restore V1 tree if present in snapshot (version >= 2)
+        // V1 tree is legacy (BN254 Poseidon) and NOT reliably reproducible after
+        // fast-sync. Always skip V1 validation — V2 tree is authoritative.
         if let Some(v1_tree) = snapshot.v1_tree {
             self.commitment_tree = v1_tree;
-            self.skip_v1_tree = false;
+            self.skip_v1_tree = true; // ALWAYS skip — V1 tree diverges across nodes
 
             // Vérifier le migration_hash si présent dans le checkpoint
             if snapshot.migration_hash.is_some() {
