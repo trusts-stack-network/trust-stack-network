@@ -330,6 +330,7 @@ pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String], client: &r
         let url = format!("{}/blocks", peer);
         let result = client
             .post(&url)
+            .header("X-TSN-Version", env!("CARGO_PKG_VERSION"))
             .json(block)
             .send()
             .await

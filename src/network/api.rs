@@ -964,8 +964,18 @@ async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse
 /// Receive a block from a peer node.
 async fn receive_block(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(block): Json<ShieldedBlock>,
 ) -> Result<Json<ReceiveBlockResponse>, (StatusCode, String)> {
+    // Reject blocks from nodes that don't send version header or are outdated
+    if let Some(ver) = headers.get("X-TSN-Version").and_then(|v| v.to_str().ok()) {
+        if !crate::network::version_check::version_meets_minimum(ver) {
+            warn!("Rejected block from outdated peer (version {})", ver);
+            return Err((StatusCode::FORBIDDEN, format!("Node version {} is below minimum {}", ver, crate::network::version_check::MINIMUM_VERSION)));
+        }
+    }
+    // Note: missing header is allowed for backward compatibility during transition
+
     let block_hash = block.hash_hex();
 
     info!("Received block {} from peer", &block_hash[..16]);
@@ -2252,8 +2262,17 @@ struct TipResponse {
 /// Receive a tip announcement from a peer.
 async fn receive_tip(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<TipRequest>,
 ) -> Result<Json<TipResponse>, (StatusCode, String)> {
+    // Reject tips from outdated nodes
+    if let Some(ver) = headers.get("X-TSN-Version").and_then(|v| v.to_str().ok()) {
+        if !crate::network::version_check::version_meets_minimum(ver) {
+            warn!("Rejected tip from outdated peer (version {})", ver);
+            return Err((StatusCode::FORBIDDEN, format!("Node version {} is below minimum {}", ver, crate::network::version_check::MINIMUM_VERSION)));
+        }
+    }
+
     // Parse the hash from hex
     let hash_bytes: [u8; 32] = hex::decode(&req.hash)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid hash hex: {}", e)))?

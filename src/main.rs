@@ -2385,7 +2385,7 @@ async fn cmd_node(
                 for peer in &peers {
                     let url = format!("{}/tip", peer);
                     let body = serde_json::json!({ "height": height, "hash": hash });
-                    match client.post(&url).json(&body).send().await {
+                    match client.post(&url).header("X-TSN-Version", env!("CARGO_PKG_VERSION")).json(&body).send().await {
                         Ok(resp) => {
                             if let Ok(tip_resp) = resp.json::<serde_json::Value>().await {
                                 // Update sync gate with peer's tip
