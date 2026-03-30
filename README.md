@@ -109,7 +109,7 @@ Merkle Node     = Poseidon(domain=5, left, right)
 ├──────────────┼─────────────────────────────────────┼────────────────┤
 │  Storage     │  Wallet (Shielded ZK + BIP39)       │  RPC (REST)    │
 ├──────────────┼─────────────────────────────────────┼────────────────┤
-│  Explorer    │  Faucet (Testnet)                   │  Metrics       │
+│  Explorer    │  Metrics & Monitoring                │  CLI Tools     │
 └──────────────┴─────────────────────────────────────┴────────────────┘
 ```
 
@@ -257,7 +257,8 @@ TSN includes a **stack-based zkVM** with gas metering and ZK execution traces:
 
 | Parameter | Value |
 |-----------|-------|
-| Default Port | 9333 |
+| HTTP API Port | 9333 |
+| P2P Port (libp2p) | 9334 |
 | Block Reward | 50 TSN (92% miner, 5% dev fees, 3% relay pool) |
 | Halving Interval | 4,200,000 blocks (~16 months) |
 | Target Block Time | ~10 seconds |
@@ -300,7 +301,7 @@ New nodes join the network in **seconds** by downloading a compressed state snap
 | **Checkpoint finality** | Every 100 blocks, a checkpoint is created |
 | **Fork ID verification** | Genesis hash checked at sync — prevents silent splits |
 | **Anchor block filter** | Blocks must reference a recent valid ancestor |
-| **P2P version gate** | Disconnect peers below MINIMUM_VERSION |
+| **P2P version gate** | Nodes below MINIMUM_VERSION (v1.3.0) are rejected |
 
 ## Testnet Status
 
@@ -317,7 +318,7 @@ The private testnet is live with **5 nodes** and **29,000+ blocks** mined.
 ## Roadmap
 
 ### Phase 1 — Foundations ✅
-Core blockchain engine: blocks, transactions, UTXO, Poseidon2 hashing, ML-DSA-65 signatures, Proof of Work consensus with MIK anti-Sybil, P2P networking with Kademlia DHT, SledDB storage, shielded wallet, REST API, block explorer, and testnet faucet.
+Core blockchain engine: blocks, transactions, UTXO, Poseidon2 hashing, ML-DSA-65 signatures, Proof of Work consensus with MIK anti-Sybil, P2P networking with Kademlia DHT, SledDB storage, shielded wallet, REST API, and block explorer.
 
 ### Phase 2 — Advanced Features ✅
 Multi-role nodes (Miner, Relay, Light Client), Plonky3 STARK migration (AIR-based proofs via p3-uni-stark), enhanced shielded wallet with BIP39 recovery and viewing keys, hardened fast-sync with state_root verification, security audit (8.1/10 score).
@@ -405,7 +406,7 @@ A cross-chain anonymous DEX built on TSN with AMM pools, escrow P2P, yield farmi
 | Wallet TX History | Not saved | Sent + received persisted (WalletTxRecord) |
 | Received TX Detection | Manual | Automatic at wallet scan |
 | Nullifier Check | At send only | At scan + send (prevents double-spend) |
-| P2P Version Gate | Accept all peers | Disconnect peers below MINIMUM_VERSION |
+| P2P Version Gate | Accept all peers | Reject peers below MINIMUM_VERSION (v1.3.0) |
 | CLI | Multiple flags required | `./tsn miner -t 4` — everything auto-detected |
 | Auto-Update | None | P2P signaling + multi-source download + SHA256 verification |
 
