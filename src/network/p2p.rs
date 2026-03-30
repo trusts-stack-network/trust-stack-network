@@ -315,6 +315,8 @@ async fn p2p_event_loop(
     let mut identified_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
     // Track peer heights (updated via block-announces and identify)
     let mut peer_heights: std::collections::HashMap<PeerId, u64> = std::collections::HashMap::new();
+    // Track peer protocol versions (updated via identify)
+    let mut peer_versions: std::collections::HashMap<PeerId, String> = std::collections::HashMap::new();
 
     // Periodic redial timer for seeds (every 30s if not enough peers)
     let mut redial_interval = tokio::time::interval(Duration::from_secs(30));
@@ -373,10 +375,20 @@ async fn p2p_event_loop(
                                 let _ = swarm.disconnect_peer_id(peer_id);
                                 continue;
                             }
-                            // Signal peer version to auto-update system
+                            // REJECT outdated peers: disconnect if below MINIMUM_VERSION
                             if let Some(ver) = info.protocol_version.strip_prefix("tsn/") {
+                                if !crate::network::version_check::version_meets_minimum(ver) {
+                                    warn!("P2P: disconnecting outdated peer {} — {} (minimum: tsn/{})",
+                                        &peer_id.to_string()[..16], info.protocol_version,
+                                        crate::network::version_check::MINIMUM_VERSION);
+                                    let _ = swarm.disconnect_peer_id(peer_id);
+                                    identified_peers.remove(&peer_id);
+                                    continue;
+                                }
                                 crate::network::auto_update::notify_peer_version(ver);
                             }
+                            // Store peer version
+                            peer_versions.insert(peer_id, info.protocol_version.clone());
                         }
                         // Add discovered addresses to Kademlia
                         for addr in &info.listen_addrs {
@@ -420,6 +432,7 @@ async fn p2p_event_loop(
                         debug!("P2P peer disconnected: {}", peer_id);
                         identified_peers.remove(&peer_id);
                         peer_heights.remove(&peer_id);
+                        peer_versions.remove(&peer_id);
                         event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await.ok();
                     }
                     SwarmEvent::NewListenAddr { address, .. } => {
@@ -446,11 +459,12 @@ async fn p2p_event_loop(
                         }
                     }
                     P2pCommand::GetPeers(reply) => {
+                        let local_proto = format!("tsn/{}", env!("CARGO_PKG_VERSION"));
                         let peers: Vec<PeerInfo> = swarm.connected_peers()
                             .map(|p| PeerInfo {
                                 peer_id: p.to_string(),
                                 height: peer_heights.get(p).copied(),
-                                protocol: "tsn/1.1.0".to_string(),
+                                protocol: peer_versions.get(p).cloned().unwrap_or_else(|| local_proto.clone()),
                             })
                             .collect();
                         reply.send(peers).ok();

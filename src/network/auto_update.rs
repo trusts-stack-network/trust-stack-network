@@ -61,14 +61,18 @@ fn user_agent() -> String {
 static LATEST_PEER_VERSION: Mutex<Option<String>> = Mutex::new(None);
 
 /// Called by the P2P layer when a peer announces its version via Identify.
-/// Only stores the version if it is newer than what we already know.
+/// Only stores the version if it is newer than our LOCAL version.
 pub fn notify_peer_version(version: &str) {
+    // Ignore peers running an older or equal version
+    if !version_less_than(LOCAL_VERSION, version) {
+        return;
+    }
     let mut guard = LATEST_PEER_VERSION.lock().unwrap_or_else(|e| e.into_inner());
-    let dominated = match &*guard {
+    let should_update = match &*guard {
         Some(current) => version_less_than(current, version),
         None => true,
     };
-    if dominated {
+    if should_update {
         info!(peer_version = %version, local = %LOCAL_VERSION, "Peer announced newer version");
         *guard = Some(version.to_string());
     }
