@@ -430,8 +430,23 @@ pub fn verify_signature(binary_sha256: &[u8; 32], signature_hex: &str) -> bool {
 /// 5. Overwrite the current binary.
 /// 6. Set executable permissions (Unix only).
 async fn apply_update(binary_data: &[u8]) -> Result<PathBuf, String> {
-    let current_exe = std::env::current_exe()
-        .map_err(|e| format!("Cannot determine current executable: {}", e))?;
+    let current_exe = {
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("Cannot determine current executable: {}", e))?;
+        // If current_exe doesn't point to a tsn binary (e.g. launched via nohup/bash),
+        // fall back to well-known path /opt/tsn/bin/tsn
+        if !exe.file_name().map(|n| n.to_str().unwrap_or("").starts_with("tsn")).unwrap_or(false) {
+            let fallback = PathBuf::from("/opt/tsn/bin/tsn");
+            if fallback.exists() {
+                info!("current_exe ({}) is not tsn binary, using fallback: {}", exe.display(), fallback.display());
+                fallback
+            } else {
+                exe
+            }
+        } else {
+            exe
+        }
+    };
 
     let current_dir = current_exe
         .parent()
