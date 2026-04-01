@@ -152,9 +152,61 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     }
 
     // Find common ancestor by checking recent blocks
-    // If local height is 0, skip ancestor search — just sync from genesis/fast-sync
+    // If local height is 0, attempt snapshot sync (block-by-block from 0 doesn't work)
+    if local_height == 0 && peer_info.height > 0 {
+        info!("Local height is 0, attempting snapshot sync from {}", peer_id(peer_url));
+        let info_url = format!("{}/snapshot/info", peer_url);
+        if let Ok(resp) = client.get(&info_url)
+            .timeout(Duration::from_secs(10))
+            .send().await
+        {
+            if let Ok(info) = resp.json::<serde_json::Value>().await {
+                if info["available"].as_bool() == Some(true) {
+                    let snap_height = info["height"].as_u64().unwrap_or(0);
+                    if snap_height > 0 {
+                        let snap_hash_str = info["block_hash"].as_str().unwrap_or("");
+                        let dl_url = format!("{}/snapshot/download", peer_url);
+                        if let Ok(resp) = client.get(&dl_url)
+                            .timeout(Duration::from_secs(30))
+                            .send().await
+                        {
+                            if let Ok(compressed) = resp.bytes().await {
+                                use std::io::Read;
+                                let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+                                let mut json_data = Vec::new();
+                                if decoder.read_to_end(&mut json_data).is_ok() {
+                                    if let Ok(snapshot) = serde_json::from_slice::<crate::core::StateSnapshotPQ>(&json_data) {
+                                        let mut block_hash = [0u8; 32];
+                                        if let Ok(bytes) = hex::decode(snap_hash_str) {
+                                            if bytes.len() == 32 { block_hash.copy_from_slice(&bytes); }
+                                        }
+                                        let ci_url = format!("{}/chain/info", peer_url);
+                                        let (diff, next_diff, peer_work) = if let Ok(r) = client.get(&ci_url).send().await {
+                                            let i = r.json::<serde_json::Value>().await.ok();
+                                            let d = i.as_ref().and_then(|v| v["difficulty"].as_u64()).unwrap_or(1000);
+                                            let nd = i.as_ref().and_then(|v| v["next_difficulty"].as_u64()).unwrap_or(d);
+                                            let w = i.as_ref().and_then(|v| v["cumulative_work"].as_u64()).unwrap_or(0);
+                                            (d, nd, w as u128)
+                                        } else { (1000, 1000, 0u128) };
+
+                                        let mut chain = state.blockchain.write()
+                                            .map_err(|e| SyncError::LockPoisoned(format!("Blockchain write lock poisoned: {}", e)))?;
+                                        chain.import_snapshot_at_height(snapshot, snap_height, block_hash, diff, next_diff, peer_work);
+                                        info!("Snapshot sync complete: jumped to height {} from {}", snap_height, peer_id(peer_url));
+                                        return Ok(snap_height);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Snapshot unavailable — fall through to block-by-block (may be slow)
+        warn!("Snapshot sync failed from {} — falling back to block-by-block sync", peer_id(peer_url));
+    }
+
     let sync_from_height = if local_height == 0 {
-        info!("Local height is 0, syncing from scratch (fast-sync)");
         0
     } else if is_fork {
         match find_common_ancestor(&state, &client, peer_url, local_height).await {
