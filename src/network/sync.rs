@@ -92,14 +92,21 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         return Ok(0);
     }
 
-    // Check if peer is ahead OR if we have a fork at the same height
+    // Get local cumulative work for fork resolution (heaviest chain wins, not longest)
+    let local_work = {
+        let chain = state.blockchain.read()
+            .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?;
+        chain.cumulative_work()
+    };
+
+    // Check if peer is ahead by work OR height, or if we have a fork
     let mut is_fork = peer_info.height == local_height && peer_info.latest_hash != local_hash;
-    let peer_ahead = peer_info.height > local_height;
+    let peer_ahead = peer_info.height > local_height || peer_info.cumulative_work > local_work as u128;
 
     if !peer_ahead && !is_fork {
         debug!(
-            "Peer {} is not ahead (peer: {}, local: {})",
-            peer_id(peer_url), peer_info.height, local_height
+            "Peer {} is not ahead (peer h={} w={}, local h={} w={})",
+            peer_id(peer_url), peer_info.height, peer_info.cumulative_work, local_height, local_work
         );
         return Ok(0);
     }
@@ -113,8 +120,8 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                     if peer_block.hash != local_hash {
                         is_fork = true;
                         info!(
-                            "Fork detected with peer {} (peer ahead at {}, diverged at our height {})",
-                            peer_id(peer_url), peer_info.height, local_height
+                            "Fork detected with peer {} (peer ahead at h={} w={}, diverged at our height {})",
+                            peer_id(peer_url), peer_info.height, peer_info.cumulative_work, local_height
                         );
                     }
                 }
@@ -123,11 +130,13 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     }
 
     if is_fork {
-        // SECURITY: Never rollback to a shorter chain
-        if peer_info.height < local_height {
+        // HEAVIEST CHAIN RULE: only switch to a chain with more cumulative work
+        // A shorter chain with more work is valid (e.g. higher difficulty blocks)
+        // A longer chain with less work is a spam attack (easy blocks)
+        if peer_info.cumulative_work <= local_work as u128 {
             warn!(
-                "Ignoring fork from peer {} — peer height {} < local height {}. Never rollback to shorter chain.",
-                peer_id(peer_url), peer_info.height, local_height
+                "Ignoring fork from peer {} — peer work {} <= local work {}. Heaviest chain wins.",
+                peer_id(peer_url), peer_info.cumulative_work, local_work
             );
             return Ok(0);
         }
