@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.6-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.7-blue">
   <img alt="Rust" src="https://img.shields.io/badge/rust-94k+_lines-orange">
   <img alt="Tests" src="https://img.shields.io/badge/tests-369_passing-brightgreen">
   <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
@@ -96,7 +96,7 @@ Merkle Node     = Poseidon(domain=5, left, right)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         TSN Node v1.3.6                              │
+│                         TSN Node v1.3.7                              │
 ├──────────────┬──────────────┬──────────────┬─────────────────────────┤
 │    Core      │    Crypto    │  Consensus   │        Network          │
 │  Block       │  Poseidon2   │  PoW Mining  │  libp2p (GossipSub)     │
@@ -385,10 +385,16 @@ A cross-chain anonymous DEX built on TSN with AMM pools, escrow P2P, yield farmi
 
 ## Changelog
 
-### v1.3.6 — Windows Fix, Node Role Detection & Cross-Platform Checksums
+### v1.3.7 — Self-Healing Nodes: Missing Snapshot Recovery
 
+- **Missing snapshot recovery**: If state snapshot is lost but fast-sync placeholders exist, the node auto-wipes and re-syncs instead of crashing with `Missing block data at height 0`
+- **MINIMUM_VERSION**: bumped to 1.3.7
+
+### v1.3.6 — Windows Fix, Snapshot Sync at Height 0, Node Role Detection
+
+- **Sync loop at height 0**: Nodes stuck at height 0 now use snapshot sync instead of block-by-block
+- **Stuck detection at height 0**: Auto-resync watchdog now catches nodes stuck at height 0
 - **Windows fix**: verification key checksum now normalizes line endings (CRLF → LF) before SHA256
-- **Node role detection**: P2P peers correctly report `miner`/`relay`/`light` role in protocol string
 - **nodes.html fix**: P2P peers fetched from correct API endpoint (shows miner badges correctly)
 - **.gitattributes**: forces LF line endings for verification key files across platforms
 - **MINIMUM_VERSION**: bumped to 1.3.6
