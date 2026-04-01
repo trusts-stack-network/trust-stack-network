@@ -466,7 +466,7 @@ async fn p2p_event_loop(
                         debug!("P2P peer disconnected: {}", peer_id);
                         identified_peers.remove(&peer_id);
                         peer_heights.remove(&peer_id);
-                        peer_versions.remove(&peer_id);
+                        // Keep peer_versions — retain last known protocol/role for display
                         event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await.ok();
                     }
                     SwarmEvent::NewListenAddr { address, .. } => {
@@ -493,7 +493,7 @@ async fn p2p_event_loop(
                         }
                     }
                     P2pCommand::GetPeers(reply) => {
-                        let local_proto = format!("tsn/{}", env!("CARGO_PKG_VERSION"));
+                        let local_proto = format!("tsn/{}/relay", env!("CARGO_PKG_VERSION"));
                         let peers: Vec<PeerInfo> = swarm.connected_peers()
                             .map(|p| PeerInfo {
                                 peer_id: p.to_string(),
