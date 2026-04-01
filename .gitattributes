@@ -1,0 +1,3 @@
+# Force LF line endings for verification keys (SHA256 checksums depend on it)
+circuits/keys/*.json text eol=lf
+circuits/keys/checksums.sha256 text eol=lf

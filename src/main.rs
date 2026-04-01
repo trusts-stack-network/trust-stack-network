@@ -99,8 +99,12 @@ fn find_verification_keys() -> anyhow::Result<(String, String)> {
         let committed_spend = base.join("circuits/keys/spend_vkey.json");
         let committed_output = base.join("circuits/keys/output_vkey.json");
         if committed_spend.exists() && committed_output.exists() {
-            let spend_data = std::fs::read(&committed_spend)?;
-            let output_data = std::fs::read(&committed_output)?;
+            // Read and normalize line endings (strip \r) so checksums match
+            // regardless of platform (Windows CRLF vs Unix LF)
+            let spend_data: Vec<u8> = std::fs::read(&committed_spend)?
+                .into_iter().filter(|&b| b != b'\r').collect();
+            let output_data: Vec<u8> = std::fs::read(&committed_output)?
+                .into_iter().filter(|&b| b != b'\r').collect();
             let spend_hash = hex::encode(Sha256::digest(&spend_data));
             let output_hash = hex::encode(Sha256::digest(&output_data));
             if spend_hash != SPEND_VKEY_SHA256 {
@@ -136,9 +140,11 @@ fn find_verification_keys() -> anyhow::Result<(String, String)> {
     let build_output = "circuits/build/output_vkey.json";
 
     if Path::new(committed_spend).exists() && Path::new(committed_output).exists() {
-        // Verify checksums for committed keys
-        let spend_data = std::fs::read(committed_spend)?;
-        let output_data = std::fs::read(committed_output)?;
+        // Verify checksums for committed keys (normalize CRLF for cross-platform)
+        let spend_data: Vec<u8> = std::fs::read(committed_spend)?
+            .into_iter().filter(|&b| b != b'\r').collect();
+        let output_data: Vec<u8> = std::fs::read(committed_output)?
+            .into_iter().filter(|&b| b != b'\r').collect();
 
         let spend_hash = hex::encode(Sha256::digest(&spend_data));
         let output_hash = hex::encode(Sha256::digest(&output_data));
@@ -2737,8 +2743,8 @@ async fn cmd_node(
                         // Node is making progress — reset stuck counter
                         stuck_consecutive = 0;
                         stuck_last_height = current_height;
-                    } else if current_height == stuck_last_height && stuck_last_height > 0 {
-                        // Same height as last check — query verified peers
+                    } else if current_height == stuck_last_height {
+                        // Same height as last check (including height 0) — query verified peers
                         let mut verified_max_height: u64 = 0;
                         let mut best_peer: Option<String> = None;
                         for peer in &peers_list {

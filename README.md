@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.0-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.6-blue">
   <img alt="Rust" src="https://img.shields.io/badge/rust-94k+_lines-orange">
   <img alt="Tests" src="https://img.shields.io/badge/tests-369_passing-brightgreen">
   <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
@@ -96,7 +96,7 @@ Merkle Node     = Poseidon(domain=5, left, right)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         TSN Node v1.3.0                              │
+│                         TSN Node v1.3.6                              │
 ├──────────────┬──────────────┬──────────────┬─────────────────────────┤
 │    Core      │    Crypto    │  Consensus   │        Network          │
 │  Block       │  Poseidon2   │  PoW Mining  │  libp2p (GossipSub)     │
@@ -265,7 +265,7 @@ TSN includes a **stack-based zkVM** with gas metering and ZK execution traces:
 | Difficulty Adjustment | LWMA per-block (N=45 window) |
 | P2P Protocol | libp2p GossipSub mesh (D=6, heartbeat 700ms) |
 | Max Reorg Depth | 100 blocks |
-| Min Difficulty | 1000 |
+| Min Difficulty | 1,500,000 |
 | Nonce Size | 512 bits |
 | Max TX Size | 1 MB |
 | Max Supply | ~420,000,000 TSN (~10 years to reach) |
@@ -305,7 +305,7 @@ New nodes join the network in **seconds** by downloading a compressed state snap
 
 ## Testnet Status
 
-The private testnet is live with **5 nodes** and **29,000+ blocks** mined.
+The private testnet is live with **5 nodes** and **11,700+ blocks** mined.
 
 > **TSN tokens currently have no value.** The testnet is for development and testing only. Tokens can be mined for free by anyone running a node. Economic value will only be introduced at the incentivized testnet phase.
 
@@ -385,6 +385,14 @@ A cross-chain anonymous DEX built on TSN with AMM pools, escrow P2P, yield farmi
 
 ## Changelog
 
+### v1.3.6 — Windows Fix, Node Role Detection & Cross-Platform Checksums
+
+- **Windows fix**: verification key checksum now normalizes line endings (CRLF → LF) before SHA256
+- **Node role detection**: P2P peers correctly report `miner`/`relay`/`light` role in protocol string
+- **nodes.html fix**: P2P peers fetched from correct API endpoint (shows miner badges correctly)
+- **.gitattributes**: forces LF line endings for verification key files across platforms
+- **MINIMUM_VERSION**: bumped to 1.3.6
+
 ### v1.3.0 — Chain Reset, Halving Fix & Sync Stability
 
 - **Halving interval**: 210,000 → **4,200,000 blocks** (~16 months per halving, supply max in ~10 years)
@@ -406,7 +414,7 @@ A cross-chain anonymous DEX built on TSN with AMM pools, escrow P2P, yield farmi
 | Wallet TX History | Not saved | Sent + received persisted (WalletTxRecord) |
 | Received TX Detection | Manual | Automatic at wallet scan |
 | Nullifier Check | At send only | At scan + send (prevents double-spend) |
-| P2P Version Gate | Accept all peers | Reject peers below MINIMUM_VERSION (v1.3.0) |
+| P2P Version Gate | Accept all peers | Reject peers below MINIMUM_VERSION |
 | CLI | Multiple flags required | `./tsn miner -t 4` — everything auto-detected |
 | Auto-Update | None | P2P signaling + multi-source download + SHA256 verification |
 
