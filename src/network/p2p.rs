@@ -174,10 +174,16 @@ impl P2pNode {
                     gossipsub_config,
                 )?;
 
-                // Kademlia DHT
-                let mut kademlia = kad::Behaviour::new(
+                // Kademlia DHT with explicit config
+                let mut kad_config = kad::Config::default();
+                kad_config.set_query_timeout(Duration::from_secs(60));
+                kad_config.set_parallelism(std::num::NonZeroUsize::new(3).unwrap());
+                kad_config.set_record_ttl(Some(Duration::from_secs(3600)));
+                kad_config.set_provider_record_ttl(Some(Duration::from_secs(3600)));
+                let mut kademlia = kad::Behaviour::with_config(
                     peer_id,
                     kad::store::MemoryStore::new(peer_id),
+                    kad_config,
                 );
                 kademlia.set_mode(Some(kad::Mode::Server));
 
@@ -222,6 +228,7 @@ impl P2pNode {
             })?
             .with_swarm_config(|c| {
                 c.with_idle_connection_timeout(Duration::from_secs(120))
+                 .with_max_negotiating_inbound_streams(128)
             })
             .build();
 
@@ -317,6 +324,9 @@ async fn p2p_event_loop(
     let mut peer_heights: std::collections::HashMap<PeerId, u64> = std::collections::HashMap::new();
     // Track peer protocol versions (updated via identify)
     let mut peer_versions: std::collections::HashMap<PeerId, String> = std::collections::HashMap::new();
+    // Backoff for outdated peers: don't spam disconnect logs every 30s
+    // Maps PeerID → (next_allowed_log_time, disconnect_count)
+    let mut outdated_backoff: std::collections::HashMap<PeerId, (std::time::Instant, u32)> = std::collections::HashMap::new();
 
     // Periodic redial timer for seeds (every 30s if not enough peers)
     let mut redial_interval = tokio::time::interval(Duration::from_secs(30));
@@ -378,13 +388,32 @@ async fn p2p_event_loop(
                             // REJECT outdated peers: disconnect if below MINIMUM_VERSION
                             if let Some(ver) = info.protocol_version.strip_prefix("tsn/") {
                                 if !crate::network::version_check::version_meets_minimum(ver) {
-                                    warn!("P2P: disconnecting outdated peer {} — {} (minimum: tsn/{})",
-                                        &peer_id.to_string()[..16], info.protocol_version,
-                                        crate::network::version_check::MINIMUM_VERSION);
                                     let _ = swarm.disconnect_peer_id(peer_id);
                                     identified_peers.remove(&peer_id);
+
+                                    // Backoff logging: escalate silence from 2min → 5min → 10min → 30min
+                                    let now = std::time::Instant::now();
+                                    let (next_log, count) = outdated_backoff
+                                        .entry(peer_id)
+                                        .or_insert((now, 0));
+                                    if now >= *next_log {
+                                        let backoff_secs = match *count {
+                                            0 => 0,       // first time: log immediately
+                                            1 => 120,     // 2 min
+                                            2 => 300,     // 5 min
+                                            3 => 600,     // 10 min
+                                            _ => 1800,    // 30 min
+                                        };
+                                        *count += 1;
+                                        warn!("P2P: disconnecting outdated peer {} — {} (minimum: tsn/{}) [seen {} times]",
+                                            &peer_id.to_string()[..16], info.protocol_version,
+                                            crate::network::version_check::MINIMUM_VERSION, *count);
+                                        *next_log = now + std::time::Duration::from_secs(backoff_secs);
+                                    }
                                     continue;
                                 }
+                                // Peer updated! Clear any backoff entry
+                                outdated_backoff.remove(&peer_id);
                                 crate::network::auto_update::notify_peer_version(ver);
                             }
                             // Store peer version
