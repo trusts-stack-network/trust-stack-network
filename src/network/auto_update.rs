@@ -308,6 +308,31 @@ async fn fetch_expected_sha256(
     manifest.assets.get(&asset_name).map(|a| a.sha256.clone())
 }
 
+/// Fetch the Ed25519 signature hex string for a given version from the fallback manifest.
+async fn fetch_signature_hex(
+    client: &reqwest::Client,
+    version: &str,
+) -> Option<String> {
+    let resp = client
+        .get(FALLBACK_RELEASE_URL)
+        .header("User-Agent", user_agent())
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?;
+
+    let manifest: ReleaseManifest = resp.json().await.ok()?;
+    if manifest.version.trim_start_matches('v') != version.trim_start_matches('v') {
+        return None;
+    }
+
+    if manifest.signature.is_empty() {
+        None
+    } else {
+        Some(manifest.signature)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Download & verification
 // ---------------------------------------------------------------------------
@@ -373,17 +398,22 @@ fn compute_sha256(data: &[u8]) -> [u8; 32] {
 
 /// Verify an Ed25519 signature over a SHA256 hash.
 ///
-/// **Phase 1**: This is a placeholder that always returns `true` with a warning.
-/// Ed25519 verification using `ed25519-dalek` will be wired in Phase 2 once the
-/// dependency is added to `Cargo.toml`.
+/// **Phase 2**: Full Ed25519 verification using `ed25519-dalek`.
 ///
-/// The intended scheme: the release pipeline signs `SHA256(binary)` with the
-/// private key corresponding to [`RELEASE_SIGNING_PUBKEY`]. This function
-/// reconstructs the public key, then verifies the signature over the 32-byte
-/// hash.
+/// The release pipeline signs `SHA256(binary)` with the private key
+/// corresponding to [`RELEASE_SIGNING_PUBKEY`]. This function reconstructs
+/// the public key and verifies the signature over the 32-byte hash.
+///
+/// For backwards compatibility during rollout, an empty signature triggers a
+/// warning but returns `true`. This will become mandatory in v1.3.6.
 pub fn verify_signature(binary_sha256: &[u8; 32], signature_hex: &str) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
     if signature_hex.is_empty() {
-        warn!("No Ed25519 signature provided — skipping signature verification (Phase 1)");
+        warn!(
+            "No Ed25519 signature provided — skipping verification \
+             (backwards compat, will be mandatory in v1.3.6)"
+        );
         return true;
     }
 
@@ -399,21 +429,36 @@ pub fn verify_signature(binary_sha256: &[u8; 32], signature_hex: &str) -> bool {
         }
     };
 
-    // Phase 2: ed25519-dalek verification will go here.
-    //
-    //   use ed25519_dalek::{PublicKey, Signature, Verifier};
-    //   let pubkey = PublicKey::from_bytes(&RELEASE_SIGNING_PUBKEY).map_err(|_| false)?;
-    //   let signature = Signature::from_bytes(&sig_bytes).map_err(|_| false)?;
-    //   pubkey.verify(binary_sha256, &signature).is_ok()
-    //
-    // For now, log and accept if SHA256 was already validated.
-    let _ = sig_bytes;
-    let _ = binary_sha256;
-    warn!(
-        "Ed25519 signature verification not yet implemented (Phase 1). \
-         Relying on SHA256 + HTTPS integrity only."
-    );
-    true
+    // Parse the hardcoded public key
+    let pubkey = match VerifyingKey::from_bytes(&RELEASE_SIGNING_PUBKEY) {
+        Ok(k) => k,
+        Err(e) => {
+            error!(error = %e, "Failed to parse release signing public key");
+            return false;
+        }
+    };
+
+    // Parse the 64-byte signature
+    let sig_array: [u8; 64] = match sig_bytes.try_into() {
+        Ok(a) => a,
+        Err(_) => {
+            error!("Signature byte conversion failed");
+            return false;
+        }
+    };
+    let signature = Signature::from_bytes(&sig_array);
+
+    // Verify signature over the 32-byte SHA256 hash
+    match pubkey.verify(binary_sha256, &signature) {
+        Ok(()) => {
+            info!("Ed25519 release signature verified successfully");
+            true
+        }
+        Err(e) => {
+            error!(error = %e, "Ed25519 signature verification FAILED — rejecting update");
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +600,11 @@ fn find_binary_in_dir(dir: &Path) -> Result<PathBuf, String> {
 /// - If running under systemd, exits cleanly (code 0) so the service manager
 ///   restarts us with the new binary.
 /// - Otherwise, re-execs the new binary with the same command-line arguments.
-fn restart_node() -> ! {
+///
+/// `installed_path`: the path where the NEW binary was installed by `apply_update`.
+/// We use this instead of `current_exe()` because after rename+copy,
+/// `/proc/self/exe` still points to the OLD binary (renamed to .backup).
+fn restart_node(installed_path: Option<PathBuf>) -> ! {
     let args: Vec<String> = std::env::args().collect();
     info!(args = ?args, "Restarting node with updated binary...");
 
@@ -565,11 +614,23 @@ fn restart_node() -> ! {
         std::process::exit(0);
     }
 
+    // Determine which binary to exec:
+    // 1. Use the installed path from apply_update (correct after rename)
+    // 2. Fallback to args[0] resolved (the command the user typed)
+    // 3. Last resort: current_exe() (may point to .backup after rename)
+    let exe = installed_path
+        .or_else(|| {
+            let arg0 = PathBuf::from(&args[0]);
+            std::fs::canonicalize(&arg0).ok()
+        })
+        .unwrap_or_else(|| std::env::current_exe().expect("Cannot determine executable path"));
+
+    info!(exe = %exe.display(), "Re-exec target binary");
+
     // Re-exec with same arguments
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let exe = std::env::current_exe().expect("Cannot determine executable path");
         let err = std::process::Command::new(&exe)
             .args(&args[1..])
             .exec();
@@ -580,7 +641,6 @@ fn restart_node() -> ! {
 
     #[cfg(not(unix))]
     {
-        let exe = std::env::current_exe().expect("Cannot determine executable path");
         match std::process::Command::new(&exe).args(&args[1..]).spawn() {
             Ok(_) => std::process::exit(0),
             Err(e) => {
@@ -647,11 +707,42 @@ pub async fn auto_update_loop() {
 
                 match download_update(&client, &update.download_url, &sha256).await {
                     Ok(data) => {
+                        // Ed25519 signature verification (Phase 2)
+                        let binary_hash = compute_sha256(&data);
+
+                        // Fetch signature from fallback manifest
+                        let sig_hex = fetch_signature_hex(&client, &update.version).await;
+                        let sig_ref = sig_hex.as_deref().unwrap_or("");
+
+                        if sig_ref.is_empty() {
+                            warn!(
+                                version = %update.version,
+                                "No Ed25519 signature found in manifest — signature check SKIPPED"
+                            );
+                        } else {
+                            info!(
+                                version = %update.version,
+                                "Ed25519 signature found in manifest — verifying..."
+                            );
+                        }
+
+                        if !verify_signature(&binary_hash, sig_ref) {
+                            error!(
+                                "Ed25519 signature verification FAILED for v{}. Aborting update.",
+                                update.version
+                            );
+                            continue;
+                        }
+
+                        if !sig_ref.is_empty() {
+                            info!("Ed25519 signature VERIFIED for v{}", update.version);
+                        }
+
                         info!(bytes = data.len(), "Download verified, applying update...");
                         match apply_update(&data).await {
-                            Ok(_) => {
+                            Ok(installed_path) => {
                                 info!("Update to v{} applied successfully, restarting...", update.version);
-                                restart_node();
+                                restart_node(Some(installed_path));
                             }
                             Err(e) => error!(error = %e, "Failed to apply update"),
                         }
@@ -723,7 +814,7 @@ pub async fn cmd_update() -> Result<(), String> {
     println!("Update installed to: {}", installed_path.display());
     println!("Restarting node...");
 
-    restart_node();
+    restart_node(Some(installed_path));
 }
 
 // ---------------------------------------------------------------------------
@@ -785,6 +876,14 @@ mod tests {
         let hash = compute_sha256(b"test");
         // Valid hex but wrong length (not 64 bytes)
         assert!(!verify_signature(&hash, "abcdef"));
+    }
+
+    #[test]
+    fn test_verify_signature_invalid_sig() {
+        let hash = compute_sha256(b"test data");
+        // Valid hex, correct length (64 bytes = 128 hex chars), but wrong signature
+        let fake_sig = "a".repeat(128);
+        assert!(!verify_signature(&hash, &fake_sig));
     }
 
     #[test]

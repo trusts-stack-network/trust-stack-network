@@ -2271,7 +2271,12 @@ async fn cmd_node(
             let p2p = P2pNode::start(p2p_config).await
                 .expect("FATAL: P2P layer failed to start — node cannot propagate blocks");
 
-            println!("  P2P:          {} (port {})", p2p.peer_id, p2p_port);
+            println!();
+            println!("  ╔═══════════════════════════════════════════╗");
+            println!("  ║  Node ID: {}  ║", &p2p.peer_id.to_string()[..38]);
+            println!("  ╚═══════════════════════════════════════════╝");
+            println!("  Full PeerID: {}", p2p.peer_id);
+            println!("  P2P port:    {}", p2p_port);
 
             // Store PeerID in AppState for /node/info endpoint
             {
@@ -2550,6 +2555,9 @@ async fn cmd_node(
             let mut unaccepted_count: u32 = 0;
             let mut resync_attempts: u32 = 0;
             let mut last_resync_height: u64 = 0;
+            // Auto-resync stuck detection
+            let mut stuck_last_height: u64 = 0;
+            let mut stuck_consecutive: u32 = 0;
 
             loop {
                 // Post-reorg cooldown: wait once for network to stabilize before mining
@@ -2711,6 +2719,119 @@ async fn cmd_node(
                             }
                             continue;
                         }
+                    }
+                }
+
+                // Auto-resync: detect stuck node and trigger full wipe+resync
+                if !force_mine {
+                    let current_height = mine_state.blockchain.read().unwrap().height();
+                    let sync_client = mine_state.http_client.clone();
+                    let peers_list = mine_state.peers.read().unwrap().clone();
+
+                    // Check if height changed since last stuck check
+                    if current_height > stuck_last_height {
+                        // Node is making progress — reset stuck counter
+                        stuck_consecutive = 0;
+                        stuck_last_height = current_height;
+                    } else if current_height == stuck_last_height && stuck_last_height > 0 {
+                        // Same height as last check — query verified peers
+                        let mut verified_max_height: u64 = 0;
+                        let mut best_peer: Option<String> = None;
+                        for peer in &peers_list {
+                            let tip_url = format!("{}/tip", peer);
+                            if let Ok(resp) = sync_client.get(&tip_url)
+                                .timeout(std::time::Duration::from_secs(3))
+                                .send().await
+                            {
+                                if let Ok(tip) = resp.json::<serde_json::Value>().await {
+                                    let h = tip["height"].as_u64().unwrap_or(0);
+                                    if h > 0 && h > verified_max_height {
+                                        verified_max_height = h;
+                                        best_peer = Some(peer.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        let gap = verified_max_height.saturating_sub(current_height);
+                        if verified_max_height > 0 && gap > 50 {
+                            stuck_consecutive += 1;
+                            tracing::warn!(
+                                "Stuck check #{}: node at height {}, peers at {} (gap {})",
+                                stuck_consecutive, current_height, verified_max_height, gap
+                            );
+
+                            if stuck_consecutive >= 3 {
+                                tracing::warn!(
+                                    "Node stuck at height {} for {} checks, peers at {}. Auto-resyncing...",
+                                    current_height, stuck_consecutive, verified_max_height
+                                );
+
+                                // Full wipe via reset_for_resync
+                                {
+                                    let mut chain = mine_state.blockchain.write().unwrap();
+                                    chain.reset_for_resync();
+                                }
+
+                                // Attempt snapshot sync from best peer
+                                if let Some(peer_url) = best_peer {
+                                    let info_url = format!("{}/snapshot/info", peer_url);
+                                    if let Ok(resp) = sync_client.get(&info_url).send().await {
+                                        if let Ok(info) = resp.json::<serde_json::Value>().await {
+                                            if info["available"].as_bool() == Some(true) {
+                                                let snap_height = info["height"].as_u64().unwrap_or(0);
+                                                let highest_cp = crate::config::HARDCODED_CHECKPOINTS.iter()
+                                                    .map(|(h, _)| *h).max().unwrap_or(0);
+                                                if snap_height > 0 && snap_height >= highest_cp {
+                                                    let snap_hash_str = info["block_hash"].as_str().unwrap_or("");
+                                                    let dl_url = format!("{}/snapshot/download", peer_url);
+                                                    if let Ok(resp) = sync_client.get(&dl_url).send().await {
+                                                        if let Ok(compressed) = resp.bytes().await {
+                                                            use std::io::Read;
+                                                            let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+                                                            let mut json_data = Vec::new();
+                                                            if decoder.read_to_end(&mut json_data).is_ok() {
+                                                                if let Ok(snapshot) = serde_json::from_slice::<tsn::core::StateSnapshotPQ>(&json_data) {
+                                                                    let mut block_hash = [0u8; 32];
+                                                                    if let Ok(bytes) = hex::decode(snap_hash_str) {
+                                                                        if bytes.len() == 32 { block_hash.copy_from_slice(&bytes); }
+                                                                    }
+                                                                    let ci_url = format!("{}/chain/info", peer_url);
+                                                                    let (diff, next_diff, peer_work) = if let Ok(r) = sync_client.get(&ci_url).send().await {
+                                                                        let i = r.json::<serde_json::Value>().await.ok();
+                                                                        let d = i.as_ref().and_then(|v| v["difficulty"].as_u64()).unwrap_or(1000);
+                                                                        let nd = i.as_ref().and_then(|v| v["next_difficulty"].as_u64()).unwrap_or(d);
+                                                                        let w = i.as_ref().and_then(|v| v["cumulative_work"].as_u64()).unwrap_or(0);
+                                                                        (d, nd, w as u128)
+                                                                    } else { (1000, 1000, 0u128) };
+
+                                                                    let mut chain = mine_state.blockchain.write().unwrap();
+                                                                    chain.import_snapshot_at_height(snapshot, snap_height, block_hash, diff, next_diff, peer_work);
+                                                                    tracing::info!("Auto-resync complete: jumped to height {} from peer {}", snap_height, peer_url);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Reset stuck tracking after resync attempt
+                                stuck_consecutive = 0;
+                                stuck_last_height = 0;
+                                resync_attempts = 0;
+                                last_resync_height = 0;
+                                continue;
+                            }
+                        } else {
+                            // Gap is small or no peers — not stuck
+                            stuck_consecutive = 0;
+                        }
+                    } else {
+                        // First check or height 0 — initialize tracking
+                        stuck_last_height = current_height;
                     }
                 }
 
