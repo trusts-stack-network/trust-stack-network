@@ -1853,47 +1853,11 @@ async fn cmd_node(
     let db_path = format!("{}/blockchain", data_dir);
     let mut blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
 
-    // Fork detection at startup: compare cumulative_work with peers
-    // A node on a fork chain may have a HIGHER height but LOWER cumulative_work
-    // (e.g. mined solo at MIN_DIFFICULTY). Detect this and resync before doing anything.
-    if fast_sync && !peers.is_empty() {
-        let local_height = blockchain.height();
-        let local_work = blockchain.cumulative_work();
-        let startup_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?;
-
-        let mut heavier_peer: Option<(String, u64, u128)> = None;
-        let mut consensus_count = 0u32;
-        for peer_url in &peers {
-            let ci_url = format!("{}/chain/info", peer_url);
-            if let Ok(resp) = startup_client.get(&ci_url).send().await {
-                if let Ok(info) = resp.json::<serde_json::Value>().await {
-                    let peer_height = info["height"].as_u64().unwrap_or(0);
-                    let peer_work = info["cumulative_work"].as_u64().unwrap_or(0) as u128;
-                    let peer_hash = info["latest_hash"].as_str().unwrap_or("");
-
-                    if peer_work > local_work && peer_hash != hex::encode(blockchain.latest_hash()) {
-                        consensus_count += 1;
-                        if heavier_peer.as_ref().map_or(true, |(_,_,w)| peer_work > *w) {
-                            heavier_peer = Some((peer_url.clone(), peer_height, peer_work));
-                        }
-                    }
-                }
-            }
-        }
-
-        // If 2+ peers have heavier chain, we're on a fork → reset and resync
-        if consensus_count >= 2 {
-            if let Some((peer_url, peer_height, peer_work)) = &heavier_peer {
-                println!("⚠ FORK DETECTED at startup!");
-                println!("  Local:  height={}, cumulative_work={}", local_height, local_work);
-                println!("  Network: height={}, cumulative_work={} ({} peers agree)", peer_height, peer_work, consensus_count);
-                println!("  Resetting local chain and syncing from network...");
-                blockchain.reset_for_resync();
-            }
-        }
-    }
+    // NOTE: Startup fork detection was removed in v1.3.4 — it caused false positives
+    // when deploying to multiple nodes simultaneously (peers not yet ready → cumulative_work
+    // mismatch → incorrectly wiped the chain). The post-mining fork check (comparing
+    // cumulative_work after each mined block, see fork check section below) is sufficient
+    // and doesn't have this race condition.
 
     // Fast sync: paginated block download from peers
     // Works for fresh nodes (height=0) AND nodes that are behind
