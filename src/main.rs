@@ -2265,7 +2265,7 @@ async fn cmd_node(
                 bootstrap_peers: Vec::new(),
                 dial_seeds,
                 relay_server: node_role == NodeRole::Miner,
-                protocol_version: format!("tsn/{}", env!("CARGO_PKG_VERSION")),
+                protocol_version: format!("tsn/{}/{}", env!("CARGO_PKG_VERSION"), node_role),
             };
 
             let p2p = P2pNode::start(p2p_config).await

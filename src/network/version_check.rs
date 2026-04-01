@@ -41,8 +41,11 @@ pub fn is_version_ok() -> bool {
 }
 
 /// Parse a semver string into (major, minor, patch) for comparison.
+/// Handles versions with role suffix like "1.3.5/miner" → strips everything after '/'.
 pub fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
-    let parts: Vec<&str> = v.split('.').collect();
+    // Strip role suffix (e.g. "1.3.5/miner" → "1.3.5")
+    let ver = v.split('/').next().unwrap_or(v);
+    let parts: Vec<&str> = ver.split('.').collect();
     if parts.len() != 3 {
         return None;
     }
