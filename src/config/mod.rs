@@ -239,6 +239,18 @@ pub const CHECKPOINT_ENABLED: bool = true;
 /// Inspired by Dilithion's MAX_REORG_DEPTH = 100.
 pub const MAX_REORG_DEPTH: u64 = 100;
 
+/// Hardcoded checkpoints — blocks that MUST be in the canonical chain.
+/// Any chain that doesn't include these exact hashes at these heights is rejected.
+/// This prevents fork chains (e.g. mined from genesis at low difficulty) from
+/// overtaking the legitimate chain via cumulative_work.
+/// Format: (height, block_hash_hex)
+///
+/// NOTE: Dynamic checkpoints (every CHECKPOINT_INTERVAL blocks) are computed
+/// automatically at startup from the existing chain and updated as new blocks
+/// arrive. They persist across restarts. Hardcoded checkpoints are only needed
+/// for bootstrap protection on a brand-new node with no chain data.
+pub const HARDCODED_CHECKPOINTS: &[(u64, &str)] = &[];
+
 // ============================================================================
 // Genesis Verification
 // ============================================================================

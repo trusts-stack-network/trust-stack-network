@@ -169,6 +169,15 @@ impl ForkChoice {
         
         // Check if this is an orphan (parent not known)
         if !self.blocks.contains_key(&parent_hash) && parent_hash != [0u8; 32] {
+            // Cap orphans to prevent memory exhaustion from fork chain spam
+            const MAX_ORPHANS: usize = 500;
+            if self.orphans.len() >= MAX_ORPHANS {
+                tracing::warn!(
+                    "Orphan pool full ({} blocks), dropping incoming orphan {}",
+                    self.orphans.len(), hex::encode(block_hash)
+                );
+                return Ok(false);
+            }
             tracing::debug!(
                 "Adding orphan block {} (parent: {})",
                 hex::encode(block_hash),

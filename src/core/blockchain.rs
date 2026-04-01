@@ -926,10 +926,30 @@ impl ShieldedBlockchain {
         }
     }
 
+    /// Check if a block hash at a given height violates a hardcoded checkpoint.
+    /// Returns Err if the hash doesn't match a known checkpoint at this height.
+    /// Returns Ok(()) if height is not a checkpoint or if the hash matches.
+    pub fn validate_against_hardcoded_checkpoints(height: u64, hash: &[u8; 32]) -> Result<(), BlockchainError> {
+        let hash_hex = hex::encode(hash);
+        for &(cp_height, cp_hash) in crate::config::HARDCODED_CHECKPOINTS {
+            if height == cp_height && hash_hex != cp_hash {
+                tracing::warn!(
+                    "REJECTED: block at height {} has hash {} but hardcoded checkpoint expects {}",
+                    height, hash_hex, cp_hash
+                );
+                return Err(BlockchainError::CheckpointViolation(cp_height));
+            }
+        }
+        Ok(())
+    }
+
     /// Internal: insert a block into the chain (shared by add_block and add_block_trusted).
     fn insert_block_internal(&mut self, block: ShieldedBlock, full_mode: bool) -> Result<(), BlockchainError> {
         let hash = block.hash();
         let new_height = self.height_index.len() as u64;
+
+        // v1.3.3: validate against hardcoded checkpoints
+        Self::validate_against_hardcoded_checkpoints(new_height, &hash)?;
 
         // Persist block and nullifiers
         if let Some(ref db) = self.db {
@@ -1049,7 +1069,16 @@ impl ShieldedBlockchain {
 
         // Do we have the parent block? Check RAM + DB
         if !self.has_block(&block.header.prev_hash) {
-            // Store as orphan
+            // Cap orphans to prevent memory exhaustion from fork chain spam
+            const MAX_ORPHANS: usize = 500;
+            if self.orphans.len() >= MAX_ORPHANS {
+                tracing::warn!(
+                    "Orphan pool full ({} blocks), dropping incoming orphan {}",
+                    self.orphans.len(),
+                    hex::encode(block_hash)
+                );
+                return Ok(false);
+            }
             self.orphans.insert(block_hash, block);
             return Ok(false);
         }
@@ -1173,6 +1202,10 @@ impl ShieldedBlockchain {
     fn reorganize_to_block(&mut self, new_tip: ShieldedBlock) -> Result<(), BlockchainError> {
         let new_tip_height = new_tip.coinbase.height;
         let current_height = self.height();
+        let new_tip_hash = new_tip.hash();
+
+        // v1.3.3: validate the new tip against hardcoded checkpoints
+        Self::validate_against_hardcoded_checkpoints(new_tip_height, &new_tip_hash)?;
 
         // SECURITY: Reject reorgs deeper than MAX_REORG_DEPTH
         if current_height > new_tip_height && current_height - new_tip_height > Self::MAX_REORG_DEPTH {
