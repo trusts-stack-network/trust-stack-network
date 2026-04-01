@@ -176,6 +176,27 @@ impl ShieldedBlockchain {
             let start_height = snapshot_height.map(|h| h + 1).unwrap_or(0);
             let blocks_to_replay = height - start_height + 1;
 
+            // SAFETY: if no snapshot exists but we have fast-sync placeholders,
+            // replaying from height 0 will fail (placeholder blocks have no data).
+            // Detect this and wipe the DB to trigger a fresh fast-sync.
+            let fast_sync_base_check: u64 = db
+                .get_metadata("fast_sync_base_height")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            if snapshot_height.is_none() && fast_sync_base_check > 0 && start_height < fast_sync_base_check {
+                tracing::warn!(
+                    "Snapshot missing but fast-sync placeholders exist (base={}). \
+                     Cannot replay from height {}. Wiping DB for fresh sync.",
+                    fast_sync_base_check, start_height
+                );
+                // Wipe and return empty blockchain — caller will fast-sync from peers
+                drop(db);
+                let _ = std::fs::remove_dir_all(db_path);
+                return Self::open(db_path, difficulty);
+            }
+
             // Load full height index via sequential scan (much faster than N individual lookups)
             tracing::info!("Loading height index...");
             let raw_hashes = db.load_all_block_hashes()
