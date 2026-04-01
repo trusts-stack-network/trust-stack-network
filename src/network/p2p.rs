@@ -371,12 +371,16 @@ async fn p2p_event_loop(
                     SwarmEvent::Behaviour(TsnBehaviourEvent::Identify(
                         identify::Event::Received { peer_id, info, .. }
                     )) => {
-                        // Only log first identification per peer (avoid spam)
-                        if identified_peers.insert(peer_id) {
-                            info!("P2P: identified peer {} — {}",
-                                &peer_id.to_string()[..16],
-                                info.protocol_version,
-                            );
+                        // Process peer identification (log only first time or if not in backoff)
+                        {
+                            let is_new = identified_peers.insert(peer_id);
+                            let in_backoff = outdated_backoff.contains_key(&peer_id);
+                            if is_new && !in_backoff {
+                                info!("P2P: identified peer {} — {}",
+                                    &peer_id.to_string()[..16],
+                                    info.protocol_version,
+                                );
+                            }
 
                             // FORK PROTECTION: disconnect peers with incompatible protocol version
                             if !info.protocol_version.starts_with("tsn/") {
@@ -389,7 +393,7 @@ async fn p2p_event_loop(
                             if let Some(ver) = info.protocol_version.strip_prefix("tsn/") {
                                 if !crate::network::version_check::version_meets_minimum(ver) {
                                     let _ = swarm.disconnect_peer_id(peer_id);
-                                    identified_peers.remove(&peer_id);
+                                    // Don't remove from identified_peers — prevents re-logging on reconnect
 
                                     // Backoff logging: escalate silence from 2min → 5min → 10min → 30min
                                     let now = std::time::Instant::now();
@@ -412,8 +416,9 @@ async fn p2p_event_loop(
                                     }
                                     continue;
                                 }
-                                // Peer updated! Clear any backoff entry
+                                // Peer updated! Clear backoff and re-allow identification logging
                                 outdated_backoff.remove(&peer_id);
+                                identified_peers.remove(&peer_id);
                                 crate::network::auto_update::notify_peer_version(ver);
                             }
                             // Store peer version
