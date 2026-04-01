@@ -2265,7 +2265,11 @@ async fn cmd_node(
                 bootstrap_peers: Vec::new(),
                 dial_seeds,
                 relay_server: node_role == NodeRole::Miner,
-                protocol_version: format!("tsn/{}/{}", env!("CARGO_PKG_VERSION"), node_role),
+                // Use actual mining status for protocol role (not node_role which defaults to miner)
+                protocol_version: format!("tsn/{}/{}", env!("CARGO_PKG_VERSION"),
+                    if miner_info.is_some() && node_role == NodeRole::Miner { "miner" }
+                    else if node_role == NodeRole::LightClient { "light" }
+                    else { "relay" }),
             };
 
             let p2p = P2pNode::start(p2p_config).await
