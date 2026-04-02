@@ -80,6 +80,12 @@ pub struct AppState {
     pub orphan_count: std::sync::atomic::AtomicU64,
     /// Total blocks received that triggered a reorg
     pub reorg_count: std::sync::atomic::AtomicU64,
+    /// Reorg lock: WRITE during rollback+resync, READ during mining template+add_block.
+    /// Prevents mining from producing stale blocks while a reorg is in progress.
+    pub reorg_lock: TokioRwLock<()>,
+    /// Banned peer URLs with expiry timestamps (Instant).
+    /// Peers are banned for sending checkpoint-violating or incompatible chains.
+    pub banned_peers: RwLock<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 /// Pre-generated snapshot cached in memory for fast serving.

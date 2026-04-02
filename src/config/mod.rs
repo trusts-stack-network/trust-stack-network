@@ -250,10 +250,17 @@ pub const MAX_REORG_DEPTH: u64 = 100;
 /// arrive. They persist across restarts. Hardcoded checkpoints are only needed
 /// for bootstrap protection on a brand-new node with no chain data.
 ///
-/// v1.4.0: Empty for now — will be populated after chain stabilizes post-upgrade.
-/// To add checkpoints: run `./tsn` on a trusted node, note the block hashes at
-/// milestone heights (e.g. every 10000 blocks), and add them here.
-pub const HARDCODED_CHECKPOINTS: &[(u64, &str)] = &[];
+/// v1.5.0: Populated from the canonical chain on 2 April 2026.
+/// Any node whose chain doesn't match these hashes at these heights will
+/// be forced to re-sync from peers at startup.
+pub const HARDCODED_CHECKPOINTS: &[(u64, &str)] = &[
+    (18500, "000005a4699a65eb7deaccd33690970da9e621bd742a6b903fdc904ef2310034"),
+    (19000, "000005b6f4b776aac2ae85c3f8e0445bb5950171af5a20c0ee178de935835010"),
+    (19500, "000003326eaabcd8b2786329de5b301d9172d72f717d8a7845310bb8ee0f94b9"),
+    (20000, "00000ab7e29129de8f7d82fe073512aed2684f142fba3ab116d711d3232b42e9"),
+    (20500, "000002dd180f84e9d6af84a9ab0cf57843a1609777585c50ac340a7e2e61e42f"),
+    (21000, "0000013119fc0b8b1e7470472c364d2cb566b4df33c192a1edfa31d4f657d571"),
+];
 
 // ============================================================================
 // Genesis Verification

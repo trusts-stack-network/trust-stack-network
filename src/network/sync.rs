@@ -28,6 +28,17 @@ fn sanitize_error(e: &dyn std::fmt::Display) -> String {
 pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64, SyncError> {
     let client = state.http_client.clone();
 
+    // Check ban list — skip banned peers
+    {
+        let bans = state.banned_peers.read().unwrap();
+        if let Some(until) = bans.get(peer_url) {
+            if std::time::Instant::now() < *until {
+                debug!("Skipping banned peer {}", peer_id(peer_url));
+                return Ok(0);
+            }
+        }
+    }
+
     // Check peer version — reject outdated peers to prevent forks
     {
         let version_url = format!("{}/version.json", peer_url);
@@ -227,9 +238,12 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     let sync_from_height = if local_height == 0 {
         0
     } else if is_fork {
+        // Acquire REORG WRITE LOCK — blocks all mining until fork resolution completes
+        let _reorg_guard = state.reorg_lock.write().await;
+
         match find_common_ancestor(&state, &client, peer_url, local_height).await {
             Ok(ancestor) => {
-                // IMMEDIATELY cancel mining and set reorg height BEFORE rollback
+                // Cancel mining and set reorg height BEFORE rollback
                 state.last_reorg_height.store(ancestor, std::sync::atomic::Ordering::Relaxed);
                 state.reorg_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
@@ -245,15 +259,21 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                 }
                 info!("Rolled back to common ancestor at height {}", ancestor);
                 ancestor
+                // _reorg_guard stays held — released when sync_from_peer returns
             }
             Err(_) => {
                 // v1.4.1: NEVER wipe the chain. No common ancestor just means the chains
                 // diverged more than MAX_REORG_DEPTH blocks ago. Keep our chain and skip this peer.
-                // Wiping was the cause of catastrophic chain loss in v1.3.6-v1.4.0.
                 warn!(
-                    "No common ancestor with peer {} within {} blocks. Chains are incompatible — keeping local chain, skipping peer.",
+                    "No common ancestor with peer {} within {} blocks. Chains are incompatible — BANNING peer for 30 min.",
                     peer_id(peer_url), crate::config::MAX_REORG_DEPTH
                 );
+                // Ban this peer to stop it from polluting our sync loop
+                {
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(1800);
+                    let mut bans = state.banned_peers.write().unwrap();
+                    bans.insert(peer_url.to_string(), until);
+                }
                 return Ok(0);
             }
         }
@@ -318,13 +338,43 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         }
     }
 
+    // Post-sync: verify hardcoded checkpoints on newly synced chain
     if synced > 0 {
+        let chain = state.blockchain.read()
+            .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?;
+        for &(cp_height, cp_hash) in crate::config::HARDCODED_CHECKPOINTS {
+            if cp_height <= chain.height() {
+                if let Some(actual_hash) = chain.get_hash_at_height(cp_height) {
+                    let actual_hex = hex::encode(actual_hash);
+                    if actual_hex != "0".repeat(64) && actual_hex != cp_hash {
+                        warn!(
+                            "BANNING peer {} — synced chain violates checkpoint at height {} (expected {}, got {})",
+                            peer_id(peer_url), cp_height, &cp_hash[..16], &actual_hex[..16]
+                        );
+                        // Ban for 1 hour
+                        let until = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+                        drop(chain);
+                        {
+                            let mut bans = state.banned_peers.write().unwrap();
+                            bans.insert(peer_url.to_string(), until);
+                        }
+                        // Rollback the bad blocks we just synced
+                        let rollback_to = cp_height.saturating_sub(1);
+                        let mut chain_w = state.blockchain.write()
+                            .map_err(|e| SyncError::LockPoisoned(format!("write lock: {}", e)))?;
+                        let _ = chain_w.rollback_to_height(rollback_to);
+                        return Err(SyncError::InvalidResponse(
+                            format!("Peer chain violates checkpoint at height {}", cp_height)
+                        ));
+                    }
+                }
+            }
+        }
+
         if is_fork {
-            let height = state.blockchain.read()
-                .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?
-                .height();
             info!("Fork resolved: synced {} blocks from {} (new height: {})",
-                synced, peer_id(peer_url), height);
+                synced, peer_id(peer_url), chain.height());
+            drop(chain);
             // Signal miner to restart on new tip after fork resolution
             if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -428,6 +478,20 @@ pub async fn sync_loop(state: Arc<AppState>, seed_peers: Vec<String>, sync_inter
 
     loop {
         interval.tick().await;
+
+        // Cleanup expired bans
+        {
+            let now = std::time::Instant::now();
+            let mut bans = state.banned_peers.write().unwrap();
+            bans.retain(|url, until| {
+                if now >= *until {
+                    info!("Ban expired for peer {}", peer_id(url));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
 
         // Use current peer list (may have been modified by discovery)
         let peers = state.peers.read().unwrap().clone();
