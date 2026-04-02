@@ -247,19 +247,14 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                 ancestor
             }
             Err(_) => {
-                // No common ancestor found — chains are incompatible.
-                // If peer has a heavier chain, wipe local state and fast-sync from scratch.
-                // This is the "majority consensus" rule: if we can't merge, take the network's chain.
-                warn!("No common ancestor with peer {}. Force re-sync from network (reset local chain).", peer_id(peer_url));
-                if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                {
-                    let mut chain = state.blockchain.write()
-                        .map_err(|e| SyncError::LockPoisoned(format!("Blockchain write lock poisoned: {}", e)))?;
-                    chain.reset_for_resync();
-                }
-                0 // Start sync from genesis
+                // v1.4.1: NEVER wipe the chain. No common ancestor just means the chains
+                // diverged more than MAX_REORG_DEPTH blocks ago. Keep our chain and skip this peer.
+                // Wiping was the cause of catastrophic chain loss in v1.3.6-v1.4.0.
+                warn!(
+                    "No common ancestor with peer {} within {} blocks. Chains are incompatible — keeping local chain, skipping peer.",
+                    peer_id(peer_url), crate::config::MAX_REORG_DEPTH
+                );
+                return Ok(0);
             }
         }
     } else {

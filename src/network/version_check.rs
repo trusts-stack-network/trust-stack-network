@@ -30,7 +30,7 @@ pub const LOCAL_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Minimum version this node requires from peers.
 /// Updated at each release to match the network.
 /// Nodes below this version are rejected during sync and disconnected via P2P.
-pub const MINIMUM_VERSION: &str = "1.4.0";
+pub const MINIMUM_VERSION: &str = "1.4.1";
 
 /// Global flag: true = node is allowed to mine and sync. false = node is outdated.
 static NODE_VERSION_OK: AtomicBool = AtomicBool::new(true);
