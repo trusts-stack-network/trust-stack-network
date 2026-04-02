@@ -310,6 +310,29 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
             info!("Synced {} blocks from {} (height: {})", synced, peer_id(peer_url), current_sync_height);
         }
 
+        // v1.6.1: If we got blocks but couldn't add ANY of them, we're on a different chain.
+        // This happens when peer is "ahead" by height but on a fork — blocks don't chain.
+        if batch_size > 0 && synced == 0 && !is_fork {
+            warn!(
+                "Got {} blocks from {} but none were accepted — chains have diverged. Triggering snapshot re-sync.",
+                batch_size, peer_id(peer_url)
+            );
+            // Verify peer passes checkpoints before trusting it
+            if verify_peer_checkpoints(&client, peer_url).await {
+                let mut chain = state.blockchain.write()
+                    .map_err(|e| SyncError::LockPoisoned(format!("write lock: {}", e)))?;
+                chain.reset_for_snapshot_resync();
+                return Ok(0); // Will trigger snapshot sync on next cycle
+            } else {
+                // Peer fails checkpoints — ban it
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(1800);
+                let mut bans = state.banned_peers.write().unwrap();
+                bans.insert(peer_url.to_string(), until);
+                warn!("BANNING peer {} — divergent chain fails checkpoint validation", peer_id(peer_url));
+            }
+            break;
+        }
+
         // If we got fewer blocks than the default batch, we're caught up
         if batch_size < 50 {
             break;
