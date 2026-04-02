@@ -2168,7 +2168,63 @@ async fn cmd_node(
         snapshot_cache: tokio::sync::RwLock::new(None),
         orphan_count: std::sync::atomic::AtomicU64::new(0),
         reorg_count: std::sync::atomic::AtomicU64::new(0),
+        reorg_lock: tokio::sync::RwLock::new(()),
+        banned_peers: std::sync::RwLock::new(std::collections::HashMap::new()),
     });
+
+    // ========================================================================
+    // CHECKPOINT VALIDATION AT STARTUP
+    // If our chain doesn't match hardcoded checkpoints, rollback and re-sync.
+    // ========================================================================
+    {
+        let chain = state.blockchain.read().unwrap();
+        let local_height = chain.height();
+        let mut violations = Vec::new();
+        for &(cp_height, cp_hash) in crate::config::HARDCODED_CHECKPOINTS {
+            if cp_height <= local_height {
+                if let Some(actual_hash) = chain.get_hash_at_height(cp_height) {
+                    let actual_hex = hex::encode(actual_hash);
+                    // Skip placeholder hashes (fast-synced blocks before base)
+                    if actual_hex != "0".repeat(64) && actual_hex != cp_hash {
+                        violations.push((cp_height, cp_hash.to_string(), actual_hex));
+                    }
+                }
+            }
+        }
+        if !violations.is_empty() {
+            drop(chain);
+            let lowest = violations.iter().map(|(h, _, _)| *h).min().unwrap();
+            for (h, expected, actual) in &violations {
+                tracing::error!(
+                    "CHECKPOINT MISMATCH at height {}: expected {}, got {}",
+                    h, &expected[..16], &actual[..16]
+                );
+            }
+            tracing::warn!(
+                "Chain is on a fork! Rolling back to height {} to re-sync from peers.",
+                lowest.saturating_sub(1)
+            );
+            let rollback_target = lowest.saturating_sub(1);
+            let mut chain = state.blockchain.write().unwrap();
+            // Bypass MAX_REORG_DEPTH for checkpoint-forced rollback
+            if local_height - rollback_target <= ShieldedBlockchain::MAX_REORG_DEPTH {
+                let _ = chain.rollback_to_height(rollback_target);
+            } else {
+                // Too deep to rollback — wipe data and force fresh fast-sync
+                tracing::error!(
+                    "Checkpoint violation too deep ({} blocks). Wiping chain for fresh sync.",
+                    local_height - rollback_target
+                );
+                drop(chain);
+                let db_path = format!("{}/blockchain", data_dir);
+                let _ = std::fs::remove_dir_all(&db_path);
+                // Re-open empty blockchain
+                let fresh = ShieldedBlockchain::open(&db_path, 1_500_000)
+                    .expect("Failed to create fresh blockchain");
+                *state.blockchain.write().unwrap() = fresh;
+            }
+        }
+    }
 
     // Create router with API (wallet and explorer are served from static React app)
     let app = create_router(state.clone());
@@ -2920,11 +2976,19 @@ async fn cmd_node(
                     }
                 }
 
+                // Acquire reorg READ lock — blocks if a rollback is in progress
+                let _reorg_read = mine_state.reorg_lock.read().await;
+
                 // Create block template with both V1 and V2 transactions
                 let mut block = {
                     let chain = mine_state.blockchain.read().unwrap();
                     chain.create_block_template_with_v2(miner_pk_hash, &viewing_key, mempool_txs, mempool_txs_v2)
                 };
+                // Save the prev_hash to detect stale blocks after PoW
+                let template_prev_hash = block.header.prev_hash;
+
+                // Drop reorg lock during PoW (cancel signal handles abort)
+                drop(_reorg_read);
 
                 let (height, difficulty) = {
                     let chain = mine_state.blockchain.read().unwrap();
@@ -2999,6 +3063,22 @@ async fn cmd_node(
                         continue;
                     }
                 };
+
+                // Re-acquire reorg lock before adding block — ensures no reorg in progress
+                let _reorg_read_post = mine_state.reorg_lock.read().await;
+
+                // Check if tip changed during PoW (reorg happened while mining)
+                {
+                    let chain = mine_state.blockchain.read().unwrap();
+                    let current_tip = chain.latest_hash();
+                    if template_prev_hash != current_tip {
+                        tracing::warn!(
+                            "Mined block is stale (tip changed during PoW). Discarding."
+                        );
+                        drop(_reorg_read_post);
+                        continue;
+                    }
+                }
 
                 // Add to local chain
                 {

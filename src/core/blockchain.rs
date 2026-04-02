@@ -137,6 +137,21 @@ impl ShieldedBlockchain {
             .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
 
         if let Some(height) = stored_height {
+            // WAL: check for interrupted reorg (crash during rollback)
+            let reorg_flag = db.get_metadata("reorg_in_progress")
+                .ok().flatten().unwrap_or_default();
+            if !reorg_flag.is_empty() {
+                tracing::error!(
+                    "DETECTED INTERRUPTED REORG: '{}'. Chain may be corrupted. Wiping for fresh sync.",
+                    reorg_flag
+                );
+                // Wipe DB and restart fresh — safest recovery
+                let _ = db.set_metadata("reorg_in_progress", "");
+                drop(db);
+                let _ = std::fs::remove_dir_all(db_path);
+                return Self::open(db_path, difficulty);
+            }
+
             // Load existing chain
             tracing::info!("Loading blockchain from disk (height: {})", height);
 
@@ -563,6 +578,11 @@ impl ShieldedBlockchain {
 
         tracing::info!("Rolling back {} blocks: {} → {}", depth, current, target_height);
 
+        // WAL: Write reorg intent to DB BEFORE any changes (crash safety)
+        if let Some(ref db) = self.db {
+            let _ = db.set_metadata("reorg_in_progress", &format!("{}:{}", current, target_height));
+        }
+
         // Fast path: check cached states for instant rollback (up to 10 blocks deep)
         if let Some(pos) = self.prev_block_states.iter().rposition(|(h, _)| *h == target_height) {
             // Remove all states after the target and take the matching one
@@ -607,6 +627,10 @@ impl ShieldedBlockchain {
                 // Clean up cumulative_work entries above target
                 if let Some(ref db) = self.db {
                     let _ = db.remove_cumulative_work_from(target_height + 1);
+                }
+                // WAL: clear reorg flag — rollback completed successfully
+                if let Some(ref db) = self.db {
+                    let _ = db.set_metadata("reorg_in_progress", "");
                 }
                 tracing::info!("Rollback complete (instant): height={}", self.height());
                 return Ok(true);
@@ -692,6 +716,10 @@ impl ShieldedBlockchain {
             let _ = db.remove_cumulative_work_from(target_height + 1);
         }
 
+        // WAL: clear reorg flag — rollback completed successfully
+        if let Some(ref db) = self.db {
+            let _ = db.set_metadata("reorg_in_progress", "");
+        }
         tracing::info!("Rollback complete: height={}", self.height());
         Ok(true)
     }
@@ -754,6 +782,11 @@ impl ShieldedBlockchain {
     /// Get the latest block hash.
     pub fn latest_hash(&self) -> [u8; 32] {
         *self.height_index.last().unwrap()
+    }
+
+    /// Get the block hash at a specific height (returns None if height out of range).
+    pub fn get_hash_at_height(&self, height: u64) -> Option<[u8; 32]> {
+        self.height_index.get(height as usize).copied()
     }
 
     /// Get the latest block.
@@ -1150,6 +1183,17 @@ impl ShieldedBlockchain {
                     tracing::warn!("Failed to save state snapshot at height {}: {}", new_height, e);
                 }
                 let _ = db.set_metadata("cumulative_work", &self.cumulative_work.to_string());
+            }
+        }
+
+        // Auto-checkpoint: persist block hash every 500 blocks.
+        // These are used for fork detection and shared with peers via /chain/info.
+        // Unlike hardcoded checkpoints, these are dynamic and grow with the chain.
+        if new_height > 0 && new_height % 500 == 0 {
+            if let Some(ref db) = self.db {
+                let cp_key = format!("checkpoint_{}", new_height);
+                let _ = db.set_metadata(&cp_key, &hex::encode(hash));
+                tracing::info!("Auto-checkpoint saved at height {}", new_height);
             }
         }
 
