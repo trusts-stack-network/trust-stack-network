@@ -2273,6 +2273,119 @@ async fn cmd_node(
         tsn::network::auto_update::auto_update_loop().await;
     });
 
+    // ========================================================================
+    // SELF-HEALING WATCHDOG — monitors node health and auto-repairs
+    // ========================================================================
+    {
+        let watchdog_state = state.clone();
+        tokio::spawn(async move {
+            let mut last_height: u64 = 0;
+            let mut stuck_since: Option<std::time::Instant> = None;
+            let mut resync_count: u32 = 0;
+            let mut resync_window_start = std::time::Instant::now();
+            let mut error_count: u32 = 0;
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+                let current_height = {
+                    let chain = watchdog_state.blockchain.read().unwrap();
+                    chain.height()
+                };
+
+                // Reset resync counter every 5 minutes
+                if resync_window_start.elapsed() > std::time::Duration::from_secs(300) {
+                    resync_count = 0;
+                    resync_window_start = std::time::Instant::now();
+                }
+
+                // Check 1: All peers banned → clear bans
+                {
+                    let peers = watchdog_state.peers.read().unwrap();
+                    let bans = watchdog_state.banned_peers.read().unwrap();
+                    let now = std::time::Instant::now();
+                    let active_bans = bans.values().filter(|t| now < **t).count();
+                    if !peers.is_empty() && active_bans >= peers.len() {
+                        drop(bans);
+                        drop(peers);
+                        tracing::warn!("WATCHDOG: All peers banned! Clearing ban list.");
+                        let mut bans = watchdog_state.banned_peers.write().unwrap();
+                        bans.clear();
+                    }
+                }
+
+                // Check 2: Height stagnant for 5+ minutes while peers exist
+                if current_height > last_height {
+                    last_height = current_height;
+                    stuck_since = None;
+                    error_count = 0;
+                } else {
+                    let peers_exist = !watchdog_state.peers.read().unwrap().is_empty();
+                    if peers_exist {
+                        if stuck_since.is_none() {
+                            stuck_since = Some(std::time::Instant::now());
+                        }
+                        if let Some(since) = stuck_since {
+                            if since.elapsed() > std::time::Duration::from_secs(300) {
+                                tracing::warn!(
+                                    "WATCHDOG: Height stuck at {} for 5+ min. Triggering snapshot re-sync.",
+                                    current_height
+                                );
+                                let mut chain = watchdog_state.blockchain.write().unwrap();
+                                chain.reset_for_snapshot_resync();
+                                stuck_since = None;
+                                resync_count += 1;
+                                last_height = 0;
+                            }
+                        }
+                    }
+                }
+
+                // Check 3: Too many resyncs in short window → wipe completely
+                if resync_count >= 3 {
+                    tracing::error!(
+                        "WATCHDOG: {} resyncs in 5 min — chain is unstable. Full wipe + fresh sync.",
+                        resync_count
+                    );
+                    let mut chain = watchdog_state.blockchain.write().unwrap();
+                    chain.reset_for_snapshot_resync();
+                    // Clear all bans so we can sync from anyone
+                    let mut bans = watchdog_state.banned_peers.write().unwrap();
+                    bans.clear();
+                    resync_count = 0;
+                    last_height = 0;
+                    stuck_since = None;
+                }
+
+                // Check 4: Verify checkpoints periodically (every 5 min)
+                {
+                    let chain = watchdog_state.blockchain.read().unwrap();
+                    for &(cp_height, cp_hash) in crate::config::HARDCODED_CHECKPOINTS {
+                        if cp_height <= chain.height() {
+                            if let Some(actual) = chain.get_hash_at_height(cp_height) {
+                                let actual_hex = hex::encode(actual);
+                                if actual_hex != "0".repeat(64) && actual_hex != cp_hash {
+                                    tracing::error!(
+                                        "WATCHDOG: Checkpoint violation at height {}! Re-syncing.",
+                                        cp_height
+                                    );
+                                    drop(chain);
+                                    let mut chain_w = watchdog_state.blockchain.write().unwrap();
+                                    chain_w.reset_for_snapshot_resync();
+                                    let mut bans = watchdog_state.banned_peers.write().unwrap();
+                                    bans.clear();
+                                    last_height = 0;
+                                    stuck_since = None;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Sync from peers in background (non-blocking — API is already running)
     if !peers.is_empty() {
         println!("Peers: [{}]", peers.iter().map(|p| peer_id(p)).collect::<Vec<_>>().join(", "));

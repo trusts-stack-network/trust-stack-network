@@ -103,45 +103,33 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         return Ok(0);
     }
 
-    // Get local cumulative work for fork resolution (heaviest chain wins, not longest)
-    let local_work = {
-        let chain = state.blockchain.read()
-            .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?;
-        chain.cumulative_work()
-    };
+    // v1.6.0: Fork detection by HEIGHT only, never by peer's cumulative_work.
+    // Peer-reported work is unreliable (different fast-sync bases = different estimates).
+    // Security against spam chains is handled by checkpoints + difficulty validation.
 
-    // Check if peer is ahead by work OR height, or if we have a fork
+    // Check if peer is ahead by height or has different block at same height
     let mut is_fork = peer_info.height == local_height && peer_info.latest_hash != local_hash;
-    let peer_ahead = peer_info.height > local_height || peer_info.cumulative_work > local_work as u128;
+    let peer_ahead = peer_info.height > local_height;
 
     if !peer_ahead && !is_fork {
         debug!(
-            "Peer {} is not ahead (peer h={} w={}, local h={} w={})",
-            peer_id(peer_url), peer_info.height, peer_info.cumulative_work, local_height, local_work
+            "Peer {} is not ahead (peer h={}, local h={})",
+            peer_id(peer_url), peer_info.height, local_height
         );
         return Ok(0);
     }
 
-    // Detect fork: peer has more work but fewer blocks → heavy chain vs long chain
-    if !is_fork && peer_info.cumulative_work > local_work as u128 && peer_info.height < local_height {
-        is_fork = true;
-        info!(
-            "Heavy fork detected: peer {} has more work ({} > {}) but fewer blocks (h={} < h={}). Switching to heavier chain.",
-            peer_id(peer_url), peer_info.cumulative_work, local_work, peer_info.height, local_height
-        );
-    }
-
-    // Also detect fork when peer is ahead by height: compare their block at our height vs ours
-    if peer_ahead && !is_fork && peer_info.height >= local_height {
+    // Detect fork when peer is ahead: compare their block at our height vs ours
+    if peer_ahead && !is_fork {
         let check_url = format!("{}/block/height/{}", peer_url, local_height);
-        if let Ok(resp) = client.get(&check_url).send().await {
+        if let Ok(resp) = client.get(&check_url).timeout(Duration::from_secs(5)).send().await {
             if resp.status().is_success() {
                 if let Ok(peer_block) = resp.json::<PeerBlockInfo>().await {
                     if peer_block.hash != local_hash {
                         is_fork = true;
                         info!(
-                            "Fork detected with peer {} (peer ahead at h={} w={}, diverged at our height {})",
-                            peer_id(peer_url), peer_info.height, peer_info.cumulative_work, local_height
+                            "Fork detected with peer {} (peer h={}, local h={}, diverged at our height)",
+                            peer_id(peer_url), peer_info.height, local_height
                         );
                     }
                 }
@@ -150,19 +138,9 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     }
 
     if is_fork {
-        // HEAVIEST CHAIN RULE: only switch to a chain with more cumulative work
-        // A shorter chain with more work is valid (e.g. higher difficulty blocks)
-        // A longer chain with less work is a spam attack (easy blocks)
-        if peer_info.cumulative_work <= local_work as u128 {
-            warn!(
-                "Ignoring fork from peer {} — peer work {} <= local work {}. Heaviest chain wins.",
-                peer_id(peer_url), peer_info.cumulative_work, local_work
-            );
-            return Ok(0);
-        }
-        // Same height but different block: ALWAYS take the peer's chain.
-        // The peer's block was already accepted by the network (seeds follow it).
-        // Our block hasn't been propagated yet. Network consensus wins.
+        // Same height, different block: take the peer's chain only if peer has
+        // more peers agreeing (approximated by: always take peer's chain at same height,
+        // since our solo-mined block hasn't propagated yet).
         if peer_info.height == local_height {
             info!(
                 "Fork at same height {} — taking peer's chain (network consensus). Switching.",

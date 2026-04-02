@@ -321,9 +321,10 @@ impl ShieldedBlockchain {
                 (0, None)
             };
 
-            // ALWAYS recalculate cumulative_work from actual block difficulties.
-            // Never trust the metadata value — it may be inflated from a peer's
-            // incorrect snapshot (bug: fast-sync imported peer_cumulative_work blindly).
+            // v1.6.0: Recalculate cumulative_work from REAL blocks only.
+            // No estimation for missing blocks — work is only meaningful for
+            // blocks we actually have. Fork choice uses height (not work) for
+            // peer comparison, so accurate global work is not needed.
             let mut cumulative_work: u128 = 0;
             {
                 let mut counted = 0u64;
@@ -337,28 +338,10 @@ impl ShieldedBlockchain {
                         }
                     }
                 }
-                // For fast-synced nodes, blocks before fast_sync_base don't exist.
-                // Estimate their work as counted_avg * missing_count.
-                let fast_sync_base_for_work: u64 = db
-                    .get_metadata("fast_sync_base_height")
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if fast_sync_base_for_work > 0 && counted < height + 1 {
-                    let missing = (height + 1) - counted;
-                    // Use MIN_DIFFICULTY (1000) for estimation — same on all nodes,
-                    // conservative, and prevents work inflation from variable avg_diff.
-                    let est_diff: u128 = 1_500_000; // MIN_DIFFICULTY — hardcoded for consistency across all nodes
-                    let estimated_work = est_diff * missing as u128;
-                    cumulative_work += estimated_work;
-                    tracing::info!(
-                        "cumulative_work: {} real blocks (work={}), {} estimated (est_diff={}, est_work={}), total={}",
-                        counted, cumulative_work - estimated_work, missing, est_diff, estimated_work, cumulative_work
-                    );
-                } else {
-                    tracing::info!("cumulative_work recalculated from {} blocks: {}", counted, cumulative_work);
-                }
+                tracing::info!(
+                    "cumulative_work: {} real blocks, total work={} (no estimation for missing blocks)",
+                    counted, cumulative_work
+                );
             }
 
             // Verify genesis hash if configured (skip in test builds)
@@ -1112,6 +1095,7 @@ impl ShieldedBlockchain {
     /// Internal: insert a block into the chain (shared by add_block and add_block_trusted).
     fn insert_block_internal(&mut self, block: ShieldedBlock, full_mode: bool) -> Result<(), BlockchainError> {
         let hash = block.hash();
+        let block_difficulty = block.header.difficulty;
         let new_height = self.height_index.len() as u64;
 
         // v1.3.3: validate against hardcoded checkpoints
@@ -1193,6 +1177,14 @@ impl ShieldedBlockchain {
                     new_height, hex::encode(hash)
                 );
             }
+        }
+
+        // v1.6.0: Update cumulative_work deterministically — add THIS block's difficulty.
+        // This is the ONLY place cumulative_work should be incremented during normal operation.
+        // Same formula on all nodes: work[N] = work[N-1] + difficulty[N]
+        self.cumulative_work += block_difficulty as u128;
+        if let Some(ref db) = self.db {
+            let _ = db.save_cumulative_work(new_height, self.cumulative_work);
         }
 
         // Save state snapshot every 10 blocks (for fast startup)
@@ -1999,10 +1991,11 @@ impl ShieldedBlockchain {
 
         // Set chain metadata — use next_difficulty so validation works after fast-sync
         self.difficulty = next_difficulty;
-        // v1.4.2: NEVER trust peer's cumulative_work — it may be inflated.
-        // Use difficulty * height as a conservative estimate. The correct value
-        // will be recalculated at next restart from actual block difficulties.
-        self.cumulative_work = difficulty as u128 * height as u128;
+        // v1.6.0: Set cumulative_work = 0 after snapshot import.
+        // Work will be accumulated bloc-by-bloc as new blocks are added via
+        // insert_block_internal(). We don't estimate or trust peer values.
+        // Fork choice uses height (not work) for peer comparison since v1.6.0.
+        self.cumulative_work = 0;
         self.fast_sync_base_height = height;
         // Save commitment count at snapshot time for correct position calculation
         self.fast_sync_commitment_offset = self.state.commitment_count();
