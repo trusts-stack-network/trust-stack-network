@@ -1874,29 +1874,39 @@ async fn cmd_node(
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        // Find sync peer — random selection among peers at max height (load balancing)
-        // Inspired by Cosmos state-sync (multiple providers) and Bitcoin IBD (distributed downloads)
-        let mut eligible_peers: Vec<(String, u64)> = Vec::new();
+        // v1.4.0: Select sync peer by cumulative_work (heaviest chain), not just height.
+        // Query /chain/info for work from each peer. Keep peers within 5% of max work.
+        let mut eligible_peers: Vec<(String, u64, u128)> = Vec::new(); // (url, height, work)
+        let mut max_work: u128 = 0;
         let mut max_height = 0u64;
         for peer_url in &peers {
-            let tip_url = format!("{}/tip", peer_url);
-            if let Ok(resp) = client.get(&tip_url).send().await {
-                if let Ok(tip) = resp.json::<serde_json::Value>().await {
-                    let peer_height = tip["height"].as_u64().unwrap_or(0);
+            let info_url = format!("{}/chain/info", peer_url);
+            if let Ok(resp) = client.get(&info_url)
+                .timeout(std::time::Duration::from_secs(10))
+                .send().await
+            {
+                if let Ok(info) = resp.json::<serde_json::Value>().await {
+                    let peer_height = info["height"].as_u64().unwrap_or(0);
+                    let peer_work = info["cumulative_work"].as_u64().unwrap_or(0) as u128;
                     if peer_height > local_height + 10 {
+                        if peer_work > max_work {
+                            max_work = peer_work;
+                        }
                         if peer_height > max_height {
                             max_height = peer_height;
                         }
-                        eligible_peers.push((peer_url.clone(), peer_height));
+                        eligible_peers.push((peer_url.clone(), peer_height, peer_work));
                     }
                 }
             }
         }
-        // Keep only peers within 5 blocks of the highest (they're all "good enough")
-        eligible_peers.retain(|(_, h)| *h + 5 >= max_height);
+        // v1.4.0: Keep only peers within 5% of max cumulative_work (not just height)
+        let work_threshold = max_work.saturating_sub(max_work / 20); // 95% of max work
+        eligible_peers.retain(|(_, _, w)| *w >= work_threshold);
         // Random selection to distribute load across seeds
         use rand::seq::SliceRandom;
-        let best_peer = eligible_peers.choose(&mut rand::thread_rng()).cloned();
+        let best_peer = eligible_peers.choose(&mut rand::thread_rng())
+            .map(|(url, h, _)| (url.clone(), *h));
 
         if let Some((peer_url, peer_height)) = best_peer {
             let behind = peer_height - local_height;
@@ -2654,22 +2664,42 @@ async fn cmd_node(
                                     fresh_height, verified_max_height, resync_attempts
                                 );
 
-                                // Find best VERIFIED peer (height > 0, height > ours)
-                                let mut best: Option<(String, u64)> = None;
+                                // v1.4.0: Find best VERIFIED peer by cumulative_work.
+                                // Require at least 2 peers agreeing (within 5% of max work) before resyncing.
+                                let mut peer_infos: Vec<(String, u64, u128)> = Vec::new(); // (url, height, work)
                                 for peer in &peers_list {
-                                    let tip_url = format!("{}/tip", peer);
-                                    if let Ok(resp) = sync_client.get(&tip_url)
-                                        .timeout(std::time::Duration::from_secs(3))
+                                    let info_url = format!("{}/chain/info", peer);
+                                    if let Ok(resp) = sync_client.get(&info_url)
+                                        .timeout(std::time::Duration::from_secs(5))
                                         .send().await
                                     {
-                                        if let Ok(tip) = resp.json::<serde_json::Value>().await {
-                                            let h = tip["height"].as_u64().unwrap_or(0);
-                                            if h > fresh_height && (best.is_none() || h > best.as_ref().unwrap().1) {
-                                                best = Some((peer.clone(), h));
+                                        if let Ok(info) = resp.json::<serde_json::Value>().await {
+                                            let h = info["height"].as_u64().unwrap_or(0);
+                                            let w = info["cumulative_work"].as_u64().unwrap_or(0) as u128;
+                                            if h > fresh_height {
+                                                peer_infos.push((peer.clone(), h, w));
                                             }
                                         }
                                     }
                                 }
+                                // Find max work and count peers within 5% of it
+                                let max_w = peer_infos.iter().map(|(_, _, w)| *w).max().unwrap_or(0);
+                                let threshold_w = max_w.saturating_sub(max_w / 20);
+                                let agreeing: Vec<_> = peer_infos.iter()
+                                    .filter(|(_, _, w)| *w >= threshold_w)
+                                    .collect();
+                                // Require at least 2 agreeing peers (or all if only 1 peer available)
+                                let best: Option<(String, u64)> = if agreeing.len() >= 2 || (peer_infos.len() == 1 && !peer_infos.is_empty()) {
+                                    agreeing.iter()
+                                        .max_by_key(|(_, _, w)| *w)
+                                        .map(|(url, h, _)| (url.clone(), *h))
+                                } else {
+                                    tracing::warn!(
+                                        "Auto-resync: only {}/{} peers agree on max work — skipping resync",
+                                        agreeing.len(), peer_infos.len()
+                                    );
+                                    None
+                                };
 
                                 if let Some((peer_url, _)) = best {
                                     let info_url = format!("{}/snapshot/info", peer_url);
@@ -2738,25 +2768,29 @@ async fn cmd_node(
                     let sync_client = mine_state.http_client.clone();
                     let peers_list = mine_state.peers.read().unwrap().clone();
 
-                    // Check if height changed since last stuck check
+                    // v1.4.0: Compare cumulative_work for stuck detection (not just height)
                     if current_height > stuck_last_height {
                         // Node is making progress — reset stuck counter
                         stuck_consecutive = 0;
                         stuck_last_height = current_height;
                     } else if current_height == stuck_last_height {
-                        // Same height as last check (including height 0) — query verified peers
+                        // Same height as last check (including height 0) — query verified peers via /chain/info
                         let mut verified_max_height: u64 = 0;
                         let mut best_peer: Option<String> = None;
+                        let mut _peer_max_work: u128 = 0;
+                        let _local_work = mine_state.blockchain.read().unwrap().cumulative_work();
                         for peer in &peers_list {
-                            let tip_url = format!("{}/tip", peer);
-                            if let Ok(resp) = sync_client.get(&tip_url)
-                                .timeout(std::time::Duration::from_secs(3))
+                            let info_url = format!("{}/chain/info", peer);
+                            if let Ok(resp) = sync_client.get(&info_url)
+                                .timeout(std::time::Duration::from_secs(5))
                                 .send().await
                             {
-                                if let Ok(tip) = resp.json::<serde_json::Value>().await {
-                                    let h = tip["height"].as_u64().unwrap_or(0);
-                                    if h > 0 && h > verified_max_height {
+                                if let Ok(info) = resp.json::<serde_json::Value>().await {
+                                    let h = info["height"].as_u64().unwrap_or(0);
+                                    let w = info["cumulative_work"].as_u64().unwrap_or(0) as u128;
+                                    if h > 0 && (w > _peer_max_work || (w == 0 && h > verified_max_height)) {
                                         verified_max_height = h;
+                                        _peer_max_work = w;
                                         best_peer = Some(peer.clone());
                                     }
                                 }

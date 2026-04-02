@@ -111,8 +111,17 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         return Ok(0);
     }
 
-    // Also detect fork when peer is ahead: compare their block at our height vs ours
-    if peer_ahead && !is_fork {
+    // Detect fork: peer has more work but fewer blocks → heavy chain vs long chain
+    if !is_fork && peer_info.cumulative_work > local_work as u128 && peer_info.height < local_height {
+        is_fork = true;
+        info!(
+            "Heavy fork detected: peer {} has more work ({} > {}) but fewer blocks (h={} < h={}). Switching to heavier chain.",
+            peer_id(peer_url), peer_info.cumulative_work, local_work, peer_info.height, local_height
+        );
+    }
+
+    // Also detect fork when peer is ahead by height: compare their block at our height vs ours
+    if peer_ahead && !is_fork && peer_info.height >= local_height {
         let check_url = format!("{}/block/height/{}", peer_url, local_height);
         if let Ok(resp) = client.get(&check_url).send().await {
             if resp.status().is_success() {
@@ -501,6 +510,71 @@ pub enum SyncError {
     InvalidResponse(String),
     #[error("Lock poisoned: {0}")]
     LockPoisoned(String),
+}
+
+/// v1.4.0: Verify a peer's claimed cumulative_work by sampling a few blocks.
+/// Fetches SAMPLE_COUNT blocks from the peer and checks that the sum of their
+/// difficulties is consistent with the claimed total work.
+/// Returns true if the peer's work claim appears honest.
+pub async fn verify_peer_work_sample(
+    client: &reqwest::Client,
+    peer_url: &str,
+    peer_height: u64,
+    peer_claimed_work: u128,
+) -> bool {
+    const SAMPLE_COUNT: u64 = 5;
+    if peer_height < SAMPLE_COUNT || peer_claimed_work == 0 {
+        return true; // Can't meaningfully verify very short chains
+    }
+
+    let mut sampled_work: u128 = 0;
+    let mut sampled_count: u64 = 0;
+    // Sample blocks evenly spread across the chain
+    let step = peer_height / SAMPLE_COUNT;
+    for i in 0..SAMPLE_COUNT {
+        let h = (i + 1) * step;
+        let url = format!("{}/block/height/{}", peer_url, h);
+        if let Ok(resp) = client.get(&url)
+            .timeout(Duration::from_secs(5))
+            .send().await
+        {
+            if let Ok(block_info) = resp.json::<serde_json::Value>().await {
+                if let Some(diff) = block_info["difficulty"].as_u64() {
+                    sampled_work += diff as u128;
+                    sampled_count += 1;
+                }
+            }
+        }
+    }
+
+    if sampled_count == 0 {
+        warn!("verify_peer_work_sample: couldn't fetch any blocks from {}", peer_id(peer_url));
+        return false;
+    }
+
+    // Extrapolate: average difficulty * total height should be roughly = claimed work
+    let avg_difficulty = sampled_work / sampled_count as u128;
+    let estimated_work = avg_difficulty * peer_height as u128;
+    // Allow 50% tolerance (different blocks have different difficulties)
+    let ratio = if estimated_work > 0 {
+        peer_claimed_work as f64 / estimated_work as f64
+    } else {
+        0.0
+    };
+
+    if ratio < 0.5 || ratio > 2.0 {
+        warn!(
+            "Peer {} claimed work {} but sampled estimate is {} (ratio {:.2}) — suspicious",
+            peer_id(peer_url), peer_claimed_work, estimated_work, ratio
+        );
+        return false;
+    }
+
+    debug!(
+        "Peer {} work verification OK: claimed={}, estimated={}, ratio={:.2}",
+        peer_id(peer_url), peer_claimed_work, estimated_work, ratio
+    );
+    true
 }
 
 /// Configuration de synchronisation

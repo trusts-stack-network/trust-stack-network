@@ -249,6 +249,10 @@ pub const MAX_REORG_DEPTH: u64 = 100;
 /// automatically at startup from the existing chain and updated as new blocks
 /// arrive. They persist across restarts. Hardcoded checkpoints are only needed
 /// for bootstrap protection on a brand-new node with no chain data.
+///
+/// v1.4.0: Empty for now — will be populated after chain stabilizes post-upgrade.
+/// To add checkpoints: run `./tsn` on a trusted node, note the block hashes at
+/// milestone heights (e.g. every 10000 blocks), and add them here.
 pub const HARDCODED_CHECKPOINTS: &[(u64, &str)] = &[];
 
 // ============================================================================

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.7-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.4.0-blue">
   <img alt="Rust" src="https://img.shields.io/badge/rust-94k+_lines-orange">
   <img alt="Tests" src="https://img.shields.io/badge/tests-369_passing-brightgreen">
   <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
@@ -96,7 +96,7 @@ Merkle Node     = Poseidon(domain=5, left, right)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         TSN Node v1.3.7                              │
+│                         TSN Node v1.4.0                              │
 ├──────────────┬──────────────┬──────────────┬─────────────────────────┤
 │    Core      │    Crypto    │  Consensus   │        Network          │
 │  Block       │  Poseidon2   │  PoW Mining  │  libp2p (GossipSub)     │
@@ -384,6 +384,23 @@ A cross-chain anonymous DEX built on TSN with AMM pools, escrow P2P, yield farmi
 - **Privacy** — anonymous trading via TSN shielded transactions
 
 ## Changelog
+
+### v1.4.0 — Consensus Security Overhaul
+
+Major consensus upgrade fixing 19 bugs in fork resolution, snapshot validation, and self-healing.
+
+- **Heaviest chain rule**: Fork choice now ALWAYS uses cumulative_work (was height-based for short forks). Tiebreaker: difficulty then hash.
+- **Persistent cumulative_work**: New sled tree stores cumulative_work per height. Survives LRU eviction and restarts.
+- **PoW validation in trusted mode**: `add_block_trusted()` now verifies PoW and MIN_DIFFICULTY. Prevents importing invalid blocks during fast-sync.
+- **Orphan PoW validation**: Orphan pool rejects blocks with invalid PoW or below MIN_DIFFICULTY before storing.
+- **Graduated difficulty tolerance post fast-sync**: Within LWMA_WINDOW (45 blocks) of fast-sync base, accepts 25% margin. After that, enforces normal 10%.
+- **Accurate rollback work**: Uses DB-stored cumulative_work instead of `difficulty * depth` estimation. Falls back to summing actual block difficulties.
+- **Conservative snapshot work estimate**: When peer_cumulative_work is unavailable, uses MIN_DIFFICULTY * height (not difficulty * height).
+- **Peer selection by work**: Fast-sync, stuck detection, and auto-resync now select peers by cumulative_work, not height alone.
+- **Multi-peer agreement**: Auto-resync requires at least 2 peers agreeing (within 5% of max work) before triggering.
+- **Peer work verification**: New `verify_peer_work_sample()` helper samples blocks to validate a peer's claimed work.
+- **Faster trusted snapshots**: Snapshot interval in trusted mode reduced from 500 to 50 blocks for faster recovery.
+- **MINIMUM_VERSION**: bumped to 1.4.0
 
 ### v1.3.7 — Self-Healing Nodes: Missing Snapshot Recovery
 

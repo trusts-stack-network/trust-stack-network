@@ -896,16 +896,16 @@ mod tests {
 
         assert!(get_latest_peer_version().is_none());
 
-        notify_peer_version("1.0.0");
-        assert_eq!(get_latest_peer_version(), Some("1.0.0".to_string()));
+        notify_peer_version("2.0.0");
+        assert_eq!(get_latest_peer_version(), Some("2.0.0".to_string()));
 
         // Higher version replaces
-        notify_peer_version("1.1.0");
-        assert_eq!(get_latest_peer_version(), Some("1.1.0".to_string()));
+        notify_peer_version("2.1.0");
+        assert_eq!(get_latest_peer_version(), Some("2.1.0".to_string()));
 
         // Lower version does NOT replace
-        notify_peer_version("1.0.5");
-        assert_eq!(get_latest_peer_version(), Some("1.1.0".to_string()));
+        notify_peer_version("2.0.5");
+        assert_eq!(get_latest_peer_version(), Some("2.1.0".to_string()));
     }
 
     #[test]
