@@ -46,6 +46,9 @@ pub struct Database {
     accounts: sled::Tree,
     metadata: sled::Tree,
     faucet_claims: sled::Tree,
+    /// v1.4.0: Persistent cumulative_work index (height -> u128).
+    /// Used for accurate fork choice and rollback work calculation.
+    cumulative_work: sled::Tree,
 }
 
 impl Database {
@@ -58,6 +61,7 @@ impl Database {
         let accounts = db.open_tree("accounts")?;
         let metadata = db.open_tree("metadata")?;
         let faucet_claims = db.open_tree("faucet_claims")?;
+        let cumulative_work = db.open_tree("cumulative_work")?;
 
         Ok(Self {
             db,
@@ -67,6 +71,7 @@ impl Database {
             accounts,
             metadata,
             faucet_claims,
+            cumulative_work,
         })
     }
 
@@ -80,6 +85,7 @@ impl Database {
         let accounts = db.open_tree("accounts")?;
         let metadata = db.open_tree("metadata")?;
         let faucet_claims = db.open_tree("faucet_claims")?;
+        let cumulative_work = db.open_tree("cumulative_work")?;
 
         Ok(Self {
             db,
@@ -89,6 +95,7 @@ impl Database {
             accounts,
             metadata,
             faucet_claims,
+            cumulative_work,
         })
     }
 
@@ -366,6 +373,40 @@ impl Database {
     /// Get count of unique faucet claimants.
     pub fn get_faucet_claimant_count(&self) -> Result<u64, DatabaseError> {
         Ok(self.faucet_claims.len() as u64)
+    }
+
+    // ============ Cumulative Work Index (v1.4.0) ============
+
+    /// Save cumulative work at a given height.
+    /// Used for accurate fork choice and rollback without chain traversal.
+    pub fn save_cumulative_work(&self, height: u64, work: u128) -> Result<(), DatabaseError> {
+        self.cumulative_work.insert(&height.to_be_bytes(), &work.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Get cumulative work at a given height.
+    pub fn get_cumulative_work(&self, height: u64) -> Result<Option<u128>, DatabaseError> {
+        match self.cumulative_work.get(&height.to_be_bytes())? {
+            Some(data) => {
+                let bytes: [u8; 16] = data
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| DatabaseError::InvalidData("invalid cumulative_work length".into()))?;
+                Ok(Some(u128::from_be_bytes(bytes)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Remove cumulative work entries from a given height onwards (for rollback).
+    pub fn remove_cumulative_work_from(&self, height: u64) -> Result<(), DatabaseError> {
+        // Iterate from height to the end and remove each entry
+        let start_key = height.to_be_bytes();
+        for entry in self.cumulative_work.range(start_key..) {
+            let (key, _) = entry.map_err(DatabaseError::Sled)?;
+            self.cumulative_work.remove(&key)?;
+        }
+        Ok(())
     }
 
     /// Get count of active streaks (streak > 0).

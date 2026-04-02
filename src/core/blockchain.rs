@@ -558,10 +558,36 @@ impl ShieldedBlockchain {
                         self.difficulty = block.header.difficulty;
                     }
                 }
-                // Subtract work for rolled-back blocks
-                self.cumulative_work = self.cumulative_work.saturating_sub(
-                    self.difficulty as u128 * depth as u128
-                );
+                // v1.4.0: Use DB-stored cumulative_work at target height (accurate).
+                // Falls back to summing actual block difficulties instead of estimation.
+                let restored_work = if let Some(ref db) = self.db {
+                    db.get_cumulative_work(target_height).ok().flatten()
+                } else {
+                    None
+                };
+                if let Some(work) = restored_work {
+                    self.cumulative_work = work;
+                } else {
+                    // Fallback: sum actual block difficulties up to target_height
+                    let mut sum_work: u128 = 0;
+                    for h in 0..=target_height {
+                        if let Some(hash) = self.height_index.get(h as usize) {
+                            if *hash != [0u8; BLOCK_HASH_SIZE] {
+                                if let Some(blk) = self.get_block(hash) {
+                                    sum_work += blk.header.difficulty as u128;
+                                    continue;
+                                }
+                            }
+                            // Placeholder or missing: use current difficulty as estimate
+                            sum_work += self.difficulty as u128;
+                        }
+                    }
+                    self.cumulative_work = sum_work;
+                }
+                // Clean up cumulative_work entries above target
+                if let Some(ref db) = self.db {
+                    let _ = db.remove_cumulative_work_from(target_height + 1);
+                }
                 tracing::info!("Rollback complete (instant): height={}", self.height());
                 return Ok(true);
             }
@@ -585,13 +611,20 @@ impl ShieldedBlockchain {
                 };
 
                 if let Some(state) = snapshot_state {
-                    let approx_work = self.difficulty as u128 * self.fast_sync_base_height as u128;
+                    // v1.4.0: Use DB-stored cumulative_work at fast_sync_base_height if available,
+                    // otherwise use MIN_DIFFICULTY * height as conservative estimate.
+                    let base_work = if let Some(ref db) = self.db {
+                        db.get_cumulative_work(self.fast_sync_base_height).ok().flatten()
+                            .unwrap_or(MIN_DIFFICULTY as u128 * self.fast_sync_base_height as u128)
+                    } else {
+                        MIN_DIFFICULTY as u128 * self.fast_sync_base_height as u128
+                    };
                     tracing::info!(
                         "Rollback: using fast-sync snapshot at height {}, replaying {} blocks",
                         self.fast_sync_base_height,
                         target_height.saturating_sub(self.fast_sync_base_height)
                     );
-                    (state, self.fast_sync_base_height + 1, approx_work)
+                    (state, self.fast_sync_base_height + 1, base_work)
                 } else {
                     tracing::warn!("Rollback: no snapshot in DB, replaying from genesis");
                     (ShieldedState::new(), 0, 0u128)
@@ -606,8 +639,15 @@ impl ShieldedBlockchain {
         for h in replay_from..=target_height {
             if let Some(hash) = self.height_index.get(h as usize) {
                 if *hash == [0u8; BLOCK_HASH_SIZE] {
-                    // Fast-sync placeholder — estimate work
-                    new_cumulative_work += self.difficulty as u128;
+                    // v1.4.0: Fast-sync placeholder — try DB cumulative_work first,
+                    // then use MIN_DIFFICULTY as conservative per-block estimate
+                    if let Some(ref db) = self.db {
+                        if let Ok(Some(stored_work)) = db.get_cumulative_work(h) {
+                            new_cumulative_work = stored_work;
+                            continue;
+                        }
+                    }
+                    new_cumulative_work += MIN_DIFFICULTY as u128;
                     continue;
                 }
                 if let Some(block) = self.get_block(hash) {
@@ -626,6 +666,11 @@ impl ShieldedBlockchain {
         self.state = new_state;
         self.difficulty = new_difficulty;
         self.cumulative_work = new_cumulative_work;
+
+        // v1.4.0: Clean up cumulative_work entries above target
+        if let Some(ref db) = self.db {
+            let _ = db.remove_cumulative_work_from(target_height + 1);
+        }
 
         tracing::info!("Rollback complete: height={}", self.height());
         Ok(true)
@@ -802,11 +847,25 @@ impl ShieldedBlockchain {
             let within_one_step = ratio >= 0.90 && ratio <= 1.10;
 
             if self.fast_sync_base_height > 0 {
-                // Post fast-sync: always trust peer difficulty
-                tracing::debug!(
-                    "Accepting difficulty {} from peer (expected {}, fast-sync base={})",
-                    block.header.difficulty, expected_difficulty, self.fast_sync_base_height
-                );
+                // v1.4.0: Graduated difficulty tolerance post fast-sync.
+                // Within LWMA_WINDOW blocks of fast_sync_base: accept 25% margin
+                // (not enough history for accurate LWMA calculation).
+                // After LWMA_WINDOW blocks: enforce normal 10% tolerance.
+                let blocks_since_sync = self.height().saturating_sub(self.fast_sync_base_height);
+                if blocks_since_sync <= LWMA_WINDOW {
+                    let within_graduated = ratio >= 0.75 && ratio <= 1.25;
+                    if within_graduated {
+                        tracing::debug!(
+                            "Accepting difficulty {} from peer (expected {}, {}/{} blocks since fast-sync)",
+                            block.header.difficulty, expected_difficulty, blocks_since_sync, LWMA_WINDOW
+                        );
+                    } else {
+                        return Err(BlockchainError::InvalidDifficulty);
+                    }
+                } else if !within_one_step {
+                    // After LWMA window: enforce normal 10% tolerance
+                    return Err(BlockchainError::InvalidDifficulty);
+                }
             } else if within_one_step {
                 // Not fast-synced but within one adjustment step — allow it
                 tracing::debug!(
@@ -922,11 +981,22 @@ impl ShieldedBlockchain {
 
     /// Add a validated block to the chain.
     /// Add a block without full validation (trusted source, e.g. fast-sync from seeds).
-    /// Only checks prev_hash continuity. Skips PoW, signatures, ZK proofs.
+    /// v1.4.0: Now validates PoW and MIN_DIFFICULTY even in trusted mode.
+    /// Skips ZK proofs, coinbase validation, and commitment root checks.
     /// Security: caller MUST verify a checkpoint hash after importing a batch.
     pub fn add_block_trusted(&mut self, block: ShieldedBlock) -> Result<(), BlockchainError> {
         if block.header.prev_hash != self.latest_hash() {
             return Err(BlockchainError::InvalidPrevHash);
+        }
+        // v1.4.0: Verify PoW even in trusted mode — prevents importing invalid blocks
+        block.verify().map_err(BlockchainError::BlockError)?;
+        // v1.4.0: Reject blocks below MIN_DIFFICULTY
+        if block.header.difficulty < MIN_DIFFICULTY {
+            tracing::warn!(
+                "Rejecting trusted block: difficulty {} below MIN_DIFFICULTY {}",
+                block.header.difficulty, MIN_DIFFICULTY
+            );
+            return Err(BlockchainError::InvalidDifficulty);
         }
         self.insert_block_internal(block, false)
     }
@@ -1027,6 +1097,13 @@ impl ShieldedBlockchain {
         self.height_index.push(hash);
         self.canonical_height = new_height;
 
+        // v1.4.0: Persist cumulative_work to DB for accurate fork choice after restart
+        if let Some(ref db) = self.db {
+            if let Err(e) = db.save_cumulative_work(new_height, self.cumulative_work) {
+                tracing::warn!("Failed to save cumulative_work at height {}: {}", new_height, e);
+            }
+        }
+
         // Checkpoint finalization
         if crate::config::CHECKPOINT_ENABLED
             && new_height > 0
@@ -1044,8 +1121,8 @@ impl ShieldedBlockchain {
         }
 
         // Save state snapshot every 10 blocks (for fast startup)
-        // In trusted mode with full_mode=false, save less frequently (every 500 blocks)
-        let snapshot_interval = if full_mode { 10 } else { 500 };
+        // v1.4.0: In trusted mode, save every 50 blocks (was 500) for faster recovery
+        let snapshot_interval = if full_mode { 10 } else { 50 };
         if new_height > 0 && new_height % snapshot_interval == 0 {
             if let Some(ref db) = self.db {
                 let snapshot = self.state.snapshot_pq();
@@ -1090,6 +1167,19 @@ impl ShieldedBlockchain {
 
         // Do we have the parent block? Check RAM + DB
         if !self.has_block(&block.header.prev_hash) {
+            // v1.4.0: Validate PoW and MIN_DIFFICULTY before storing orphans.
+            // Prevents attackers from filling the orphan pool with invalid blocks.
+            if let Err(e) = block.verify() {
+                tracing::debug!("Rejecting orphan with invalid PoW: {}", e);
+                return Ok(false);
+            }
+            if block.header.difficulty < MIN_DIFFICULTY {
+                tracing::debug!(
+                    "Rejecting orphan below MIN_DIFFICULTY: {} < {}",
+                    block.header.difficulty, MIN_DIFFICULTY
+                );
+                return Ok(false);
+            }
             // Cap orphans to prevent memory exhaustion from fork chain spam
             const MAX_ORPHANS: usize = 500;
             if self.orphans.len() >= MAX_ORPHANS {
@@ -1122,19 +1212,14 @@ impl ShieldedBlockchain {
             }
         }
 
-        // Heaviest chain: for short forks (within a few blocks of tip), compare
-        // heights directly since difficulty is the same on both chains.
-        // For deeper forks, use cumulative work from in-memory chain traversal.
-        let should_reorg = if fork_height > current_height {
-            true
-        } else if fork_height == current_height {
-            // Same height: use hash comparison as tiebreaker (lower hash wins)
-            block_hash < self.latest_hash()
-        } else {
-            // Fork is behind — only reorg if it has more cumulative work
-            let fork_work = self.calculate_chain_work(&block);
-            fork_work > self.cumulative_work
-        };
+        // v1.4.0: ALWAYS use cumulative_work for fork choice (heaviest chain rule).
+        // Never use height alone — a longer chain with less work is a spam attack.
+        let fork_work = self.calculate_chain_work(&block);
+        let should_reorg = self.should_prefer_candidate(
+            fork_work,
+            block.header.difficulty,
+            block_hash,
+        );
 
         if should_reorg {
             tracing::info!(
@@ -1169,8 +1254,26 @@ impl ShieldedBlockchain {
 
     /// Calculate cumulative work for a chain ending at the given block.
     /// Used for heaviest-chain fork choice (inspired by Quantus/Bitcoin).
+    /// v1.4.0: Checks DB cumulative_work tree first for the parent's stored work.
+    /// Falls back to chain traversal only on DB miss (avoids LRU eviction issues).
     fn calculate_chain_work(&self, block: &ShieldedBlock) -> u128 {
-        let mut work = block.header.difficulty as u128;
+        let block_work = block.header.difficulty as u128;
+
+        // Try to get parent's cumulative work from DB (fast path)
+        if let Some(ref db) = self.db {
+            // Find the parent's height — check if it's in our height_index
+            let parent_height = if block.coinbase.height > 0 {
+                block.coinbase.height - 1
+            } else {
+                0
+            };
+            if let Ok(Some(parent_work)) = db.get_cumulative_work(parent_height) {
+                return parent_work + block_work;
+            }
+        }
+
+        // Slow path: traverse the chain in memory (pre-v1.4.0 fallback)
+        let mut work = block_work;
         let mut prev_hash = block.header.prev_hash;
 
         while let Some(parent) = self.get_block(&prev_hash) {
@@ -1182,6 +1285,32 @@ impl ShieldedBlockchain {
         }
 
         work
+    }
+
+    /// v1.4.0: Determine if a candidate fork should replace the current chain.
+    /// Compares: cumulative work first, then tip difficulty, then hash as final tiebreaker.
+    /// Returns true if the candidate chain should be preferred.
+    fn should_prefer_candidate(
+        &self,
+        candidate_work: u128,
+        candidate_difficulty: u64,
+        candidate_hash: [u8; 32],
+    ) -> bool {
+        if candidate_work > self.cumulative_work {
+            return true;
+        }
+        if candidate_work < self.cumulative_work {
+            return false;
+        }
+        // Equal work: prefer higher difficulty tip (harder to produce)
+        if candidate_difficulty > self.difficulty {
+            return true;
+        }
+        if candidate_difficulty < self.difficulty {
+            return false;
+        }
+        // Equal work and difficulty: lower hash wins (deterministic tiebreaker)
+        candidate_hash < self.latest_hash()
     }
 
     /// Get the cumulative work of the current chain.
@@ -1784,11 +1913,14 @@ impl ShieldedBlockchain {
 
         // Set chain metadata — use next_difficulty so validation works after fast-sync
         self.difficulty = next_difficulty;
-        // Use peer's actual cumulative_work if available, otherwise estimate
+        // v1.4.0: Use peer's actual cumulative_work if available.
+        // When unavailable (peer_cumulative_work == 0), use MIN_DIFFICULTY * height
+        // as a conservative estimate instead of difficulty * height (which could be
+        // manipulated by a malicious peer claiming high difficulty).
         self.cumulative_work = if peer_cumulative_work > 0 {
             peer_cumulative_work
         } else {
-            difficulty as u128 * height as u128
+            MIN_DIFFICULTY as u128 * height as u128
         };
         self.fast_sync_base_height = height;
         // Save commitment count at snapshot time for correct position calculation
