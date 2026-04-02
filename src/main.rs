@@ -270,13 +270,9 @@ async fn wait_for_initial_sync(
                         "Fork detected at height {}. Force re-sync from network (wiping local chain)...",
                         local_height
                     );
-                    // Nuclear option: wipe local chain and fast-sync from peer.
-                    // This is safe because we haven't started mining yet.
-                    {
-                        let mut chain = state.blockchain.write().unwrap();
-                        chain.reset_for_resync();
-                    }
-                    // Now sync_from_peer will fast-sync from scratch
+                    // v1.4.1: Do NOT wipe chain. Just attempt normal sync — the peer
+                    // may have a heavier chain and sync_from_peer will handle fork resolution.
+                    // Wiping was the cause of catastrophic chain loss.
                     let _ = tsn::network::sync_from_peer(state.clone(), &peer_url).await;
                 }
             } else {
@@ -2811,11 +2807,10 @@ async fn cmd_node(
                                     current_height, stuck_consecutive, verified_max_height
                                 );
 
-                                // Full wipe via reset_for_resync
-                                {
-                                    let mut chain = mine_state.blockchain.write().unwrap();
-                                    chain.reset_for_resync();
-                                }
+                                // v1.4.1: Do NOT wipe chain. Attempt snapshot sync WITHOUT wiping first.
+                                // If snapshot is at a higher height with more work, import it on top.
+                                // Wiping was the cause of catastrophic chain loss.
+                                tracing::info!("Attempting snapshot sync without chain wipe...");
 
                                 // Attempt snapshot sync from best peer
                                 if let Some(peer_url) = best_peer {
@@ -3112,12 +3107,9 @@ async fn cmd_node(
                                     peer_work, local_work, peer_height, unaccepted_count
                                 );
                                 if unaccepted_count >= 2 {
-                                    tracing::error!("FORK CONFIRMED: peer chain is heavier. Re-syncing...");
+                                    tracing::error!("FORK CONFIRMED: peer chain is heavier. Re-syncing (no wipe)...");
                                     mine_state.reorg_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    {
-                                        let mut chain = mine_state.blockchain.write().unwrap();
-                                        chain.reset_for_resync();
-                                    }
+                                    // v1.4.1: Do NOT wipe chain. Let sync_from_peer handle fork resolution.
                                     let _ = tsn::network::sync_from_peer(mine_state.clone(), peer).await;
                                     if let Some(cancel) = mine_state.mining_cancel.read().unwrap().as_ref() {
                                         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
