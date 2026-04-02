@@ -332,12 +332,14 @@ impl ShieldedBlockchain {
                     .unwrap_or(0);
                 if fast_sync_base_for_work > 0 && counted < height + 1 {
                     let missing = (height + 1) - counted;
-                    let avg_diff = if counted > 0 { cumulative_work / counted as u128 } else { difficulty as u128 };
-                    let estimated_work = avg_diff * missing as u128;
+                    // Use MIN_DIFFICULTY (1000) for estimation — same on all nodes,
+                    // conservative, and prevents work inflation from variable avg_diff.
+                    let est_diff: u128 = 1_500_000; // MIN_DIFFICULTY — hardcoded for consistency across all nodes
+                    let estimated_work = est_diff * missing as u128;
                     cumulative_work += estimated_work;
                     tracing::info!(
-                        "cumulative_work: {} real blocks (work={}), {} estimated (avg_diff={}, est_work={}), total={}",
-                        counted, cumulative_work - estimated_work, missing, avg_diff, estimated_work, cumulative_work
+                        "cumulative_work: {} real blocks (work={}), {} estimated (est_diff={}, est_work={}), total={}",
+                        counted, cumulative_work - estimated_work, missing, est_diff, estimated_work, cumulative_work
                     );
                 } else {
                     tracing::info!("cumulative_work recalculated from {} blocks: {}", counted, cumulative_work);
