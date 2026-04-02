@@ -396,21 +396,46 @@ async fn find_common_ancestor(
 ) -> Result<u64, SyncError> {
     // Check recent blocks to find where chains diverged
     // Start from current height and go back until we find a matching block
-    let check_depth = 100u64.min(start_height); // Don't go back more than 100 blocks
+    let check_depth = 100u64.min(start_height);
+
+    // Get fast_sync_base to know where real blocks start
+    let fast_sync_base = {
+        let chain = state.blockchain.read()
+            .map_err(|e| SyncError::LockPoisoned(format!("read lock: {}", e)))?;
+        chain.fast_sync_base_height()
+    };
 
     for offset in 0..check_depth {
         let height = start_height - offset;
 
+        // Skip heights below fast_sync_base — we only have placeholders there
+        if height < fast_sync_base && fast_sync_base > 0 {
+            debug!("Skipping height {} (below fast_sync_base {})", height, fast_sync_base);
+            continue;
+        }
+
         // Get our block at this height
-        // SECURITY FIX: Gestion sécurisée du RwLock poisoning
         let local_hash = {
             let chain = state.blockchain.read()
-                .map_err(|e| SyncError::LockPoisoned(format!("Blockchain read lock poisoned: {}", e)))?;
-            chain.get_block_by_height(height).map(|b| hex::encode(b.hash()))
+                .map_err(|e| SyncError::LockPoisoned(format!("read lock: {}", e)))?;
+            // Try get_block_by_height first, fall back to height_index hash
+            match chain.get_block_by_height(height) {
+                Some(b) => {
+                    let h = hex::encode(b.hash());
+                    // Skip placeholder hashes
+                    if h == "0".repeat(64) { None } else { Some(h) }
+                }
+                None => {
+                    // Block not in DB but hash might be in height_index
+                    chain.get_hash_at_height(height).and_then(|h| {
+                        let hex = hex::encode(h);
+                        if hex == "0".repeat(64) { None } else { Some(hex) }
+                    })
+                }
+            }
         };
 
         if let Some(local_hash) = local_hash {
-            // Get peer's block at this height
             let block_url = format!("{}/block/height/{}", peer_url, height);
             if let Ok(resp) = client.get(&block_url).send().await {
                 if resp.status().is_success() {
@@ -425,16 +450,57 @@ async fn find_common_ancestor(
         }
     }
 
-    // SECURITY: If we can't find common ancestor, the peer's chain is incompatible.
-    // NEVER rollback to genesis — this would destroy the entire chain.
+    // No common ancestor: instead of banning, try snapshot re-sync if peer has
+    // valid checkpoints. This handles fast-synced nodes that diverged.
     warn!(
-        "No common ancestor found in last {} blocks — chains are incompatible. Ignoring peer.",
-        check_depth
+        "No common ancestor found in last {} blocks with peer {}.",
+        check_depth, peer_id(peer_url)
     );
+
+    // Verify peer has valid checkpoints before snapshot re-sync
+    let peer_valid = verify_peer_checkpoints(client, peer_url).await;
+    if peer_valid {
+        info!(
+            "Peer {} passes checkpoint validation — triggering snapshot re-sync instead of ban",
+            peer_id(peer_url)
+        );
+        // Wipe local chain and let the caller handle snapshot sync
+        let mut chain = state.blockchain.write()
+            .map_err(|e| SyncError::LockPoisoned(format!("write lock: {}", e)))?;
+        chain.reset_for_snapshot_resync();
+        return Ok(0); // Height 0 triggers snapshot sync in the caller
+    }
+
     Err(SyncError::InvalidResponse(format!(
         "No common ancestor found in last {} blocks — peer chain incompatible",
         check_depth
     )))
+}
+
+/// Verify that a peer's chain matches our hardcoded checkpoints.
+/// Returns true if the peer is on the canonical chain.
+async fn verify_peer_checkpoints(client: &reqwest::Client, peer_url: &str) -> bool {
+    for &(cp_height, cp_hash) in crate::config::HARDCODED_CHECKPOINTS {
+        let url = format!("{}/block/height/{}", peer_url, cp_height);
+        match client.get(&url).timeout(Duration::from_secs(5)).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(block) = resp.json::<PeerBlockInfo>().await {
+                    if block.hash != cp_hash {
+                        warn!(
+                            "Peer {} FAILS checkpoint at height {}: expected {}, got {}",
+                            peer_id(peer_url), cp_height, &cp_hash[..16], &block.hash[..16]
+                        );
+                        return false;
+                    }
+                }
+            }
+            _ => {
+                // Peer doesn't have this block — might be fast-synced, skip this checkpoint
+                continue;
+            }
+        }
+    }
+    true
 }
 
 /// Broadcast a newly mined block to all peers.

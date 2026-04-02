@@ -522,6 +522,28 @@ impl ShieldedBlockchain {
         self.verifying_params.as_ref()
     }
 
+    /// Reset chain to height 0 for snapshot re-sync from peers.
+    /// Used when no common ancestor is found but peer passes checkpoint validation.
+    /// Safer than full DB wipe — preserves DB structure, just resets chain state.
+    pub fn reset_for_snapshot_resync(&mut self) {
+        tracing::warn!("RESYNC: Resetting chain to height 0 for snapshot re-sync");
+        self.height_index.clear();
+        self.height_index.push([0u8; 32]); // Genesis placeholder
+        self.canonical_height = 0;
+        self.cumulative_work = 0;
+        self.fast_sync_base_height = 0;
+        self.fast_sync_commitment_offset = 0;
+        self.prev_block_states.clear();
+        self.state = ShieldedState::new();
+        if let Some(ref db) = self.db {
+            let _ = db.set_metadata("height", "0");
+            let _ = db.set_metadata("cumulative_work", "0");
+            let _ = db.set_metadata("fast_sync_base_height", "0");
+            let _ = db.clear_state_snapshot();
+        }
+        tracing::info!("RESYNC: Chain reset to height 0, ready for snapshot sync");
+    }
+
     /// Get the current chain height (0-indexed).
     /// Uses canonical_height (persisted in DB metadata) — NOT height_index.len().
     pub fn height(&self) -> u64 {
