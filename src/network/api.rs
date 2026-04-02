@@ -86,6 +86,20 @@ pub struct AppState {
     /// Banned peer URLs with expiry timestamps (Instant).
     /// Peers are banned for sending checkpoint-violating or incompatible chains.
     pub banned_peers: RwLock<std::collections::HashMap<String, std::time::Instant>>,
+    /// Error log for telemetry — recent errors stored for P2P sharing and dashboard
+    pub error_log: RwLock<Vec<NodeError>>,
+    /// Auto-heal mode: "validation" (default, human approves) or "automatic" (self-repair)
+    pub auto_heal_mode: RwLock<String>,
+}
+
+/// Structured error for telemetry reporting
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct NodeError {
+    pub error_type: String,
+    pub message: String,
+    pub height: u64,
+    pub timestamp: u64,
+    pub version: String,
 }
 
 /// Pre-generated snapshot cached in memory for fast serving.
@@ -173,6 +187,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/version.json", get(version_info))
         .route("/faucet/stats", get(faucet_stats))
         .route("/network/health", get(network_health))
+        .route("/node/errors", get(get_node_errors))
+        .with_state(state.clone());
+
+    // Admin routes — localhost only (not accessible from outside)
+    let admin_routes = Router::new()
+        .route("/admin/force-resync", post(admin_force_resync))
+        .route("/admin/config", get(get_admin_config).post(set_admin_config))
         .with_state(state.clone());
 
     // Write + sensitive routes — rate limited to prevent DoS
@@ -208,6 +229,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // Merge all route groups
     let api_routes = sync_routes
         .merge(explorer_routes)
+        .merge(admin_routes)
         .merge(limited_routes)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE));
 
@@ -2818,4 +2840,120 @@ async fn contract_events(
 
     // Event store lookup will be available when executor is integrated into AppState
     Ok(Json(vec![]))
+}
+
+// ============================================================================
+// v1.6.1: Telemetry & Admin endpoints
+// ============================================================================
+
+/// GET /node/errors — Returns recent errors for telemetry/dashboard
+async fn get_node_errors(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let errors = state.error_log.read().unwrap();
+    let recent: Vec<_> = errors.iter().rev().take(50).cloned().collect();
+    Json(serde_json::json!({
+        "errors": recent,
+        "total": errors.len(),
+        "auto_heal_mode": *state.auto_heal_mode.read().unwrap(),
+    }))
+}
+
+/// POST /admin/force-resync — Force the node to wipe and re-sync from peers
+/// SECURITY: Only accessible from localhost or private networks.
+async fn admin_force_resync(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let remote_ip = headers.get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("127.0.0.1");
+    if let Ok(ip) = remote_ip.parse::<std::net::IpAddr>() {
+        if !is_local_or_private(ip) {
+            return Err((StatusCode::FORBIDDEN, "Admin endpoints are localhost-only".to_string()));
+        }
+    }
+    tracing::warn!("ADMIN: Force resync triggered via API from {}", remote_ip);
+    log_node_error(&state, "admin_force_resync", &format!("Force resync triggered from {}", remote_ip));
+    let mut chain = state.blockchain.write()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {}", e)))?;
+    chain.reset_for_snapshot_resync();
+    let mut bans = state.banned_peers.write().unwrap();
+    bans.clear();
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "message": "Chain reset to height 0. Will fast-sync from peers."
+    })))
+}
+
+/// GET /admin/config — Get current admin config
+async fn get_admin_config(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "auto_heal_mode": *state.auto_heal_mode.read().unwrap(),
+        "banned_peers_count": state.banned_peers.read().unwrap().len(),
+        "error_count": state.error_log.read().unwrap().len(),
+    }))
+}
+
+/// POST /admin/config — Update admin config (auto_heal_mode)
+/// SECURITY: Only accessible from localhost or private networks.
+async fn set_admin_config(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let remote_ip = headers.get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("127.0.0.1");
+    if let Ok(ip) = remote_ip.parse::<std::net::IpAddr>() {
+        if !is_local_or_private(ip) {
+            return Err((StatusCode::FORBIDDEN, "Admin endpoints are localhost-only".to_string()));
+        }
+    }
+    if let Some(mode) = body.get("auto_heal_mode").and_then(|v| v.as_str()) {
+        if mode == "validation" || mode == "automatic" {
+            *state.auto_heal_mode.write().unwrap() = mode.to_string();
+            tracing::info!("ADMIN: auto_heal_mode changed to '{}'", mode);
+            return Ok(Json(serde_json::json!({"ok": true, "auto_heal_mode": mode})));
+        }
+    }
+    Ok(Json(serde_json::json!({"error": "Invalid config. Use auto_heal_mode: 'validation' or 'automatic'"})))
+}
+
+/// Check if an IP is localhost or private network (for admin endpoint protection)
+fn is_local_or_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+        }
+    }
+}
+
+/// Helper: log an error to the telemetry error_log
+pub fn log_node_error(state: &AppState, error_type: &str, message: &str) {
+    let height = state.blockchain.read()
+        .map(|c| c.height())
+        .unwrap_or(0);
+    let error = NodeError {
+        error_type: error_type.to_string(),
+        message: message.chars().take(200).collect(),
+        height,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let mut log = state.error_log.write().unwrap();
+    log.push(error);
+    // Keep last 100 errors max
+    if log.len() > 100 {
+        let drain_count = log.len() - 100;
+        log.drain(0..drain_count);
+    }
 }

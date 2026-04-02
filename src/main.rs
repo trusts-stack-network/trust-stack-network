@@ -1872,8 +1872,8 @@ async fn cmd_node(
 
         // v1.4.0: Select sync peer by cumulative_work (heaviest chain), not just height.
         // Query /chain/info for work from each peer. Keep peers within 5% of max work.
-        let mut eligible_peers: Vec<(String, u64, u128)> = Vec::new(); // (url, height, work)
-        let mut max_work: u128 = 0;
+        // v1.6.1: Select peers by HEIGHT only, not cumulative_work
+        let mut eligible_peers: Vec<(String, u64)> = Vec::new(); // (url, height)
         let mut max_height = 0u64;
         for peer_url in &peers {
             let info_url = format!("{}/chain/info", peer_url);
@@ -1883,26 +1883,21 @@ async fn cmd_node(
             {
                 if let Ok(info) = resp.json::<serde_json::Value>().await {
                     let peer_height = info["height"].as_u64().unwrap_or(0);
-                    let peer_work = info["cumulative_work"].as_u64().unwrap_or(0) as u128;
                     if peer_height > local_height + 10 {
-                        if peer_work > max_work {
-                            max_work = peer_work;
-                        }
                         if peer_height > max_height {
                             max_height = peer_height;
                         }
-                        eligible_peers.push((peer_url.clone(), peer_height, peer_work));
+                        eligible_peers.push((peer_url.clone(), peer_height));
                     }
                 }
             }
         }
-        // v1.4.0: Keep only peers within 5% of max cumulative_work (not just height)
-        let work_threshold = max_work.saturating_sub(max_work / 20); // 95% of max work
-        eligible_peers.retain(|(_, _, w)| *w >= work_threshold);
+        // Keep only peers within 2 blocks of the highest
+        eligible_peers.retain(|(_, h)| *h >= max_height.saturating_sub(2));
         // Random selection to distribute load across seeds
         use rand::seq::SliceRandom;
         let best_peer = eligible_peers.choose(&mut rand::thread_rng())
-            .map(|(url, h, _)| (url.clone(), *h));
+            .map(|(url, h)| (url.clone(), *h));
 
         if let Some((peer_url, peer_height)) = best_peer {
             let behind = peer_height - local_height;
@@ -2170,6 +2165,8 @@ async fn cmd_node(
         reorg_count: std::sync::atomic::AtomicU64::new(0),
         reorg_lock: tokio::sync::RwLock::new(()),
         banned_peers: std::sync::RwLock::new(std::collections::HashMap::new()),
+        error_log: std::sync::RwLock::new(Vec::new()),
+        auto_heal_mode: std::sync::RwLock::new("validation".to_string()),
     });
 
     // ========================================================================
@@ -2299,7 +2296,10 @@ async fn cmd_node(
                     resync_window_start = std::time::Instant::now();
                 }
 
-                // Check 1: All peers banned → clear bans
+                // Check auto_heal_mode
+                let is_auto = *watchdog_state.auto_heal_mode.read().unwrap() == "automatic";
+
+                // Check 1: All peers banned → clear bans (always auto, even in validation mode)
                 {
                     let peers = watchdog_state.peers.read().unwrap();
                     let bans = watchdog_state.banned_peers.read().unwrap();
@@ -2309,6 +2309,7 @@ async fn cmd_node(
                         drop(bans);
                         drop(peers);
                         tracing::warn!("WATCHDOG: All peers banned! Clearing ban list.");
+                        tsn::network::log_node_error(&watchdog_state, "all_peers_banned", "All peers were banned, clearing ban list");
                         let mut bans = watchdog_state.banned_peers.write().unwrap();
                         bans.clear();
                     }
@@ -2327,12 +2328,15 @@ async fn cmd_node(
                         }
                         if let Some(since) = stuck_since {
                             if since.elapsed() > std::time::Duration::from_secs(300) {
-                                tracing::warn!(
-                                    "WATCHDOG: Height stuck at {} for 5+ min. Triggering snapshot re-sync.",
-                                    current_height
-                                );
-                                let mut chain = watchdog_state.blockchain.write().unwrap();
-                                chain.reset_for_snapshot_resync();
+                                let msg = format!("Height stuck at {} for 5+ min", current_height);
+                                tracing::warn!("WATCHDOG: {}. Triggering snapshot re-sync.", msg);
+                                tsn::network::log_node_error(&watchdog_state, "stuck_height", &msg);
+                                if is_auto {
+                                    let mut chain = watchdog_state.blockchain.write().unwrap();
+                                    chain.reset_for_snapshot_resync();
+                                } else {
+                                    tracing::info!("WATCHDOG: Mode validation — action proposée, en attente d'approbation via /admin/force-resync");
+                                }
                                 stuck_since = None;
                                 resync_count += 1;
                                 last_height = 0;
@@ -2343,15 +2347,18 @@ async fn cmd_node(
 
                 // Check 3: Too many resyncs in short window → wipe completely
                 if resync_count >= 3 {
-                    tracing::error!(
-                        "WATCHDOG: {} resyncs in 5 min — chain is unstable. Full wipe + fresh sync.",
-                        resync_count
-                    );
-                    let mut chain = watchdog_state.blockchain.write().unwrap();
-                    chain.reset_for_snapshot_resync();
-                    // Clear all bans so we can sync from anyone
-                    let mut bans = watchdog_state.banned_peers.write().unwrap();
-                    bans.clear();
+                    let msg = format!("{} resyncs in 5 min — chain is unstable", resync_count);
+                    tracing::error!("WATCHDOG: {}.", msg);
+                    tsn::network::log_node_error(&watchdog_state, "resync_loop", &msg);
+                    if is_auto {
+                        tracing::warn!("WATCHDOG: Auto mode — full wipe + fresh sync.");
+                        let mut chain = watchdog_state.blockchain.write().unwrap();
+                        chain.reset_for_snapshot_resync();
+                        let mut bans = watchdog_state.banned_peers.write().unwrap();
+                        bans.clear();
+                    } else {
+                        tracing::warn!("WATCHDOG: Validation mode — action required: POST /admin/force-resync");
+                    }
                     resync_count = 0;
                     last_height = 0;
                     stuck_since = None;
@@ -2365,11 +2372,11 @@ async fn cmd_node(
                             if let Some(actual) = chain.get_hash_at_height(cp_height) {
                                 let actual_hex = hex::encode(actual);
                                 if actual_hex != "0".repeat(64) && actual_hex != cp_hash {
-                                    tracing::error!(
-                                        "WATCHDOG: Checkpoint violation at height {}! Re-syncing.",
-                                        cp_height
-                                    );
+                                    let msg = format!("Checkpoint violation at height {}", cp_height);
+                                    tracing::error!("WATCHDOG: {}! Re-syncing.", msg);
+                                    tsn::network::log_node_error(&watchdog_state, "checkpoint_violation", &msg);
                                     drop(chain);
+                                    // Always auto for checkpoint violations — chain is on wrong fork
                                     let mut chain_w = watchdog_state.blockchain.write().unwrap();
                                     chain_w.reset_for_snapshot_resync();
                                     let mut bans = watchdog_state.banned_peers.write().unwrap();
@@ -2847,20 +2854,18 @@ async fn cmd_node(
                                         }
                                     }
                                 }
-                                // Find max work and count peers within 5% of it
-                                let max_w = peer_infos.iter().map(|(_, _, w)| *w).max().unwrap_or(0);
-                                let threshold_w = max_w.saturating_sub(max_w / 20);
+                                // v1.6.1: Select peer by HEIGHT only, not work
+                                let max_h = peer_infos.iter().map(|(_, h, _)| *h).max().unwrap_or(0);
                                 let agreeing: Vec<_> = peer_infos.iter()
-                                    .filter(|(_, _, w)| *w >= threshold_w)
+                                    .filter(|(_, h, _)| *h >= max_h.saturating_sub(2))
                                     .collect();
-                                // Require at least 2 agreeing peers (or all if only 1 peer available)
                                 let best: Option<(String, u64)> = if agreeing.len() >= 2 || (peer_infos.len() == 1 && !peer_infos.is_empty()) {
                                     agreeing.iter()
-                                        .max_by_key(|(_, _, w)| *w)
+                                        .max_by_key(|(_, h, _)| *h)
                                         .map(|(url, h, _)| (url.clone(), *h))
                                 } else {
                                     tracing::warn!(
-                                        "Auto-resync: only {}/{} peers agree on max work — skipping resync",
+                                        "Auto-resync: only {}/{} peers at max height — skipping resync",
                                         agreeing.len(), peer_infos.len()
                                     );
                                     None
@@ -2952,10 +2957,9 @@ async fn cmd_node(
                             {
                                 if let Ok(info) = resp.json::<serde_json::Value>().await {
                                     let h = info["height"].as_u64().unwrap_or(0);
-                                    let w = info["cumulative_work"].as_u64().unwrap_or(0) as u128;
-                                    if h > 0 && (w > _peer_max_work || (w == 0 && h > verified_max_height)) {
+                                    // v1.6.1: Select peer by height only
+                                    if h > verified_max_height {
                                         verified_max_height = h;
-                                        _peer_max_work = w;
                                         best_peer = Some(peer.clone());
                                     }
                                 }
@@ -3274,35 +3278,35 @@ async fn cmd_node(
                     broadcast_block(&mined_block, &current_peers, &client).await;
                 }
 
-                // Fork check: compare cumulative_work with peers to detect forks
+                // v1.6.1: Fork check by HEIGHT + HASH, never by cumulative_work.
+                // Peer-reported work is unreliable (different fast-sync estimates).
                 if let Some(peer) = current_peers.first() {
                     let height = mined_block.coinbase.height;
                     let ci_url = format!("{}/chain/info", peer);
                     if let Ok(resp) = client.get(&ci_url).timeout(std::time::Duration::from_secs(5)).send().await {
                         if let Ok(peer_info) = resp.json::<serde_json::Value>().await {
                             let peer_height = peer_info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let peer_work = peer_info.get("cumulative_work").and_then(|v| v.as_u64()).unwrap_or(0) as u128;
                             let peer_hash = peer_info.get("latest_hash").and_then(|v| v.as_str()).unwrap_or("");
 
-                            let (local_work, local_hash_hex) = {
+                            let local_hash_hex = {
                                 let chain = mine_state.blockchain.read().unwrap();
-                                (chain.cumulative_work(), hex::encode(chain.latest_hash()))
+                                hex::encode(chain.latest_hash())
                             };
 
                             if peer_hash == local_hash_hex {
                                 // Same tip — no fork
+                                tracing::info!("Block #{} mined, synced with peers at height {}", height, peer_height);
                                 unaccepted_count = 0;
-                            } else if peer_work > local_work {
-                                // Peer has heavier chain — resync to them
+                            } else if peer_height > height {
+                                // Peer is ahead by height — we might be on a fork
                                 unaccepted_count += 1;
                                 tracing::warn!(
-                                    "FORK: peer has heavier chain (peer work: {}, local: {}, peer height: {}, strike {}/2)",
-                                    peer_work, local_work, peer_height, unaccepted_count
+                                    "FORK: peer ahead (peer h={}, local h={}, strike {}/2)",
+                                    peer_height, height, unaccepted_count
                                 );
                                 if unaccepted_count >= 2 {
-                                    tracing::error!("FORK CONFIRMED: peer chain is heavier. Re-syncing (no wipe)...");
+                                    tracing::error!("FORK CONFIRMED: peer is ahead. Re-syncing...");
                                     mine_state.reorg_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    // v1.4.1: Do NOT wipe chain. Let sync_from_peer handle fork resolution.
                                     let _ = tsn::network::sync_from_peer(mine_state.clone(), peer).await;
                                     if let Some(cancel) = mine_state.mining_cancel.read().unwrap().as_ref() {
                                         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -3310,8 +3314,8 @@ async fn cmd_node(
                                     unaccepted_count = 0;
                                 }
                             } else {
-                                // Our chain is heavier or equal — we're fine, peer will follow us
-                                tracing::info!("Block #{} mined, our chain is heaviest (work: {} vs peer: {})", height, local_work, peer_work);
+                                // We're at same height or ahead — peer will sync to us
+                                tracing::info!("Block #{} mined, at or ahead of peers (local h={}, peer h={})", height, height, peer_height);
                                 unaccepted_count = 0;
                             }
                         }

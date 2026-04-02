@@ -23,7 +23,7 @@ pub mod transport;
 pub mod auto_update;
 pub mod version_check;
 
-pub use api::{AppState, CachedSnapshot, MinerStats, create_router};
+pub use api::{AppState, CachedSnapshot, MinerStats, NodeError, create_router, log_node_error};
 pub use sync_gate::SyncGate;
 pub use mempool::Mempool;
 pub use discovery::discovery_loop;
