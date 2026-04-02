@@ -1,0 +1,226 @@
+/* FaucetGame.css - Dino Jump Game Styles */
+
+.faucet-game {
+  width: 100%;
+}
+
+.game-canvas-container {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  background: transparent;
+}
+
+.game-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: transparent;
+}
+
+.game-controls {
+  margin-top: 16px;
+  padding: 0 16px;
+  text-align: center;
+}
+
+.game-hint {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.game-results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.results-summary {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.results-tokens {
+  background: rgba(167, 139, 250, 0.15);
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  border-radius: 20px;
+  padding: 8px 16px;
+  color: #a78bfa;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.results-tsn {
+  background: rgba(74, 222, 128, 0.15);
+  border: 1px solid rgba(74, 222, 128, 0.3);
+  border-radius: 20px;
+  padding: 8px 16px;
+  color: #4ade80;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.results-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.claim-game-button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: linear-gradient(135deg, #38bdf8 0%, #c026d3 100%);
+  border: none;
+  border-radius: 12px;
+  padding: 14px 24px;
+  color: #fff;
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 4px 20px rgba(56, 189, 248, 0.3);
+}
+
+.claim-game-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 25px rgba(56, 189, 248, 0.4);
+}
+
+.claim-game-button:active {
+  transform: translateY(0);
+}
+
+.claim-logo {
+  position: relative;
+  width: 24px;
+  height: 24px;
+}
+
+.claim-logo .logo-circle {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.claim-logo .logo-circle.left {
+  left: 0;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.claim-logo .logo-circle.right {
+  right: 0;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.claim-text {
+  font-weight: 600;
+}
+
+.play-again-button {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 10px;
+  padding: 10px 20px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.play-again-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.5);
+  color: #fff;
+}
+
+.no-tokens-message {
+  color: #f87171;
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 600px) {
+  .game-controls {
+    margin-top: 12px;
+  }
+
+  .game-hint {
+    font-size: 0.85rem;
+  }
+
+  .results-summary {
+    gap: 8px;
+  }
+
+  .results-tokens,
+  .results-tsn {
+    padding: 6px 12px;
+    font-size: 0.85rem;
+  }
+
+  .results-actions {
+    gap: 10px;
+  }
+
+  .claim-game-button,
+  .play-again-button {
+    width: 100%;
+  }
+}
+
+/* Animation for token collection feedback */
+@keyframes token-pulse {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.results-tokens.collecting {
+  animation: token-pulse 0.3s ease-out;
+}
+
+/* Loading state */
+.game-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.game-loading::before {
+  content: '';
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #667eea;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 12px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

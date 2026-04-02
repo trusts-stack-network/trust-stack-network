@@ -1,0 +1,74 @@
+name: Validate Branding Assets
+
+on:
+  push:
+    paths:
+      - 'assets/branding/**'
+      - '.github/workflows/validate-branding.yml'
+  pull_request:
+    paths:
+      - 'assets/branding/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-assets:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install ImageMagick
+      run: sudo apt-get update && sudo apt-get install -y imagemagick
+      
+    - name: Validate image dimensions
+      run: |
+        set -e
+        
+        # Vérifier les bannières
+        for banner in assets/branding/banner_*.png; do
+          if [[ -f "$banner" ]]; then
+            echo "Validating $banner"
+            identify -format "%w %h" "$banner"
+          fi
+        done
+        
+        # Vérifier les avatars
+        for avatar in assets/branding/avatar_*.png; do
+          if [[ -f "$avatar" ]]; then
+            echo "Validating $avatar"
+            identify -format "%w %h" "$avatar"
+          fi
+        done
+        
+    - name: Check SVG validity
+      run: |
+        for svg in assets/*.svg; do
+          if [[ -f "$svg" ]]; then
+            echo "Checking $svg"
+            xmllint --noout "$svg"
+          fi
+        done
+        
+    - name: Validate branding guidelines
+      run: |
+        test -f docs/branding/BRANDING_GUIDELINES.md
+        test -f docs/branding/social-bios.md
+        test -f docs/branding/SOCIAL_CREATION_CHECKLIST.md
+        
+    - name: Generate asset report
+      run: |
+        echo "# Branding Assets Report" > branding-report.md
+        echo "" >> branding-report.md
+        echo "## Images" >> branding-report.md
+        ls -la assets/branding/*.png >> branding-report.md
+        echo "" >> branding-report.md
+        echo "## SVGs" >> branding-report.md
+        ls -la assets/*.svg >> branding-report.md
+        
+    - name: Upload report
+      uses: actions/upload-artifact@v4
+      with:
+        name: branding-report
+        path: branding-report.md

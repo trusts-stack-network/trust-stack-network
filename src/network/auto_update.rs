@@ -208,6 +208,9 @@ async fn check_for_update(
 }
 
 /// Check the GitHub Releases API for a newer version.
+///
+/// Also fetches the companion `.sha256` file from the same GitHub release
+/// so we can verify the download without depending on the fallback manifest.
 async fn check_github(client: &reqwest::Client) -> Option<ResolvedUpdate> {
     let resp = client
         .get(GITHUB_RELEASE_URL)
@@ -233,17 +236,52 @@ async fn check_github(client: &reqwest::Client) -> Option<ResolvedUpdate> {
     let asset_name = get_platform_asset_name(&version);
     let asset = release.assets.iter().find(|a| a.name == asset_name)?;
 
+    // Fetch SHA256 from the companion .sha256 file in the same GitHub release
+    let sha256_asset_name = format!("{}.sha256", asset_name);
+    let expected_sha256 = if let Some(sha256_asset) = release.assets.iter().find(|a| a.name == sha256_asset_name) {
+        match client
+            .get(&sha256_asset.browser_download_url)
+            .header("User-Agent", user_agent())
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(text) = resp.text().await {
+                    // Format: "sha256hash  filename" — extract just the hash
+                    let hash = text.split_whitespace().next().unwrap_or("").trim().to_string();
+                    if hash.len() == 64 {
+                        info!(sha256 = %hash, "Got SHA256 from GitHub companion file");
+                        Some(hash)
+                    } else {
+                        warn!("GitHub .sha256 file has unexpected format: {}", text.trim());
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => {
+                warn!("Failed to fetch GitHub .sha256 companion file");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     info!(
         current = %LOCAL_VERSION,
         available = %version,
         asset = %asset_name,
+        has_sha256 = expected_sha256.is_some(),
         "New release found on GitHub"
     );
 
     Some(ResolvedUpdate {
         version,
         download_url: asset.browser_download_url.clone(),
-        expected_sha256: None, // GitHub doesn't embed SHA256; use manifest for verification
+        expected_sha256,
     })
 }
 

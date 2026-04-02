@@ -1,0 +1,6 @@
+# Image légère pour bench Criterion dans CI
+FROM rust:1.75.0-bookworm
+WORKDIR /bench
+COPY . .
+RUN cargo bench --no-run
+ENTRYPOINT ["cargo", "bench"]

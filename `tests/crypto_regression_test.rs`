@@ -1,0 +1,8 @@
+#[test]
+fn test_verify_signature_vulnerability() {
+    // Tester la vulnérabilité spécifique ici
+    // Exemple :
+    let data = b"exemple de données";
+    let signature = b"signature malveillante";
+    assert!(verify_signature(data, signature).is_err());
+}

@@ -1,0 +1,22 @@
+{
+  "name": "tsn-circuits",
+  "version": "0.1.0",
+  "description": "Circom circuits for TSN shielded transactions",
+  "scripts": {
+    "compile:spend": "circom spend.circom --r1cs --wasm --sym -o build",
+    "compile:output": "circom output.circom --r1cs --wasm --sym -o build",
+    "compile:all": "npm run compile:spend && npm run compile:output",
+    "setup:spend": "snarkjs groth16 setup build/spend.r1cs powersOfTau28_hez_final_20.ptau build/spend_0000.zkey",
+    "setup:output": "snarkjs groth16 setup build/output.r1cs powersOfTau28_hez_final_20.ptau build/output_0000.zkey",
+    "export:spend-vkey": "snarkjs zkey export verificationkey build/spend_final.zkey build/spend_vkey.json",
+    "export:output-vkey": "snarkjs zkey export verificationkey build/output_final.zkey build/output_vkey.json",
+    "test": "mocha test/*.js --timeout 60000"
+  },
+  "dependencies": {
+    "circomlib": "^2.0.5",
+    "snarkjs": "^0.7.0"
+  },
+  "devDependencies": {
+    "mocha": "^10.2.0"
+  }
+}

@@ -1,0 +1,6 @@
+name: TSN Node CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]

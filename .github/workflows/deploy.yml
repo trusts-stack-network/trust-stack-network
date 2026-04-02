@@ -1,0 +1,391 @@
+name: 🚀 Deploy TSN Nodes
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy'
+        required: true
+        default: 'latest'
+      strategy:
+        description: 'Deployment strategy'
+        required: true
+        default: 'rolling'
+        type: choice
+        options:
+          - rolling
+          - canary
+          - blue-green
+      nodes:
+        description: 'Nodes to deploy (comma-separated, or "all")'
+        required: true
+        default: 'all'
+
+env:
+  DOCKER_REGISTRY: ghcr.io/tsn-network
+  IMAGE_NAME: tsn
+  ANSIBLE_HOST_KEY_CHECKING: false
+
+jobs:
+  # ===== BUILD ET TESTS =====
+  build:
+    name: 🔨 Build & Test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image-tag: ${{ steps.version.outputs.version }}
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 🏷️ Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+      
+      - name: 🦀 Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.75.0
+          profile: minimal
+          override: true
+          components: rustfmt, clippy
+      
+      - name: 📦 Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      
+      - name: 🔍 Check code format
+        run: cargo fmt --all -- --check
+      
+      - name: 🔍 Lint with Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      
+      - name: 🧪 Run tests
+        run: cargo test --all
+      
+      - name: 🔒 Security audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+      
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: 🔑 Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 🏗️ Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: devops/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            TSN_VERSION=${{ steps.version.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.run_id }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 🧪 Test Docker image
+        run: |
+          docker run --rm ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} --version
+
+  # ===== DÉPLOIEMENT =====
+  deploy:
+    name: 🚀 Deploy to Nodes
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    
+    strategy:
+      matrix:
+        environment: [production]
+    
+    environment:
+      name: ${{ matrix.environment }}
+      url: https://node1.tsn.network:8080
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: 📦 Install Ansible
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible docker jmespath
+      
+      - name: 🔑 Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TSN_DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H node1.tsn.network >> ~/.ssh/known_hosts
+          ssh-keyscan -H node2.tsn.network >> ~/.ssh/known_hosts
+          ssh-keyscan -H node3.tsn.network >> ~/.ssh/known_hosts
+          ssh-keyscan -H node4.tsn.network >> ~/.ssh/known_hosts
+          ssh-keyscan -H node5.tsn.network >> ~/.ssh/known_hosts
+      
+      - name: 🔍 Test connectivity
+        run: |
+          ansible all -i devops/ansible/inventory/hosts.yml -m ping
+      
+      - name: 💾 Backup before deployment
+        run: |
+          chmod +x scripts/backup-nodes.sh
+          ./scripts/backup-nodes.sh backup
+        env:
+          BACKUP_BASE_DIR: /tmp/tsn-backups
+      
+      - name: 🚀 Deploy with Ansible
+        run: |
+          strategy="${{ github.event.inputs.strategy || 'rolling' }}"
+          nodes="${{ github.event.inputs.nodes || 'all' }}"
+          
+          ansible_args="-i devops/ansible/inventory/hosts.yml"
+          ansible_args="$ansible_args -e tsn_version=${{ needs.build.outputs.version }}"
+          ansible_args="$ansible_args -e docker_registry=${{ env.DOCKER_REGISTRY }}"
+          ansible_args="$ansible_args -e deployment_strategy=$strategy"
+          
+          if [[ "$nodes" != "all" ]]; then
+            ansible_args="$ansible_args --limit $nodes"
+          fi
+          
+          if [[ "$strategy" == "rolling" ]]; then
+            ansible_args="$ansible_args -e deploy_serial=1"
+          elif [[ "$strategy" == "canary" ]]; then
+            # Déploiement canary: d'abord node1, puis les autres
+            echo "🐤 Canary deployment: node1 first"
+            ansible-playbook devops/ansible/deploy.yml $ansible_args --limit node1
+            
+            echo "⏳ Waiting for canary validation (5 minutes)..."
+            sleep 300
+            
+            echo "🚀 Deploying to remaining nodes"
+            ansible-playbook devops/ansible/deploy.yml $ansible_args --limit '!node1'
+          else
+            ansible-playbook devops/ansible/deploy.yml $ansible_args
+          fi
+      
+      - name: 🏥 Health check
+        run: |
+          ansible-playbook devops/ansible/deploy.yml \
+            -i devops/ansible/inventory/hosts.yml \
+            --tags health \
+            -e tsn_version=${{ needs.build.outputs.version }}
+      
+      - name: 📊 Generate deployment report
+        run: |
+          chmod +x scripts/monitor-nodes.sh
+          ./scripts/monitor-nodes.sh report > deployment-report.json
+      
+      - name: 📤 Upload deployment artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-report-${{ needs.build.outputs.version }}
+          path: |
+            deployment-report.json
+            /tmp/tsn-backups/
+          retention-days: 30
+      
+      - name: 💬 Notify Discord
+        if: always()
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: "TSN Deployment"
+          description: |
+            **Version:** ${{ needs.build.outputs.version }}
+            **Strategy:** ${{ github.event.inputs.strategy || 'rolling' }}
+            **Status:** ${{ job.status }}
+            **Commit:** ${{ github.sha }}
+          color: ${{ job.status == 'success' && 0x00ff00 || 0xff0000 }}
+
+  # ===== TESTS POST-DÉPLOIEMENT =====
+  post-deploy-tests:
+    name: 🧪 Post-Deploy Tests
+    runs-on: ubuntu-latest
+    needs: [build, deploy]
+    if: always() && needs.deploy.result == 'success'
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🔍 API Health Check
+        run: |
+          nodes=("node1" "node2" "node3" "node4" "node5")
+          failed_nodes=()
+          
+          for node in "${nodes[@]}"; do
+            echo "Testing $node..."
+            if curl -f --max-time 30 "http://$node.tsn.network:8080/health"; then
+              echo "✅ $node is healthy"
+            else
+              echo "❌ $node is unhealthy"
+              failed_nodes+=("$node")
+            fi
+          done
+          
+          if [[ ${#failed_nodes[@]} -gt 0 ]]; then
+            echo "Failed nodes: ${failed_nodes[*]}"
+            exit 1
+          fi
+      
+      - name: 🔗 Network Connectivity Test
+        run: |
+          # Test P2P connectivity
+          for i in {1..5}; do
+            echo "Testing P2P connectivity for node$i..."
+            nc -z "node$i.tsn.network" 9000 || {
+              echo "❌ P2P port not accessible on node$i"
+              exit 1
+            }
+          done
+          echo "✅ All P2P ports accessible"
+      
+      - name: 📊 Performance Test
+        run: |
+          # Test API response time
+          for i in {1..5}; do
+            echo "Testing API performance for node$i..."
+            response_time=$(curl -w "%{time_total}" -s -o /dev/null "http://node$i.tsn.network:8080/api/v1/blocks/latest")
+            echo "Node$i response time: ${response_time}s"
+            
+            # Fail if response time > 5 seconds
+            if (( $(echo "$response_time > 5.0" | bc -l) )); then
+              echo "❌ Response time too high for node$i"
+              exit 1
+            fi
+          done
+          echo "✅ All nodes responding within acceptable time"
+      
+      - name: 🔄 Sync Status Check
+        run: |
+          # Check if all nodes are synchronized
+          heights=()
+          for i in {1..5}; do
+            height=$(curl -s "http://node$i.tsn.network:8080/api/v1/blocks/latest" | jq -r '.height // 0')
+            heights+=("$height")
+            echo "Node$i height: $height"
+          done
+          
+          # Check if height difference is < 5 blocks
+          max_height=$(printf '%s\n' "${heights[@]}" | sort -n | tail -1)
+          min_height=$(printf '%s\n' "${heights[@]}" | sort -n | head -1)
+          height_diff=$((max_height - min_height))
+          
+          echo "Height difference: $height_diff blocks"
+          if [[ $height_diff -gt 5 ]]; then
+            echo "❌ Nodes are not synchronized (diff: $height_diff)"
+            exit 1
+          fi
+          echo "✅ All nodes are synchronized"
+
+  # ===== ROLLBACK EN CAS D'ÉCHEC =====
+  rollback:
+    name: 🔄 Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [build, deploy, post-deploy-tests]
+    if: always() && (needs.deploy.result == 'failure' || needs.post-deploy-tests.result == 'failure')
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: 📦 Install Ansible
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible docker
+      
+      - name: 🔑 Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TSN_DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+      
+      - name: 🔄 Automatic rollback
+        run: |
+          chmod +x scripts/update-nodes.sh
+          
+          # Rollback each node to previous version
+          for node in node1 node2 node3 node4 node5; do
+            echo "Rolling back $node..."
+            ./scripts/update-nodes.sh rollback "$node" || echo "Rollback failed for $node"
+          done
+      
+      - name: 💬 Notify rollback
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: "🔄 TSN Rollback Executed"
+          description: |
+            **Version:** ${{ needs.build.outputs.version }}
+            **Reason:** Deployment or post-deploy tests failed
+            **Status:** Rollback completed
+          color: 0xffa500
+
+  # ===== NETTOYAGE =====
+  cleanup:
+    name: 🧹 Cleanup
+    runs-on: ubuntu-latest
+    needs: [build, deploy, post-deploy-tests]
+    if: always()
+    
+    steps:
+      - name: 🧹 Cleanup old Docker images
+        run: |
+          # Keep only last 5 versions
+          docker images --format "table {{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" \
+            | grep "${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}" \
+            | sort -k2 -r \
+            | tail -n +6 \
+            | awk '{print $1}' \
+            | xargs -r docker rmi || true
+      
+      - name: 📊 Final status report
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ needs.build.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Status:** ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deploy Status:** ${{ needs.deploy.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tests Status:** ${{ needs.post-deploy-tests.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** $(date -u)" >> $GITHUB_STEP_SUMMARY

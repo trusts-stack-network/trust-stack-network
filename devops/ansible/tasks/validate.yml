@@ -1,0 +1,83 @@
+---
+# Validation de la configuration TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Validation des variables requises"
+  assert:
+    that:
+      - tsn_version is defined
+      - docker_registry is defined
+      - tsn_service_name is defined
+      - tsn_user is defined
+    fail_msg: "Variables TSN manquantes"
+    success_msg: "Variables TSN validées"
+    
+- name: "Validation de la version TSN"
+  assert:
+    that:
+      - tsn_version | regex_search('^(latest|v?[0-9]+\.[0-9]+\.[0-9]+.*|[a-f0-9]{7,40})$')
+    fail_msg: "Format de version TSN invalide: {{ tsn_version }}"
+    success_msg: "Version TSN valide: {{ tsn_version }}"
+    
+- name: "Validation du registry Docker"
+  assert:
+    that:
+      - docker_registry | regex_search('^[a-z0-9.-]+(/[a-z0-9._-]+)*$')
+    fail_msg: "Format de registry Docker invalide: {{ docker_registry }}"
+    success_msg: "Registry Docker valide: {{ docker_registry }}"
+    
+- name: "Validation des ports"
+  assert:
+    that:
+      - tsn_http_port | default(8080) | int > 1024
+      - tsn_http_port | default(8080) | int < 65536
+      - tsn_p2p_port | default(9000) | int > 1024
+      - tsn_p2p_port | default(9000) | int < 65536
+      - tsn_rpc_port | default(9001) | int > 1024
+      - tsn_rpc_port | default(9001) | int < 65536
+      - tsn_metrics_port | default(9090) | int > 1024
+      - tsn_metrics_port | default(9090) | int < 65536
+    fail_msg: "Configuration de ports invalide"
+    success_msg: "Configuration de ports valide"
+    
+- name: "Validation des limites de ressources"
+  assert:
+    that:
+      - memory_limit | default('2g') | regex_search('^[0-9]+[kmg]?$', ignorecase=True)
+      - cpu_limit | default('1.0') | float > 0
+      - cpu_limit | default('1.0') | float <= ansible_processor_vcpus
+    fail_msg: "Limites de ressources invalides"
+    success_msg: "Limites de ressources valides"
+    
+- name: "Validation du rôle de nœud"
+  assert:
+    that:
+      - node_role in ['seed', 'validator', 'archive', 'full']
+    fail_msg: "Rôle de nœud invalide: {{ node_role }}"
+    success_msg: "Rôle de nœud valide: {{ node_role }}"
+    
+- name: "Validation de l'ID de nœud"
+  assert:
+    that:
+      - node_id | int >= 1
+      - node_id | int <= 255
+    fail_msg: "ID de nœud invalide: {{ node_id }}"
+    success_msg: "ID de nœud valide: {{ node_id }}"
+    
+- name: "Vérification de l'unicité des IDs"
+  assert:
+    that:
+      - groups['tsn_nodes'] | map('extract', hostvars, 'node_id') | list | unique | length == groups['tsn_nodes'] | length
+    fail_msg: "IDs de nœuds non uniques détectés"
+    success_msg: "IDs de nœuds uniques validés"
+  run_once: true
+  
+- name: "Validation des répertoires"
+  assert:
+    that:
+      - tsn_base_dir | regex_search('^/[a-zA-Z0-9/_-]+$')
+      - tsn_data_dir | regex_search('^/[a-zA-Z0-9/_-]+$')
+      - tsn_config_dir | regex_search('^/[a-zA-Z0-9/_-]+$')
+      - tsn_logs_dir | regex_search('^/[a-zA-Z0-9/_-]+$')
+    fail_msg: "Chemins de répertoires invalides"
+    success_msg: "Chemins de répertoires valides"

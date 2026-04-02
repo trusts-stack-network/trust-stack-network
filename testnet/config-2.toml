@@ -1,0 +1,18 @@
+# Config nœud 2 – Testnet local TSN
+[node]
+name = "node-2"
+base_path = "/data"
+
+[rpc]
+listen = "0.0.0.0:9944"
+cors = ["*"]
+
+[p2p]
+listen = "0.0.0.0:30333"
+bootnodes = ["/dns/tsn-node-1/tcp/30333/p2p/12D3KooW..."]
+
+[consensus]
+mine = false
+
+[storage]
+path = "/data/db"

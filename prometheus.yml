@@ -1,0 +1,50 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "tsn_alerts.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+scrape_configs:
+  # TSN Node metrics
+  - job_name: 'tsn-node'
+    static_configs:
+      - targets: ['host.docker.internal:9091']  # TSN metrics server
+    scrape_interval: 5s
+    metrics_path: /metrics
+    scrape_timeout: 10s
+
+  # System metrics via node-exporter
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 15s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # TSN RPC API health checks
+  - job_name: 'tsn-rpc'
+    static_configs:
+      - targets: ['host.docker.internal:8545']  # TSN RPC server
+    metrics_path: /health
+    scrape_interval: 30s
+    scrape_timeout: 5s
+
+  # Multi-node TSN network (for production)
+  - job_name: 'tsn-network'
+    static_configs:
+      - targets: 
+        - 'tsn-node-1:9091'
+        - 'tsn-node-2:9091'
+        - 'tsn-node-3:9091'
+    scrape_interval: 10s
+    metrics_path: /metrics

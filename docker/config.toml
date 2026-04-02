@@ -1,0 +1,6 @@
+# TSN node runtime config
+base_path = "/data"
+chain = "testnet"
+rpc_port = 9944
+p2p_port = 30333
+max_peers = 50

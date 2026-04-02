@@ -1,0 +1,46 @@
+{
+  "name": "wallet",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.1.1",
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1",
+    "@noble/post-quantum": "^0.5.4",
+    "buffer": "^6.0.3",
+    "circomlibjs": "^0.1.7",
+    "ffjavascript": "^0.3.1",
+    "framer-motion": "^12.35.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.13.0",
+    "snarkjs": "^0.7.4",
+    "tsn-plonky2-wasm": "file:../plonky2-wasm/pkg",
+    "vite-plugin-node-polyfills": "^0.25.0"
+  },
+  "pqComments": {
+    "_note": "Post-quantum dependencies",
+    "_plonky2": "tsn-plonky2-wasm provides WASM STARK proving for V2 transactions (browser-compatible)"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.9",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vite": "^7.2.4"
+  }
+}

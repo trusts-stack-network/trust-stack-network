@@ -1,0 +1,74 @@
+---
+# Playbook principal de déploiement TSN
+# Trust Stack Network - Ansible Automation
+# Author: Yuki.T Release & DevOps Engineer
+
+- name: "Déploiement Trust Stack Network sur {{ ansible_play_hosts | length }} nœuds"
+  hosts: tsn_nodes
+  become: yes
+  gather_facts: yes
+  serial: "{{ deploy_serial | default('100%') }}"
+  
+  vars:
+    # Configuration par défaut (peut être surchargée)
+    tsn_version: "{{ tsn_version | default('latest') }}"
+    docker_registry: "{{ docker_registry | default('ghcr.io/tsn-network') }}"
+    force_recreate: "{{ force_recreate | default(false) }}"
+    skip_health_check: "{{ skip_health_check | default(false) }}"
+    deploy_timeout: 300
+    health_timeout: 120
+    
+  pre_tasks:
+    - name: "Vérification des prérequis"
+      include_tasks: tasks/prerequisites.yml
+      tags: [prerequisites, always]
+      
+    - name: "Validation de la configuration"
+      include_tasks: tasks/validate.yml
+      tags: [validate, always]
+
+  tasks:
+    - name: "Configuration du système"
+      include_tasks: tasks/system.yml
+      tags: [system]
+      
+    - name: "Installation Docker"
+      include_tasks: tasks/docker.yml
+      tags: [docker]
+      
+    - name: "Configuration utilisateur TSN"
+      include_tasks: tasks/user.yml
+      tags: [user]
+      
+    - name: "Déploiement du service TSN"
+      include_tasks: tasks/deploy.yml
+      tags: [deploy]
+      
+    - name: "Configuration systemd"
+      include_tasks: tasks/systemd.yml
+      tags: [systemd]
+      
+    - name: "Vérification de santé"
+      include_tasks: tasks/health.yml
+      tags: [health]
+      when: not skip_health_check | bool
+
+  post_tasks:
+    - name: "Collecte des métriques de déploiement"
+      include_tasks: tasks/metrics.yml
+      tags: [metrics]
+      
+    - name: "Rapport de déploiement"
+      include_tasks: tasks/report.yml
+      tags: [report, always]
+
+  handlers:
+    - name: restart tsn-node
+      systemd:
+        name: tsn-node
+        state: restarted
+        daemon_reload: yes
+      
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes

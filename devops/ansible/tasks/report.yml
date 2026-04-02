@@ -1,0 +1,298 @@
+---
+# Génération de rapports de déploiement
+# Trust Stack Network - Ansible Tasks
+
+- name: "Collecte des informations système"
+  setup:
+    filter: ansible_distribution*,ansible_kernel,ansible_memory_mb,ansible_processor*,ansible_mounts
+  register: system_info
+
+- name: "Collecte des informations Docker"
+  docker_host_info:
+  register: docker_info
+
+- name: "Collecte des informations du conteneur TSN"
+  docker_container_info:
+    name: tsn-node
+  register: container_info
+
+- name: "Test de performance de base"
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ tsn_http_port | default(8080) }}/api/v1/blocks/latest"
+    method: GET
+    timeout: 5
+  register: perf_test
+  ignore_errors: yes
+
+- name: "Collecte des métriques Prometheus"
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ tsn_metrics_port | default(9090) }}/metrics"
+    method: GET
+    timeout: 10
+    return_content: yes
+  register: prometheus_metrics
+  ignore_errors: yes
+
+- name: "Analyse des métriques Prometheus"
+  set_fact:
+    parsed_metrics:
+      block_height: "{{ prometheus_metrics.content | regex_search('tsn_blockchain_height ([0-9]+)', '\\1') | first | default('0') }}"
+      peer_count: "{{ prometheus_metrics.content | regex_search('tsn_network_peers_connected ([0-9]+)', '\\1') | first | default('0') }}"
+      memory_usage: "{{ prometheus_metrics.content | regex_search('process_resident_memory_bytes ([0-9]+)', '\\1') | first | default('0') }}"
+      cpu_usage: "{{ prometheus_metrics.content | regex_search('process_cpu_seconds_total ([0-9.]+)', '\\1') | first | default('0') }}"
+  when: prometheus_metrics.status == 200
+
+- name: "Vérification de l'espace disque"
+  shell: df -h {{ tsn_data_dir }} | tail -1 | awk '{print $4}'
+  register: disk_space
+  changed_when: false
+
+- name: "Collecte des logs récents"
+  command: docker logs tsn-node --tail 50
+  register: recent_logs
+  changed_when: false
+  ignore_errors: yes
+
+- name: "Analyse des erreurs dans les logs"
+  set_fact:
+    log_analysis:
+      error_count: "{{ recent_logs.stdout_lines | select('search', 'ERROR|FATAL') | list | length }}"
+      warning_count: "{{ recent_logs.stdout_lines | select('search', 'WARN') | list | length }}"
+      recent_errors: "{{ recent_logs.stdout_lines | select('search', 'ERROR|FATAL') | list | last(5) }}"
+  when: recent_logs.stdout_lines is defined
+
+- name: "Test de connectivité inter-nœuds"
+  uri:
+    url: "http://{{ hostvars[item]['ansible_host'] }}:{{ hostvars[item]['tsn_http_port'] | default(8080) }}/health"
+    method: GET
+    timeout: 5
+  register: peer_tests
+  loop: "{{ groups['tsn_nodes'] }}"
+  when: item != inventory_hostname
+  ignore_errors: yes
+
+- name: "Calcul de la connectivité réseau"
+  set_fact:
+    network_connectivity:
+      total_peers: "{{ groups['tsn_nodes'] | length - 1 }}"
+      reachable_peers: "{{ peer_tests.results | selectattr('status', 'defined') | selectattr('status', 'equalto', 200) | list | length }}"
+      connectivity_percentage: "{{ ((peer_tests.results | selectattr('status', 'defined') | selectattr('status', 'equalto', 200) | list | length) / (groups['tsn_nodes'] | length - 1) * 100) | round(1) }}"
+
+- name: "Compilation du rapport de déploiement"
+  set_fact:
+    deployment_report:
+      metadata:
+        node_name: "{{ inventory_hostname }}"
+        node_id: "{{ node_id }}"
+        node_role: "{{ node_role }}"
+        deployment_timestamp: "{{ ansible_date_time.iso8601 }}"
+        ansible_version: "{{ ansible_version.full }}"
+        tsn_version: "{{ tsn_version }}"
+        deployed_by: "{{ ansible_user_id }}"
+      
+      system:
+        os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+        kernel: "{{ ansible_kernel }}"
+        architecture: "{{ ansible_architecture }}"
+        cpu_cores: "{{ ansible_processor_vcpus }}"
+        memory_mb: "{{ ansible_memtotal_mb }}"
+        disk_space_available: "{{ disk_space.stdout | trim }}"
+      
+      docker:
+        version: "{{ docker_info.host_info.ServerVersion }}"
+        storage_driver: "{{ docker_info.host_info.Driver }}"
+        containers_running: "{{ docker_info.containers_running }}"
+        images_count: "{{ docker_info.images }}"
+      
+      container:
+        id: "{{ container_info.container.Id[:12] if container_info.container else 'N/A' }}"
+        status: "{{ container_info.container.State.Status if container_info.container else 'N/A' }}"
+        started_at: "{{ container_info.container.State.StartedAt if container_info.container else 'N/A' }}"
+        image: "{{ container_info.container.Config.Image if container_info.container else 'N/A' }}"
+        ports: "{{ container_info.container.NetworkSettings.Ports if container_info.container else {} }}"
+        memory_limit: "{{ memory_limit | default('N/A') }}"
+        cpu_limit: "{{ cpu_limit | default('N/A') }}"
+      
+      performance:
+        api_response_time: "{{ perf_test.elapsed | default('N/A') }}"
+        block_height: "{{ parsed_metrics.block_height | default('N/A') }}"
+        peer_count: "{{ parsed_metrics.peer_count | default('N/A') }}"
+        memory_usage_mb: "{{ (parsed_metrics.memory_usage | int / 1024 / 1024) | round(1) if parsed_metrics.memory_usage is defined else 'N/A' }}"
+        cpu_usage: "{{ parsed_metrics.cpu_usage | default('N/A') }}"
+      
+      network:
+        connectivity: "{{ network_connectivity }}"
+        p2p_port: "{{ tsn_p2p_port | default(9000) }}"
+        http_port: "{{ tsn_http_port | default(8080) }}"
+        rpc_port: "{{ tsn_rpc_port | default(9001) }}"
+        metrics_port: "{{ tsn_metrics_port | default(9090) }}"
+      
+      health:
+        overall_status: "{{ 'healthy' if (container_info.container.State.Status == 'running' and (perf_test.status | default(0)) == 200) else 'unhealthy' }}"
+        log_errors: "{{ log_analysis.error_count | default(0) }}"
+        log_warnings: "{{ log_analysis.warning_count | default(0) }}"
+        recent_errors: "{{ log_analysis.recent_errors | default([]) }}"
+      
+      configuration:
+        config_file: "{{ tsn_config_dir }}/node.toml"
+        data_directory: "{{ tsn_data_dir }}"
+        logs_directory: "{{ tsn_logs_dir }}"
+        backup_directory: "{{ tsn_backup_dir }}"
+
+- name: "Sauvegarde du rapport de déploiement"
+  copy:
+    content: "{{ deployment_report | to_nice_json }}"
+    dest: "{{ tsn_base_dir }}/deployment_report.json"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0644'
+    backup: yes
+
+- name: "Affichage du résumé de déploiement"
+  debug:
+    msg: |
+      ╔══════════════════════════════════════════════════════════════╗
+      ║                    RAPPORT DE DÉPLOIEMENT TSN                ║
+      ╠══════════════════════════════════════════════════════════════╣
+      ║ Nœud: {{ inventory_hostname }} (ID: {{ node_id }}, Rôle: {{ node_role }})
+      ║ Version TSN: {{ tsn_version }}
+      ║ Timestamp: {{ ansible_date_time.iso8601 }}
+      ╠══════════════════════════════════════════════════════════════╣
+      ║ SYSTÈME:
+      ║   OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+      ║   CPU: {{ ansible_processor_vcpus }} cores
+      ║   RAM: {{ ansible_memtotal_mb }}MB
+      ║   Disque libre: {{ disk_space.stdout | trim }}
+      ╠══════════════════════════════════════════════════════════════╣
+      ║ CONTENEUR:
+      ║   Status: {{ container_info.container.State.Status if container_info.container else 'N/A' }}
+      ║   Image: {{ container_info.container.Config.Image if container_info.container else 'N/A' }}
+      ║   ID: {{ container_info.container.Id[:12] if container_info.container else 'N/A' }}
+      ╠══════════════════════════════════════════════════════════════╣
+      ║ PERFORMANCE:
+      ║   Hauteur bloc: {{ parsed_metrics.block_height | default('N/A') }}
+      ║   Peers connectés: {{ parsed_metrics.peer_count | default('N/A') }}
+      ║   Temps réponse API: {{ perf_test.elapsed | default('N/A') }}s
+      ║   Mémoire utilisée: {{ (parsed_metrics.memory_usage | int / 1024 / 1024) | round(1) if parsed_metrics.memory_usage is defined else 'N/A' }}MB
+      ╠══════════════════════════════════════════════════════════════╣
+      ║ RÉSEAU:
+      ║   Connectivité: {{ network_connectivity.reachable_peers }}/{{ network_connectivity.total_peers }} ({{ network_connectivity.connectivity_percentage }}%)
+      ║   Ports: HTTP:{{ tsn_http_port | default(8080) }} P2P:{{ tsn_p2p_port | default(9000) }} RPC:{{ tsn_rpc_port | default(9001) }}
+      ╠══════════════════════════════════════════════════════════════╣
+      ║ SANTÉ:
+      ║   Status global: {{ 'healthy' if (container_info.container.State.Status == 'running' and (perf_test.status | default(0)) == 200) else 'unhealthy' }}
+      ║   Erreurs logs: {{ log_analysis.error_count | default(0) }}
+      ║   Avertissements: {{ log_analysis.warning_count | default(0) }}
+      ╚══════════════════════════════════════════════════════════════╝
+
+- name: "Génération du rapport de santé pour monitoring"
+  copy:
+    content: |
+      # HELP tsn_deployment_info Information about TSN node deployment
+      # TYPE tsn_deployment_info gauge
+      tsn_deployment_info{node="{{ inventory_hostname }}",role="{{ node_role }}",version="{{ tsn_version }}"} 1
+      
+      # HELP tsn_deployment_timestamp Unix timestamp of deployment
+      # TYPE tsn_deployment_timestamp gauge
+      tsn_deployment_timestamp{node="{{ inventory_hostname }}"} {{ ansible_date_time.epoch }}
+      
+      # HELP tsn_deployment_health Overall health status (1=healthy, 0=unhealthy)
+      # TYPE tsn_deployment_health gauge
+      tsn_deployment_health{node="{{ inventory_hostname }}"} {{ 1 if (container_info.container.State.Status == 'running' and (perf_test.status | default(0)) == 200) else 0 }}
+      
+      # HELP tsn_deployment_errors Number of errors in recent logs
+      # TYPE tsn_deployment_errors gauge
+      tsn_deployment_errors{node="{{ inventory_hostname }}"} {{ log_analysis.error_count | default(0) }}
+      
+      # HELP tsn_deployment_connectivity Network connectivity percentage
+      # TYPE tsn_deployment_connectivity gauge
+      tsn_deployment_connectivity{node="{{ inventory_hostname }}"} {{ network_connectivity.connectivity_percentage }}
+    dest: "{{ tsn_base_dir }}/deployment_metrics.prom"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0644'
+
+- name: "Envoi de notification de déploiement (Discord)"
+  uri:
+    url: "{{ discord_webhook }}"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      embeds:
+        - title: "🚀 Déploiement TSN Terminé"
+          description: "Nœud **{{ inventory_hostname }}** déployé avec succès"
+          color: "{{ 3066993 if (container_info.container.State.Status == 'running' and (perf_test.status | default(0)) == 200) else 15158332 }}"
+          fields:
+            - name: "Nœud"
+              value: "{{ inventory_hostname }} ({{ node_role }})"
+              inline: true
+            - name: "Version"
+              value: "{{ tsn_version }}"
+              inline: true
+            - name: "Status"
+              value: "{{ '✅ Sain' if (container_info.container.State.Status == 'running' and (perf_test.status | default(0)) == 200) else '❌ Problème' }}"
+              inline: true
+            - name: "Hauteur bloc"
+              value: "{{ parsed_metrics.block_height | default('N/A') }}"
+              inline: true
+            - name: "Peers"
+              value: "{{ parsed_metrics.peer_count | default('N/A') }}"
+              inline: true
+            - name: "Connectivité"
+              value: "{{ network_connectivity.connectivity_percentage }}%"
+              inline: true
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          footer:
+            text: "TSN DevOps - Ansible"
+  when: discord_webhook is defined
+  ignore_errors: yes
+
+- name: "Envoi de notification de déploiement (Slack)"
+  uri:
+    url: "{{ slack_webhook }}"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      text: "🚀 Déploiement TSN terminé"
+      attachments:
+        - color: "{{ 'good' if (container_info.container.State.Status == 'running' and (perf_test.status | default(0)) == 200) else 'danger' }}"
+          title: "Nœud {{ inventory_hostname }} ({{ node_role }})"
+          fields:
+            - title: "Version"
+              value: "{{ tsn_version }}"
+              short: true
+            - title: "Status"
+              value: "{{ 'Sain' if (container_info.container.State.Status == 'running' and (perf_test.status | default(0)) == 200) else 'Problème' }}"
+              short: true
+            - title: "Hauteur bloc"
+              value: "{{ parsed_metrics.block_height | default('N/A') }}"
+              short: true
+            - title: "Connectivité"
+              value: "{{ network_connectivity.connectivity_percentage }}%"
+              short: true
+          ts: "{{ ansible_date_time.epoch }}"
+  when: slack_webhook is defined
+  ignore_errors: yes
+
+- name: "Ajout au registre global des déploiements"
+  lineinfile:
+    path: "{{ tsn_base_dir }}/deployment_history.log"
+    line: "{{ ansible_date_time.iso8601 }} {{ inventory_hostname }} {{ node_role }} {{ tsn_version }} {{ 'SUCCESS' if (container_info.container.State.Status == 'running' and (perf_test.status | default(0)) == 200) else 'FAILED' }}"
+    create: yes
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0644'
+
+- name: "Validation finale du déploiement"
+  assert:
+    that:
+      - container_info.container.State.Status == "running"
+      - perf_test.status == 200 or perf_test.status is not defined
+      - log_analysis.error_count | default(0) | int < 5
+    fail_msg: "Déploiement échoué: conteneur non fonctionnel ou trop d'erreurs"
+    success_msg: "Déploiement validé avec succès"
+  ignore_errors: "{{ ignore_deployment_failures | default(false) }}"

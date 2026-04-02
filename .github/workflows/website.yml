@@ -1,0 +1,513 @@
+name: 🌐 Build & Deploy Website
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'website/**'
+      - 'docs/**'
+      - '.github/workflows/website.yml'
+  workflow_dispatch:
+
+env:
+  WEBSITE_DIR: website
+  DOCS_DIR: docs
+  BUILD_DIR: build
+
+jobs:
+  # ===== BUILD SITE WEB + PDF WHITEPAPER =====
+  build-website:
+    name: 🏗️ Build Website & Whitepaper PDF
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 🔍 Detect changes
+        id: changes
+        run: |
+          echo "website_changed=false" >> $GITHUB_OUTPUT
+          echo "docs_changed=false" >> $GITHUB_OUTPUT
+          
+          if git diff --name-only HEAD~1 HEAD | grep -E '^website/'; then
+            echo "website_changed=true" >> $GITHUB_OUTPUT
+            echo "✅ Website files changed"
+          fi
+          
+          if git diff --name-only HEAD~1 HEAD | grep -E '^docs/'; then
+            echo "docs_changed=true" >> $GITHUB_OUTPUT
+            echo "✅ Documentation files changed"
+          fi
+          
+          # Force build on workflow_dispatch
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "website_changed=true" >> $GITHUB_OUTPUT
+            echo "docs_changed=true" >> $GITHUB_OUTPUT
+            echo "🔄 Manual trigger - building everything"
+          fi
+      
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: '${{ env.WEBSITE_DIR }}/package-lock.json'
+      
+      - name: 🐍 Setup Python for PDF generation
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: 📚 Install PDF dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pandoc \
+            texlive-latex-base \
+            texlive-latex-extra \
+            texlive-fonts-recommended \
+            texlive-fonts-extra \
+            texlive-xetex \
+            wkhtmltopdf
+          
+          python -m pip install --upgrade pip
+          pip install markdown beautifulsoup4 weasyprint
+      
+      - name: 📄 Generate Whitepaper PDF
+        if: steps.changes.outputs.docs_changed == 'true'
+        run: |
+          mkdir -p ${{ env.BUILD_DIR }}/docs
+          
+          # Convertir le whitepaper Markdown en HTML puis PDF
+          echo "🔄 Converting whitepaper to PDF..."
+          
+          # Méthode 1: Pandoc avec LaTeX (meilleure qualité)
+          pandoc docs/whitepaper_tsn_v0.1.md \
+            -o ${{ env.BUILD_DIR }}/docs/whitepaper_tsn_v0.1.pdf \
+            --pdf-engine=xelatex \
+            --template=eisvogel \
+            --listings \
+            --toc \
+            --toc-depth=3 \
+            --number-sections \
+            -V geometry:margin=2cm \
+            -V fontsize=11pt \
+            -V documentclass=article \
+            -V papersize=a4 \
+            -V colorlinks=true \
+            -V linkcolor=blue \
+            -V urlcolor=blue \
+            -V toccolor=black \
+            --metadata title="Trust Stack Network - Whitepaper Technique v0.1" \
+            --metadata author="TSN Core Team" \
+            --metadata date="$(date '+%B %Y')" \
+            || echo "⚠️ Pandoc PDF generation failed, trying alternative method"
+          
+          # Méthode alternative: wkhtmltopdf
+          if [[ ! -f "${{ env.BUILD_DIR }}/docs/whitepaper_tsn_v0.1.pdf" ]]; then
+            echo "🔄 Using wkhtmltopdf as fallback..."
+            
+            # Convertir MD en HTML
+            python3 << 'EOF'
+import markdown
+import re
+from datetime import datetime
+
+# Lire le fichier Markdown
+with open('docs/whitepaper_tsn_v0.1.md', 'r', encoding='utf-8') as f:
+    content = f.read()
+
+# Convertir en HTML avec extensions
+md = markdown.Markdown(extensions=['toc', 'tables', 'fenced_code', 'codehilite'])
+html_content = md.convert(content)
+
+# Template HTML avec CSS pour PDF
+html_template = f'''
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Trust Stack Network - Whitepaper Technique v0.1</title>
+    <style>
+        body {{
+            font-family: "Times New Roman", serif;
+            line-height: 1.6;
+            margin: 2cm;
+            color: #333;
+        }}
+        h1, h2, h3, h4 {{
+            color: #2c3e50;
+            page-break-after: avoid;
+        }}
+        h1 {{ font-size: 24px; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
+        h2 {{ font-size: 20px; margin-top: 30px; }}
+        h3 {{ font-size: 16px; margin-top: 25px; }}
+        code {{
+            background-color: #f8f9fa;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-family: "Courier New", monospace;
+        }}
+        pre {{
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 4px solid #3498db;
+            overflow-x: auto;
+        }}
+        blockquote {{
+            border-left: 4px solid #3498db;
+            margin-left: 0;
+            padding-left: 20px;
+            font-style: italic;
+            color: #555;
+        }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin: 20px 0;
+        }}
+        th, td {{
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }}
+        th {{
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }}
+        .header {{
+            text-align: center;
+            margin-bottom: 40px;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 20px;
+        }}
+        .footer {{
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            font-size: 12px;
+            color: #666;
+        }}
+        @page {{
+            margin: 2cm;
+            @bottom-right {{
+                content: "Page " counter(page);
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Trust Stack Network</h1>
+        <h2>Whitepaper Technique v0.1</h2>
+        <p><strong>TSN Core Team</strong> • {datetime.now().strftime('%B %Y')}</p>
+    </div>
+    
+    {html_content}
+    
+    <div class="footer">
+        <p>Trust Stack Network - Blockchain Post-Quantique • https://tsn.network</p>
+    </div>
+</body>
+</html>
+'''
+
+# Sauvegarder le HTML
+with open('${{ env.BUILD_DIR }}/docs/whitepaper_temp.html', 'w', encoding='utf-8') as f:
+    f.write(html_template)
+EOF
+            
+            # Générer le PDF avec wkhtmltopdf
+            wkhtmltopdf \
+              --page-size A4 \
+              --margin-top 2cm \
+              --margin-bottom 2cm \
+              --margin-left 2cm \
+              --margin-right 2cm \
+              --print-media-type \
+              --enable-local-file-access \
+              ${{ env.BUILD_DIR }}/docs/whitepaper_temp.html \
+              ${{ env.BUILD_DIR }}/docs/whitepaper_tsn_v0.1.pdf
+            
+            rm -f ${{ env.BUILD_DIR }}/docs/whitepaper_temp.html
+          fi
+          
+          # Vérifier que le PDF a été généré
+          if [[ -f "${{ env.BUILD_DIR }}/docs/whitepaper_tsn_v0.1.pdf" ]]; then
+            echo "✅ Whitepaper PDF generated successfully"
+            ls -lh ${{ env.BUILD_DIR }}/docs/whitepaper_tsn_v0.1.pdf
+          else
+            echo "❌ Failed to generate whitepaper PDF"
+            exit 1
+          fi
+      
+      - name: 🏗️ Build website
+        if: steps.changes.outputs.website_changed == 'true'
+        run: |
+          mkdir -p ${{ env.BUILD_DIR }}/website
+          
+          # Copier les fichiers statiques
+          cp -r ${{ env.WEBSITE_DIR }}/* ${{ env.BUILD_DIR }}/website/
+          
+          # Injecter la version et la date de build dans index.html
+          BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          
+          sed -i "s/{{BUILD_DATE}}/$BUILD_DATE/g" ${{ env.BUILD_DIR }}/website/index.html || true
+          sed -i "s/{{GIT_COMMIT}}/$GIT_COMMIT/g" ${{ env.BUILD_DIR }}/website/index.html || true
+          
+          echo "✅ Website built successfully"
+          ls -la ${{ env.BUILD_DIR }}/website/
+      
+      - name: 📊 Generate build report
+        run: |
+          cat > ${{ env.BUILD_DIR }}/build-report.json << EOF
+          {
+            "build_date": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+            "git_commit": "$(git rev-parse HEAD)",
+            "git_commit_short": "$(git rev-parse --short HEAD)",
+            "git_branch": "$(git rev-parse --abbrev-ref HEAD)",
+            "website_changed": "${{ steps.changes.outputs.website_changed }}",
+            "docs_changed": "${{ steps.changes.outputs.docs_changed }}",
+            "files": {
+              "website": $(find ${{ env.BUILD_DIR }}/website -type f 2>/dev/null | wc -l || echo 0),
+              "docs": $(find ${{ env.BUILD_DIR }}/docs -type f 2>/dev/null | wc -l || echo 0)
+            },
+            "sizes": {
+              "website_mb": "$(du -sm ${{ env.BUILD_DIR }}/website 2>/dev/null | cut -f1 || echo 0)",
+              "docs_mb": "$(du -sm ${{ env.BUILD_DIR }}/docs 2>/dev/null | cut -f1 || echo 0)"
+            }
+          }
+          EOF
+          
+          echo "📊 Build Report:"
+          cat ${{ env.BUILD_DIR }}/build-report.json | jq .
+      
+      - name: 📤 Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: tsn-website-build-${{ github.sha }}
+          path: ${{ env.BUILD_DIR }}/
+          retention-days: 30
+      
+      - name: 🔍 Validate build
+        run: |
+          echo "🔍 Validating build artifacts..."
+          
+          # Vérifier que les fichiers essentiels existent
+          if [[ "${{ steps.changes.outputs.website_changed }}" == "true" ]]; then
+            test -f "${{ env.BUILD_DIR }}/website/index.html" || {
+              echo "❌ Missing index.html"
+              exit 1
+            }
+            test -f "${{ env.BUILD_DIR }}/website/style.css" || {
+              echo "❌ Missing style.css"
+              exit 1
+            }
+            test -f "${{ env.BUILD_DIR }}/website/script.js" || {
+              echo "❌ Missing script.js"
+              exit 1
+            }
+            echo "✅ Website files validated"
+          fi
+          
+          if [[ "${{ steps.changes.outputs.docs_changed }}" == "true" ]]; then
+            test -f "${{ env.BUILD_DIR }}/docs/whitepaper_tsn_v0.1.pdf" || {
+              echo "❌ Missing whitepaper PDF"
+              exit 1
+            }
+            
+            # Vérifier que le PDF n'est pas vide
+            pdf_size=$(stat -c%s "${{ env.BUILD_DIR }}/docs/whitepaper_tsn_v0.1.pdf")
+            if [[ $pdf_size -lt 10000 ]]; then
+              echo "❌ PDF file too small ($pdf_size bytes)"
+              exit 1
+            fi
+            echo "✅ Whitepaper PDF validated ($pdf_size bytes)"
+          fi
+
+  # ===== DÉPLOIEMENT SUR LE SERVEUR =====
+  deploy-website:
+    name: 🚀 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-website
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: 📥 Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: tsn-website-build-${{ github.sha }}
+          path: build/
+      
+      - name: 🔑 Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TSN_DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H 45.145.165.223 >> ~/.ssh/known_hosts
+      
+      - name: 💾 Backup current website
+        run: |
+          ssh root@45.145.165.223 "
+            if [[ -d /var/www/tsn ]]; then
+              cp -r /var/www/tsn /var/www/tsn.backup.$(date +%Y%m%d_%H%M%S)
+              echo '✅ Current website backed up'
+            fi
+          "
+      
+      - name: 🚀 Deploy website files
+        run: |
+          # Créer le répertoire de destination
+          ssh root@45.145.165.223 "mkdir -p /var/www/tsn"
+          
+          # Déployer les fichiers du site web
+          if [[ -d "build/website" ]]; then
+            echo "🌐 Deploying website files..."
+            scp -r build/website/* root@45.145.165.223:/var/www/tsn/
+          fi
+          
+          # Déployer les documents PDF
+          if [[ -d "build/docs" ]]; then
+            echo "📄 Deploying documentation..."
+            ssh root@45.145.165.223 "mkdir -p /var/www/tsn/docs"
+            scp -r build/docs/* root@45.145.165.223:/var/www/tsn/docs/
+          fi
+          
+          # Définir les permissions correctes
+          ssh root@45.145.165.223 "
+            chown -R www-data:www-data /var/www/tsn
+            chmod -R 644 /var/www/tsn
+            find /var/www/tsn -type d -exec chmod 755 {} \;
+            echo '✅ Permissions set correctly'
+          "
+      
+      - name: 🔄 Reload nginx
+        run: |
+          ssh root@45.145.165.223 "
+            nginx -t && systemctl reload nginx
+            echo '✅ Nginx reloaded successfully'
+          "
+      
+      - name: 🏥 Health check
+        run: |
+          echo "🔍 Testing website accessibility..."
+          
+          # Attendre que nginx se recharge
+          sleep 10
+          
+          # Tester la page principale
+          if curl -f --max-time 30 "http://45.145.165.223/"; then
+            echo "✅ Website is accessible"
+          else
+            echo "❌ Website is not accessible"
+            exit 1
+          fi
+          
+          # Tester le whitepaper PDF si déployé
+          if curl -f --max-time 30 "http://45.145.165.223/docs/whitepaper_tsn_v0.1.pdf" >/dev/null 2>&1; then
+            echo "✅ Whitepaper PDF is accessible"
+          else
+            echo "⚠️ Whitepaper PDF not accessible (may not have been updated)"
+          fi
+      
+      - name: 📊 Deployment summary
+        run: |
+          echo "🎉 Deployment completed successfully!"
+          echo "🌐 Website: http://45.145.165.223/"
+          echo "📄 Whitepaper: http://45.145.165.223/docs/whitepaper_tsn_v0.1.pdf"
+          echo "🔗 Git commit: ${{ github.sha }}"
+          echo "📅 Deployed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+  # ===== TESTS POST-DÉPLOIEMENT =====
+  post-deploy-tests:
+    name: 🧪 Post-Deploy Tests
+    runs-on: ubuntu-latest
+    needs: deploy-website
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: 🔍 Website accessibility test
+        run: |
+          echo "Testing website accessibility..."
+          
+          # Test page principale
+          response=$(curl -s -o /dev/null -w "%{http_code}" "http://45.145.165.223/")
+          if [[ "$response" == "200" ]]; then
+            echo "✅ Main page accessible (HTTP $response)"
+          else
+            echo "❌ Main page not accessible (HTTP $response)"
+            exit 1
+          fi
+          
+          # Test CSS
+          response=$(curl -s -o /dev/null -w "%{http_code}" "http://45.145.165.223/style.css")
+          if [[ "$response" == "200" ]]; then
+            echo "✅ CSS file accessible (HTTP $response)"
+          else
+            echo "❌ CSS file not accessible (HTTP $response)"
+            exit 1
+          fi
+          
+          # Test JavaScript
+          response=$(curl -s -o /dev/null -w "%{http_code}" "http://45.145.165.223/script.js")
+          if [[ "$response" == "200" ]]; then
+            echo "✅ JavaScript file accessible (HTTP $response)"
+          else
+            echo "❌ JavaScript file not accessible (HTTP $response)"
+            exit 1
+          fi
+      
+      - name: 📄 PDF accessibility test
+        run: |
+          echo "Testing PDF accessibility..."
+          
+          response=$(curl -s -o /dev/null -w "%{http_code}" "http://45.145.165.223/docs/whitepaper_tsn_v0.1.pdf")
+          if [[ "$response" == "200" ]]; then
+            echo "✅ Whitepaper PDF accessible (HTTP $response)"
+            
+            # Vérifier la taille du PDF
+            pdf_size=$(curl -s -I "http://45.145.165.223/docs/whitepaper_tsn_v0.1.pdf" | grep -i content-length | awk '{print $2}' | tr -d '\r')
+            if [[ $pdf_size -gt 10000 ]]; then
+              echo "✅ PDF size looks good ($pdf_size bytes)"
+            else
+              echo "⚠️ PDF size seems small ($pdf_size bytes)"
+            fi
+          else
+            echo "⚠️ Whitepaper PDF not accessible (HTTP $response) - may not have been updated"
+          fi
+      
+      - name: 📊 Performance test
+        run: |
+          echo "Testing website performance..."
+          
+          # Mesurer le temps de réponse
+          response_time=$(curl -w "%{time_total}" -s -o /dev/null "http://45.145.165.223/")
+          echo "Response time: ${response_time}s"
+          
+          # Vérifier que le temps de réponse est acceptable (< 5s)
+          if (( $(echo "$response_time < 5.0" | bc -l) )); then
+            echo "✅ Response time acceptable"
+          else
+            echo "⚠️ Response time high: ${response_time}s"
+          fi
+      
+      - name: 💬 Notify Discord
+        if: always()
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: "🌐 TSN Website Deployment"
+          description: |
+            **Status:** ${{ job.status }}
+            **Website:** http://45.145.165.223/
+            **Whitepaper:** http://45.145.165.223/docs/whitepaper_tsn_v0.1.pdf
+            **Commit:** ${{ github.sha }}
+            **Branch:** ${{ github.ref_name }}
+          color: ${{ job.status == 'success' && 0x00ff00 || 0xff0000 }}

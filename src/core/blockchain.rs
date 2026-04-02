@@ -306,25 +306,43 @@ impl ShieldedBlockchain {
                 (0, None)
             };
 
-            // Load cumulative work from metadata (persisted at each snapshot)
-            // Falls back to recalculating from blocks if not found
-            let cumulative_work: u128 = db
-                .get_metadata("cumulative_work")
-                .ok()
-                .flatten()
-                .and_then(|s| s.parse::<u128>().ok())
-                .unwrap_or_else(|| {
-                    tracing::info!("cumulative_work not in metadata, recalculating...");
-                    let mut work: u128 = 0;
-                    for h in 0..=height {
-                        if let Some(hash) = height_index.get(h as usize) {
+            // ALWAYS recalculate cumulative_work from actual block difficulties.
+            // Never trust the metadata value — it may be inflated from a peer's
+            // incorrect snapshot (bug: fast-sync imported peer_cumulative_work blindly).
+            let mut cumulative_work: u128 = 0;
+            {
+                let mut counted = 0u64;
+                for h in 0..=height {
+                    if let Some(hash) = height_index.get(h as usize) {
+                        if *hash != [0u8; 32] {
                             if let Some(block) = blocks.get(hash) {
-                                work += block.header.difficulty as u128;
+                                cumulative_work += block.header.difficulty as u128;
+                                counted += 1;
                             }
                         }
                     }
-                    work
-                });
+                }
+                // For fast-synced nodes, blocks before fast_sync_base don't exist.
+                // Estimate their work as counted_avg * missing_count.
+                let fast_sync_base_for_work: u64 = db
+                    .get_metadata("fast_sync_base_height")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if fast_sync_base_for_work > 0 && counted < height + 1 {
+                    let missing = (height + 1) - counted;
+                    let avg_diff = if counted > 0 { cumulative_work / counted as u128 } else { difficulty as u128 };
+                    let estimated_work = avg_diff * missing as u128;
+                    cumulative_work += estimated_work;
+                    tracing::info!(
+                        "cumulative_work: {} real blocks (work={}), {} estimated (avg_diff={}, est_work={}), total={}",
+                        counted, cumulative_work - estimated_work, missing, avg_diff, estimated_work, cumulative_work
+                    );
+                } else {
+                    tracing::info!("cumulative_work recalculated from {} blocks: {}", counted, cumulative_work);
+                }
+            }
 
             // Verify genesis hash if configured (skip in test builds)
             // Skip verification for fast-synced nodes (genesis is a placeholder)
@@ -1913,15 +1931,10 @@ impl ShieldedBlockchain {
 
         // Set chain metadata — use next_difficulty so validation works after fast-sync
         self.difficulty = next_difficulty;
-        // v1.4.0: Use peer's actual cumulative_work if available.
-        // When unavailable (peer_cumulative_work == 0), use MIN_DIFFICULTY * height
-        // as a conservative estimate instead of difficulty * height (which could be
-        // manipulated by a malicious peer claiming high difficulty).
-        self.cumulative_work = if peer_cumulative_work > 0 {
-            peer_cumulative_work
-        } else {
-            MIN_DIFFICULTY as u128 * height as u128
-        };
+        // v1.4.2: NEVER trust peer's cumulative_work — it may be inflated.
+        // Use difficulty * height as a conservative estimate. The correct value
+        // will be recalculated at next restart from actual block difficulties.
+        self.cumulative_work = difficulty as u128 * height as u128;
         self.fast_sync_base_height = height;
         // Save commitment count at snapshot time for correct position calculation
         self.fast_sync_commitment_offset = self.state.commitment_count();

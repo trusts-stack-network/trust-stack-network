@@ -1,0 +1,10 @@
+target/
+Dockerfile
+.github/
+.git/
+*.md
+docs/
+wallet/node_modules/
+wallet/dist/
+scripts/docker-dev.sh
+scripts/docker-release.sh

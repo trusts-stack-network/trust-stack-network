@@ -1,0 +1,149 @@
+---
+# Configuration système pour TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Mise à jour du cache des paquets"
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+  
+- name: "Installation des paquets système requis"
+  package:
+    name:
+      - curl
+      - wget
+      - jq
+      - htop
+      - iotop
+      - net-tools
+      - tcpdump
+      - rsync
+      - unzip
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - python3-pip
+      - python3-setuptools
+    state: present
+    
+- name: "Configuration des limites système"
+  pam_limits:
+    domain: "{{ tsn_user }}"
+    limit_type: "{{ item.type }}"
+    limit_item: "{{ item.item }}"
+    value: "{{ item.value }}"
+  loop:
+    - { type: 'soft', item: 'nofile', value: '65536' }
+    - { type: 'hard', item: 'nofile', value: '65536' }
+    - { type: 'soft', item: 'nproc', value: '32768' }
+    - { type: 'hard', item: 'nproc', value: '32768' }
+    
+- name: "Configuration sysctl pour performance réseau"
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+  loop:
+    - { name: 'net.core.rmem_max', value: '134217728' }
+    - { name: 'net.core.wmem_max', value: '134217728' }
+    - { name: 'net.ipv4.tcp_rmem', value: '4096 87380 134217728' }
+    - { name: 'net.ipv4.tcp_wmem', value: '4096 65536 134217728' }
+    - { name: 'net.core.netdev_max_backlog', value: '5000' }
+    - { name: 'net.ipv4.tcp_congestion_control', value: 'bbr' }
+    - { name: 'vm.swappiness', value: '10' }
+    - { name: 'fs.file-max', value: '2097152' }
+    
+- name: "Configuration du timezone"
+  timezone:
+    name: UTC
+    
+- name: "Configuration de la synchronisation NTP"
+  package:
+    name: chrony
+    state: present
+    
+- name: "Démarrage et activation de chrony"
+  systemd:
+    name: chrony
+    state: started
+    enabled: yes
+    
+- name: "Configuration du firewall UFW"
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "{{ tsn_http_port | default(8080) }}"
+    - "{{ tsn_p2p_port | default(9000) }}"
+    - "{{ tsn_rpc_port | default(9001) }}"
+    - "{{ tsn_metrics_port | default(9090) }}"
+  when: configure_firewall | default(true)
+  
+- name: "Activation du firewall UFW"
+  ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+  when: configure_firewall | default(true)
+  
+- name: "Configuration de logrotate pour TSN"
+  copy:
+    content: |
+      {{ tsn_logs_dir }}/*.log {
+          daily
+          rotate 30
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0644 {{ tsn_user }} {{ tsn_user }}
+          postrotate
+              systemctl reload tsn-node || true
+          endscript
+      }
+    dest: /etc/logrotate.d/tsn-node
+    mode: '0644'
+    
+- name: "Création du répertoire de backup"
+  file:
+    path: "{{ tsn_backup_dir }}"
+    state: directory
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0755'
+    
+- name: "Script de backup automatique"
+  copy:
+    content: |
+      #!/bin/bash
+      # Backup automatique TSN
+      set -euo pipefail
+      
+      BACKUP_DIR="{{ tsn_backup_dir }}"
+      DATA_DIR="{{ tsn_data_dir }}"
+      DATE=$(date +%Y%m%d_%H%M%S)
+      BACKUP_FILE="${BACKUP_DIR}/tsn_backup_${DATE}.tar.gz"
+      
+      # Création du backup
+      tar -czf "${BACKUP_FILE}" -C "$(dirname ${DATA_DIR})" "$(basename ${DATA_DIR})"
+      
+      # Nettoyage des anciens backups (garde 7 jours)
+      find "${BACKUP_DIR}" -name "tsn_backup_*.tar.gz" -mtime +7 -delete
+      
+      echo "Backup créé: ${BACKUP_FILE}"
+    dest: /usr/local/bin/tsn-backup.sh
+    mode: '0755'
+    owner: root
+    group: root
+    
+- name: "Cron job pour backup quotidien"
+  cron:
+    name: "TSN daily backup"
+    minute: "0"
+    hour: "2"
+    job: "/usr/local/bin/tsn-backup.sh"
+    user: "{{ tsn_user }}"
+  when: enable_backup | default(true)

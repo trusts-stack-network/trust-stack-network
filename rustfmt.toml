@@ -1,0 +1,134 @@
+# =============================================================================
+# TSN (Trust Stack Network) - rustfmt configuration
+# Code formatting standards
+# =============================================================================
+
+# Maximum width of each line
+max_width = 100
+
+# Ideal width of each line
+comment_width = 80
+
+# Use verbose output
+verbose = false
+
+# =============================================================================
+# Indentation
+# =============================================================================
+
+# Number of spaces per tab
+tab_spaces = 4
+
+# Use tabs instead of spaces
+hard_tabs = false
+
+# Indentation style for imports
+imports_indent = "Block"
+
+# Layout style for imports
+imports_layout = "Mixed"
+
+# =============================================================================
+# Formatting Style
+# =============================================================================
+
+# Brace style for control flow constructs
+brace_style = "SameLineWhere"
+
+# Control flow style
+control_brace_style = "ClosingNextLine"
+
+# Where clause style
+where_single_line = false
+
+# Item layout for functions
+fn_params_layout = "Tall"
+
+# Item layout for structs and enums
+struct_lit_single_line = true
+
+# =============================================================================
+# Imports
+# =============================================================================
+
+# Group imports by their prefix
+group_imports = "StdExternalCrate"
+
+# Reorder import statements
+reorder_imports = true
+
+# Reorder module statements
+reorder_modules = true
+
+# =============================================================================
+# Macros
+# =============================================================================
+
+# Format string literals in macros
+format_strings = true
+
+# Format macro matchers
+format_macro_matchers = true
+
+# Format macro bodies
+format_macro_bodies = true
+
+# =============================================================================
+# Comments
+# =============================================================================
+
+# Format code in doc comments
+format_code_in_doc_comments = true
+
+# Wrap comments at comment_width
+wrap_comments = true
+
+# Normalize doc attributes
+normalize_doc_attributes = true
+
+# =============================================================================
+# Advanced Options
+# =============================================================================
+
+# Merge derived impls
+merge_derives = true
+
+# Use try shorthand
+use_try_shorthand = true
+
+# Use field init shorthand
+use_field_init_shorthand = true
+
+# Remove nested parentheses
+remove_nested_parens = true
+
+# Short array element width threshold
+short_array_element_width_threshold = 10
+
+# Array width
+array_width = 60
+
+# Chain width
+chain_width = 60
+
+# Single line if-else max width
+single_line_if_else_max_width = 50
+
+# Struct variant width
+struct_variant_width = 35
+
+# =============================================================================
+# Unstable Features (require nightly)
+# =============================================================================
+
+# These features require nightly Rust
+# Uncomment when using nightly toolchain
+
+# Format generated code
+# format_generated_code = true
+
+# Inline attribute width
+# inline_attribute_width = 80
+
+# Match arm blocks
+# match_arm_blocks = true

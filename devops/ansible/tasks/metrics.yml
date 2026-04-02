@@ -1,0 +1,182 @@
+---
+# Collecte de métriques de déploiement TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Collecte des informations système"
+  setup:
+    gather_subset:
+      - hardware
+      - network
+      - virtual
+  register: system_facts
+  
+- name: "Informations Docker"
+  docker_host_info:
+  register: docker_info
+  
+- name: "Informations conteneur TSN"
+  docker_container_info:
+    name: tsn-node
+  register: container_metrics
+  
+- name: "Statistiques de performance conteneur"
+  command: docker stats tsn-node --no-stream --format "json"
+  register: container_stats
+  changed_when: false
+  
+- name: "Analyse des statistiques conteneur"
+  set_fact:
+    container_performance: "{{ container_stats.stdout | from_json }}"
+  when: container_stats.stdout != ""
+  
+- name: "Utilisation de l'espace disque TSN"
+  command: du -sb {{ item }}
+  register: disk_usage
+  loop:
+    - "{{ tsn_data_dir }}"
+    - "{{ tsn_logs_dir }}"
+    - "{{ tsn_config_dir }}"
+  changed_when: false
+  
+- name: "Analyse de l'utilisation disque"
+  set_fact:
+    disk_metrics:
+      data_size: "{{ (disk_usage.results[0].stdout.split()[0] | int / 1024 / 1024) | round(2) }}"
+      logs_size: "{{ (disk_usage.results[1].stdout.split()[0] | int / 1024 / 1024) | round(2) }}"
+      config_size: "{{ (disk_usage.results[2].stdout.split()[0] | int / 1024 / 1024) | round(2) }}"
+      
+- name: "Collecte des métriques réseau"
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ tsn_metrics_port | default(9090) }}/metrics"
+    method: GET
+    timeout: 10
+    return_content: yes
+  register: prometheus_metrics
+  ignore_errors: yes
+  
+- name: "Analyse des métriques Prometheus"
+  set_fact:
+    tsn_metrics: "{{ prometheus_metrics.content | regex_findall('tsn_[a-z_]+{[^}]*} [0-9.]+') }}"
+  when: prometheus_metrics.status == 200
+  
+- name: "Test de latence réseau inter-nœuds"
+  command: ping -c 3 -W 2 {{ hostvars[item]['ansible_host'] }}
+  register: ping_results
+  loop: "{{ groups['tsn_nodes'] }}"
+  when: item != inventory_hostname
+  changed_when: false
+  ignore_errors: yes
+  
+- name: "Analyse de la latence réseau"
+  set_fact:
+    network_latency: >-
+      {{
+        ping_results.results | default([]) |
+        selectattr('stdout', 'defined') |
+        map('extract', 'stdout') |
+        map('regex_search', 'avg = ([0-9.]+)', '\\1') |
+        select('string') |
+        map('float') |
+        list
+      }}
+      
+- name: "Collecte des logs d'erreur récents"
+  command: journalctl -u tsn-node --since "5 minutes ago" --grep "ERROR|WARN|FATAL"
+  register: error_logs
+  changed_when: false
+  ignore_errors: yes
+  
+- name: "Compilation des métriques de déploiement"
+  set_fact:
+    deployment_metrics:
+      timestamp: "{{ ansible_date_time.iso8601 }}"
+      node_info:
+        id: "{{ node_id }}"
+        role: "{{ node_role }}"
+        hostname: "{{ inventory_hostname }}"
+        ip: "{{ ansible_default_ipv4.address }}"
+        version: "{{ tsn_version }}"
+      system:
+        os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+        kernel: "{{ ansible_kernel }}"
+        architecture: "{{ ansible_architecture }}"
+        cpu_cores: "{{ ansible_processor_vcpus }}"
+        memory_mb: "{{ ansible_memtotal_mb }}"
+        uptime: "{{ ansible_uptime_seconds }}"
+      docker:
+        version: "{{ docker_info.host_info.ServerVersion }}"
+        storage_driver: "{{ docker_info.host_info.Driver }}"
+        containers_running: "{{ docker_info.containers_running }}"
+        images: "{{ docker_info.images }}"
+      container:
+        id: "{{ container_metrics.container.Id[:12] }}"
+        status: "{{ container_metrics.container.State.Status }}"
+        started_at: "{{ container_metrics.container.State.StartedAt }}"
+        image: "{{ container_metrics.container.Config.Image }}"
+        ports: "{{ container_metrics.container.NetworkSettings.Ports }}"
+      performance: "{{ container_performance | default({}) }}"
+      disk_usage: "{{ disk_metrics }}"
+      network:
+        avg_latency: "{{ (network_latency | sum / network_latency | length) | round(2) if network_latency | length > 0 else 'N/A' }}"
+        peer_count: "{{ network_latency | length }}"
+      tsn_metrics: "{{ tsn_metrics | default([]) | length }}"
+      error_count: "{{ error_logs.stdout_lines | default([]) | length }}"
+      
+- name: "Sauvegarde des métriques"
+  copy:
+    content: "{{ deployment_metrics | to_nice_json }}"
+    dest: "{{ tsn_base_dir }}/metrics.json"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0644'
+    
+- name: "Envoi des métriques vers collecteur central"
+  uri:
+    url: "{{ metrics_collector_url }}/api/v1/metrics"
+    method: POST
+    body: "{{ deployment_metrics | to_json }}"
+    body_format: json
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{ metrics_token }}"
+    timeout: 10
+  when: 
+    - metrics_collector_url is defined
+    - metrics_token is defined
+  ignore_errors: yes
+  
+- name: "Affichage des métriques clés"
+  debug:
+    msg: |
+      === MÉTRIQUES DE DÉPLOIEMENT ===
+      Nœud: {{ deployment_metrics.node_info.hostname }} ({{ deployment_metrics.node_info.role }})
+      
+      Système:
+      - OS: {{ deployment_metrics.system.os }}
+      - CPU: {{ deployment_metrics.system.cpu_cores }} cores
+      - RAM: {{ deployment_metrics.system.memory_mb }}MB
+      - Uptime: {{ (deployment_metrics.system.uptime / 3600) | round(1) }}h
+      
+      Conteneur:
+      - Status: {{ deployment_metrics.container.status }}
+      - Image: {{ deployment_metrics.container.image }}
+      - ID: {{ deployment_metrics.container.id }}
+      
+      Performance:
+      {% if deployment_metrics.performance %}
+      - CPU: {{ deployment_metrics.performance.CPUPerc | default('N/A') }}
+      - Mémoire: {{ deployment_metrics.performance.MemUsage | default('N/A') }}
+      {% endif %}
+      
+      Stockage:
+      - Données: {{ deployment_metrics.disk_usage.data_size }}MB
+      - Logs: {{ deployment_metrics.disk_usage.logs_size }}MB
+      - Config: {{ deployment_metrics.disk_usage.config_size }}MB
+      
+      Réseau:
+      - Latence moyenne: {{ deployment_metrics.network.avg_latency }}ms
+      - Peers connectés: {{ deployment_metrics.network.peer_count }}
+      
+      Santé:
+      - Métriques TSN: {{ deployment_metrics.tsn_metrics }}
+      - Erreurs récentes: {{ deployment_metrics.error_count }}

@@ -1,0 +1,280 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "TSN Consensus Performance",
+    "tags": ["tsn", "consensus", "blockchain"],
+    "style": "dark",
+    "timezone": "browser",
+    "refresh": "5s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Block Processing Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(tsn_consensus_blocks_processed_total[1m])",
+            "legendFormat": "Blocks/sec",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 0.1},
+                {"color": "green", "value": 1}
+              ]
+            },
+            "unit": "ops"
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Block Validation Latency",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(tsn_consensus_block_validation_duration_seconds_bucket[5m]))",
+            "legendFormat": "p50",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.90, rate(tsn_consensus_block_validation_duration_seconds_bucket[5m]))",
+            "legendFormat": "p90",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(tsn_consensus_block_validation_duration_seconds_bucket[5m]))",
+            "legendFormat": "p99",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "s"
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Block Rejection Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(tsn_consensus_blocks_rejected_total[5m]) / rate(tsn_consensus_blocks_received_total[5m]) * 100",
+            "legendFormat": "Rejection %",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 5},
+                {"color": "red", "value": 10}
+              ]
+            },
+            "unit": "percent"
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "Commitment Root Errors",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(tsn_consensus_commitment_errors_total[1m])",
+            "legendFormat": "Errors/sec - {{instance}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "ops"
+          }
+        },
+        "alert": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [0],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "last"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "for": "10s",
+          "frequency": "5s",
+          "handler": 1,
+          "name": "Invalid Commitment Root Alert",
+          "noDataState": "no_data",
+          "notifications": []
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "Mempool Status",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "tsn_mempool_pending_transactions",
+            "legendFormat": "Pending TX - {{instance}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(tsn_mempool_transactions_added_total[1m])",
+            "legendFormat": "TX Added/sec - {{instance}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 6,
+        "title": "Consensus Efficiency",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "rate(tsn_consensus_blocks_accepted_total[5m]) / rate(tsn_consensus_blocks_received_total[5m]) * 100",
+            "legendFormat": "Efficiency %",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 80},
+                {"color": "green", "value": 95}
+              ]
+            },
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 16}
+      },
+      {
+        "id": 7,
+        "title": "Network Sync Status",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "tsn_network_peers_connected",
+            "legendFormat": "Connected Peers - {{instance}}",
+            "refId": "A"
+          },
+          {
+            "expr": "tsn_network_sync_height",
+            "legendFormat": "Sync Height - {{instance}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 16}
+      },
+      {
+        "id": 8,
+        "title": "System Resources",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(process_cpu_seconds_total[1m]) * 100",
+            "legendFormat": "CPU % - {{instance}}",
+            "refId": "A"
+          },
+          {
+            "expr": "process_resident_memory_bytes / 1024 / 1024",
+            "legendFormat": "Memory MB - {{instance}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 16}
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "instance",
+          "type": "query",
+          "query": "label_values(tsn_consensus_blocks_processed_total, instance)",
+          "refresh": 1,
+          "includeAll": true,
+          "allValue": ".*"
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Consensus Alerts",
+          "datasource": "Prometheus",
+          "expr": "ALERTS{alertname=~\".*Consensus.*|.*Commitment.*\"}",
+          "titleFormat": "{{alertname}}",
+          "textFormat": "{{instance}}: {{description}}"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,159 @@
+---
+# Installation et configuration Docker pour TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Vérification de l'installation Docker existante"
+  command: docker --version
+  register: docker_check
+  ignore_errors: yes
+  changed_when: false
+  
+- name: "Suppression des anciennes versions Docker"
+  package:
+    name:
+      - docker
+      - docker-engine
+      - docker.io
+      - containerd
+      - runc
+    state: absent
+  when: docker_check.failed
+  
+- name: "Installation des dépendances Docker"
+  package:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+  when: ansible_os_family == "Debian"
+  
+- name: "Ajout de la clé GPG Docker"
+  apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+  when: ansible_os_family == "Debian"
+  
+- name: "Ajout du repository Docker"
+  apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    state: present
+  when: ansible_os_family == "Debian"
+  
+- name: "Installation Docker CE"
+  package:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: yes
+  when: docker_check.failed
+  
+- name: "Démarrage et activation Docker"
+  systemd:
+    name: docker
+    state: started
+    enabled: yes
+    
+- name: "Ajout de l'utilisateur TSN au groupe docker"
+  user:
+    name: "{{ tsn_user }}"
+    groups: docker
+    append: yes
+    
+- name: "Configuration Docker daemon"
+  copy:
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "100m",
+          "max-file": "3"
+        },
+        "storage-driver": "overlay2",
+        "live-restore": true,
+        "userland-proxy": false,
+        "experimental": false,
+        "metrics-addr": "127.0.0.1:9323",
+        "default-ulimits": {
+          "nofile": {
+            "Name": "nofile",
+            "Hard": 65536,
+            "Soft": 65536
+          }
+        }
+      }
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  notify: restart docker
+  
+- name: "Redémarrage Docker après configuration"
+  systemd:
+    name: docker
+    state: restarted
+    daemon_reload: yes
+  when: docker_check.failed
+  
+- name: "Vérification Docker fonctionnel"
+  command: docker run --rm hello-world
+  register: docker_test
+  changed_when: false
+  
+- name: "Login au registry Docker"
+  docker_login:
+    registry: "{{ docker_registry }}"
+    username: "{{ docker_username }}"
+    password: "{{ docker_password }}"
+  when: 
+    - docker_username is defined
+    - docker_password is defined
+  no_log: true
+  
+- name: "Pull de l'image TSN"
+  docker_image:
+    name: "{{ docker_registry }}/tsn"
+    tag: "{{ tsn_version }}"
+    source: pull
+    force_source: "{{ force_recreate | default(false) }}"
+  register: image_pull
+  
+- name: "Vérification de l'image TSN"
+  docker_image_info:
+    name: "{{ docker_registry }}/tsn:{{ tsn_version }}"
+  register: image_info
+  
+- name: "Affichage des informations de l'image"
+  debug:
+    msg: |
+      Image TSN:
+      - Nom: {{ docker_registry }}/tsn:{{ tsn_version }}
+      - ID: {{ image_info.images[0].Id[:12] }}
+      - Taille: {{ (image_info.images[0].Size / 1024 / 1024) | round(1) }}MB
+      - Créée: {{ image_info.images[0].Created }}
+      
+- name: "Nettoyage des images Docker inutilisées"
+  docker_prune:
+    images: yes
+    images_filters:
+      dangling: false
+      until: "24h"
+  when: cleanup_docker | default(true)
+  
+- name: "Configuration de la rotation des logs Docker"
+  copy:
+    content: |
+      /var/lib/docker/containers/*/*.log {
+          daily
+          rotate 7
+          compress
+          delaycompress
+          missingok
+          notifempty
+          copytruncate
+      }
+    dest: /etc/logrotate.d/docker
+    mode: '0644'

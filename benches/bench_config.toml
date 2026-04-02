@@ -1,0 +1,145 @@
+# =============================================================================
+# Benchmark Configuration for TSN
+# Criterion.rs configuration file
+# =============================================================================
+
+[benchmark]
+# Benchmark mode: quick, normal, thorough
+mode = "normal"
+
+# Sample size for each benchmark
+sample_size = 100
+
+# Warm-up time in seconds
+warm_up_time = 3.0
+
+# Measurement time in seconds
+measurement_time = 5.0
+
+# Number of resamples for statistical analysis
+nresamples = 100000
+
+# Confidence level for statistical analysis
+confidence_level = 0.95
+
+# Significance level for statistical analysis
+significance_level = 0.05
+
+# Plotting configuration
+[plotting]
+# Enable/disable plotting
+enabled = true
+
+# Plotting backend: gnuplot, plotters
+backend = "plotters"
+
+# Summary plot configuration
+summary = true
+
+# Individual benchmark plots
+individual = true
+
+# =============================================================================
+# Performance Thresholds
+# =============================================================================
+
+[thresholds]
+# Crypto operations (in nanoseconds)
+crypto_signature_verify_max_ns = 5000000  # 5ms
+crypto_hash_max_ns = 100000             # 100µs
+crypto_commitment_max_ns = 2000000      # 2ms
+
+# Consensus operations (in milliseconds)
+consensus_block_validation_max_ms = 100
+consensus_transaction_validation_max_ms = 10
+
+# Network operations (in milliseconds)
+network_api_response_max_ms = 50
+network_sync_block_max_ms = 500
+
+# Storage operations (in milliseconds)
+storage_read_max_ms = 1
+storage_write_max_ms = 10
+
+# =============================================================================
+# Regression Detection
+# =============================================================================
+
+[regression]
+# Enable regression detection
+enabled = true
+
+# Threshold for regression detection (relative change)
+threshold = 0.10  # 10%
+
+# Action on regression: fail, warn, ignore
+action = "fail"
+
+# Minimum sample size for regression detection
+min_sample_size = 10
+
+# =============================================================================
+# Output Configuration
+# =============================================================================
+
+[output]
+# Output directory for benchmark results
+results_dir = "target/criterion"
+
+# Save baseline results
+save_baseline = true
+
+# Baseline name
+baseline_name = "main"
+
+# Compare against baseline
+compare_baseline = true
+
+# Generate HTML reports
+html_reports = true
+
+# Generate JSON output
+json_output = true
+
+# =============================================================================
+# Profiling
+# =============================================================================
+
+[profiling]
+# Enable profiling
+enabled = false
+
+# Profiling tool: perf, dtrace, valgrind
+tool = "perf"
+
+# Profiling frequency (in Hz)
+frequency = 997
+
+# =============================================================================
+# Specific Benchmark Configurations
+# =============================================================================
+
+[[benchmarks]]
+name = "crypto_signature"
+sample_size = 50
+measurement_time = 10.0
+
+[[benchmarks]]
+name = "crypto_hash"
+sample_size = 100
+measurement_time = 5.0
+
+[[benchmarks]]
+name = "consensus_validation"
+sample_size = 30
+measurement_time = 15.0
+
+[[benchmarks]]
+name = "network_sync"
+sample_size = 20
+measurement_time = 20.0
+
+[[benchmarks]]
+name = "storage_operations"
+sample_size = 50
+measurement_time = 10.0

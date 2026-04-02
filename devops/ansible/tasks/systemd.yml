@@ -1,0 +1,158 @@
+---
+# Configuration systemd pour TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Génération du service systemd TSN"
+  template:
+    src: tsn-node.service.j2
+    dest: /etc/systemd/system/tsn-node.service
+    mode: '0644'
+    backup: yes
+  register: systemd_service
+  notify: reload systemd
+  
+- name: "Rechargement de systemd"
+  systemd:
+    daemon_reload: yes
+  when: systemd_service.changed
+  
+- name: "Activation du service TSN"
+  systemd:
+    name: tsn-node
+    enabled: yes
+    
+- name: "Arrêt du conteneur Docker direct"
+  docker_container:
+    name: tsn-node
+    state: stopped
+  ignore_errors: yes
+  
+- name: "Démarrage du service TSN via systemd"
+  systemd:
+    name: tsn-node
+    state: started
+    
+- name: "Vérification du statut du service"
+  systemd:
+    name: tsn-node
+  register: service_status
+  
+- name: "Attente de la stabilisation du service"
+  wait_for:
+    port: "{{ tsn_http_port | default(8080) }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    timeout: 60
+    delay: 5
+    
+- name: "Configuration de la surveillance systemd"
+  copy:
+    content: |
+      # Configuration de surveillance TSN
+      [Unit]
+      Description=TSN Node Watchdog
+      After=tsn-node.service
+      Requires=tsn-node.service
+      
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash -c '
+        if ! curl -f http://localhost:{{ tsn_http_port | default(8080) }}/health >/dev/null 2>&1; then
+          echo "TSN health check failed, restarting service"
+          systemctl restart tsn-node
+        fi
+      '
+      
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/tsn-watchdog.service
+    mode: '0644'
+    
+- name: "Configuration du timer de surveillance"
+  copy:
+    content: |
+      [Unit]
+      Description=TSN Node Watchdog Timer
+      Requires=tsn-watchdog.service
+      
+      [Timer]
+      OnCalendar=*:0/5  # Toutes les 5 minutes
+      Persistent=true
+      
+      [Install]
+      WantedBy=timers.target
+    dest: /etc/systemd/system/tsn-watchdog.timer
+    mode: '0644'
+    
+- name: "Activation du watchdog"
+  systemd:
+    name: tsn-watchdog.timer
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: enable_watchdog | default(true)
+  
+- name: "Configuration de la rotation des logs systemd"
+  copy:
+    content: |
+      # Configuration journald pour TSN
+      [Journal]
+      SystemMaxUse=500M
+      SystemMaxFileSize=100M
+      SystemMaxFiles=10
+      MaxRetentionSec=7day
+      ForwardToSyslog=no
+      ForwardToKMsg=no
+      ForwardToConsole=no
+    dest: /etc/systemd/journald.conf.d/tsn.conf
+    mode: '0644'
+  notify: restart journald
+  
+- name: "Script de diagnostic systemd"
+  copy:
+    content: |
+      #!/bin/bash
+      # Script de diagnostic TSN systemd
+      
+      echo "=== Diagnostic TSN Node ==="
+      echo "Date: $(date)"
+      echo "Hostname: $(hostname)"
+      echo
+      
+      echo "=== Service Status ==="
+      systemctl status tsn-node --no-pager -l
+      echo
+      
+      echo "=== Container Status ==="
+      docker ps --filter name=tsn-node --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+      echo
+      
+      echo "=== Health Check ==="
+      curl -f http://localhost:{{ tsn_http_port | default(8080) }}/health 2>/dev/null || echo "FAILED"
+      echo
+      
+      echo "=== Recent Logs ==="
+      journalctl -u tsn-node --no-pager -n 20
+      echo
+      
+      echo "=== Resource Usage ==="
+      docker stats tsn-node --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
+      echo
+      
+      echo "=== Disk Usage ==="
+      du -sh {{ tsn_data_dir }}/* 2>/dev/null || echo "No data"
+    dest: /usr/local/bin/tsn-diag.sh
+    mode: '0755'
+    
+- name: "Affichage du statut final"
+  debug:
+    msg: |
+      Service TSN configuré:
+      - Status: {{ service_status.status.ActiveState }}
+      - Enabled: {{ service_status.status.UnitFileState }}
+      - PID: {{ service_status.status.MainPID | default('N/A') }}
+      - Uptime: {{ service_status.status.ActiveEnterTimestamp | default('N/A') }}
+      
+      Commandes utiles:
+      - systemctl status tsn-node
+      - journalctl -u tsn-node -f
+      - /usr/local/bin/tsn-diag.sh

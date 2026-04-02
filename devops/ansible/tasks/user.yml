@@ -1,0 +1,149 @@
+---
+# Configuration de l'utilisateur TSN
+# Trust Stack Network - Ansible Tasks
+
+- name: "Création du groupe TSN"
+  group:
+    name: "{{ tsn_user }}"
+    state: present
+    system: yes
+    
+- name: "Création de l'utilisateur TSN"
+  user:
+    name: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    system: yes
+    shell: /bin/bash
+    home: "{{ tsn_base_dir }}"
+    create_home: yes
+    comment: "Trust Stack Network Service User"
+    
+- name: "Création des répertoires TSN"
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0755'
+  loop:
+    - "{{ tsn_base_dir }}"
+    - "{{ tsn_data_dir }}"
+    - "{{ tsn_config_dir }}"
+    - "{{ tsn_logs_dir }}"
+    - "{{ tsn_backup_dir }}"
+    - "{{ tsn_base_dir }}/scripts"
+    - "{{ tsn_base_dir }}/keys"
+    
+- name: "Configuration des permissions spéciales"
+  file:
+    path: "{{ item.path }}"
+    mode: "{{ item.mode }}"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+  loop:
+    - { path: "{{ tsn_base_dir }}/keys", mode: '0700' }
+    - { path: "{{ tsn_config_dir }}", mode: '0750' }
+    
+- name: "Génération de la configuration du nœud"
+  template:
+    src: node.toml.j2
+    dest: "{{ tsn_config_dir }}/node.toml"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0640'
+    backup: yes
+  notify: restart tsn-node
+  
+- name: "Script de gestion du nœud TSN"
+  copy:
+    content: |
+      #!/bin/bash
+      # Script de gestion du nœud TSN
+      # Généré automatiquement par Ansible
+      
+      set -euo pipefail
+      
+      TSN_USER="{{ tsn_user }}"
+      TSN_SERVICE="tsn-node"
+      TSN_IMAGE="{{ docker_registry }}/tsn:{{ tsn_version }}"
+      TSN_CONTAINER="tsn-node"
+      
+      case "${1:-help}" in
+          start)
+              echo "Démarrage du nœud TSN..."
+              sudo systemctl start $TSN_SERVICE
+              ;;
+          stop)
+              echo "Arrêt du nœud TSN..."
+              sudo systemctl stop $TSN_SERVICE
+              ;;
+          restart)
+              echo "Redémarrage du nœud TSN..."
+              sudo systemctl restart $TSN_SERVICE
+              ;;
+          status)
+              sudo systemctl status $TSN_SERVICE --no-pager
+              echo
+              sudo docker ps --filter name=$TSN_CONTAINER
+              ;;
+          logs)
+              sudo journalctl -u $TSN_SERVICE -f --no-pager
+              ;;
+          update)
+              echo "Mise à jour de l'image TSN..."
+              sudo docker pull $TSN_IMAGE
+              sudo systemctl restart $TSN_SERVICE
+              ;;
+          health)
+              curl -f http://localhost:8080/health || echo "Service non disponible"
+              ;;
+          backup)
+              /usr/local/bin/tsn-backup.sh
+              ;;
+          *)
+              echo "Usage: $0 {start|stop|restart|status|logs|update|health|backup}"
+              exit 1
+              ;;
+      esac
+    dest: "{{ tsn_base_dir }}/scripts/tsn-ctl.sh"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0755'
+    
+- name: "Alias pour l'utilisateur TSN"
+  copy:
+    content: |
+      # Aliases TSN
+      alias tsn-start='sudo systemctl start tsn-node'
+      alias tsn-stop='sudo systemctl stop tsn-node'
+      alias tsn-restart='sudo systemctl restart tsn-node'
+      alias tsn-status='sudo systemctl status tsn-node'
+      alias tsn-logs='sudo journalctl -u tsn-node -f'
+      alias tsn-health='curl -f http://localhost:8080/health'
+      alias tsn-ctl='{{ tsn_base_dir }}/scripts/tsn-ctl.sh'
+      
+      # Variables d'environnement
+      export TSN_HOME="{{ tsn_base_dir }}"
+      export TSN_CONFIG="{{ tsn_config_dir }}/node.toml"
+      export TSN_DATA="{{ tsn_data_dir }}"
+      export TSN_LOGS="{{ tsn_logs_dir }}"
+    dest: "{{ tsn_base_dir }}/.bashrc"
+    owner: "{{ tsn_user }}"
+    group: "{{ tsn_user }}"
+    mode: '0644'
+    
+- name: "Configuration sudo pour l'utilisateur TSN"
+  copy:
+    content: |
+      # Permissions sudo pour l'utilisateur TSN
+      {{ tsn_user }} ALL=(root) NOPASSWD: /bin/systemctl start tsn-node
+      {{ tsn_user }} ALL=(root) NOPASSWD: /bin/systemctl stop tsn-node
+      {{ tsn_user }} ALL=(root) NOPASSWD: /bin/systemctl restart tsn-node
+      {{ tsn_user }} ALL=(root) NOPASSWD: /bin/systemctl status tsn-node
+      {{ tsn_user }} ALL=(root) NOPASSWD: /bin/journalctl -u tsn-node*
+      {{ tsn_user }} ALL=(root) NOPASSWD: /usr/bin/docker ps*
+      {{ tsn_user }} ALL=(root) NOPASSWD: /usr/bin/docker logs*
+      {{ tsn_user }} ALL=(root) NOPASSWD: /usr/bin/docker pull {{ docker_registry }}/tsn*
+    dest: "/etc/sudoers.d/{{ tsn_user }}"
+    mode: '0440'
+    validate: 'visudo -cf %s'

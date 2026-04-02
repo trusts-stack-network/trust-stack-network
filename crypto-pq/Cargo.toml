@@ -1,0 +1,11 @@
+[package]
+name = "crypto-pq"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slh-dsa = { version = "0.2.0-rc.4", default-features = false, features = ["alloc", "zeroize"] }
+# autres dépendances...
+
+# Si vous avez besoin de std pour d'autres crates, gardez-le pour celles-ci
+# rand = { version = "0.8", features = ["std"] }

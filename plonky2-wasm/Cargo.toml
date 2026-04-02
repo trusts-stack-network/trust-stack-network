@@ -1,0 +1,46 @@
+[package]
+name = "tsn-plonky2-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for TSN's Plonky2 prover"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Plonky2 for STARK proofs
+plonky2 = "1.0"
+plonky2_field = "1.0"
+
+# WASM bindings
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+
+# Random number generation in WASM
+getrandom = { version = "0.2", features = ["js"] }
+
+# Error handling
+thiserror = "1"
+
+# Hex encoding
+hex = "0.4"
+
+# For native Poseidon hash outside circuit
+anyhow = "1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# Reduce WASM size
+[profile.release.package."*"]
+opt-level = "s"

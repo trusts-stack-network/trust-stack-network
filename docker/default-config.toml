@@ -1,0 +1,20 @@
+# Configuration par défaut du nœud TSN
+[chain]
+name = "tsn_testnet"
+genesis_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+
+[network]
+listen_addr = "0.0.0.0:30333"
+rpc_addr = "127.0.0.1:9944"
+max_peers = 25
+
+[consensus]
+mining_enabled = false
+difficulty = "0x100000"
+
+[storage]
+path = "/opt/tsn/data"
+cache_size = 256 # MB
+
+[logging]
+level = "info"

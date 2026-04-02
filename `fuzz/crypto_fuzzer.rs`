@@ -1,0 +1,9 @@
+use cargo_fuzz::fuzz;
+use src::crypto::verify_signature;
+
+fuzz! {
+    #[no_sanitize]
+    fn fuzz_verify_signature(data: &[u8], signature: &[u8]) {
+        let _ = verify_signature(data, signature);
+    }
+}

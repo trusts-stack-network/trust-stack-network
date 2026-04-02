@@ -1,0 +1,44 @@
+[package]
+name = "tsn-plonky3-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for TSN's Plonky3 prover"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# WASM bindings
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Plonky3 (AIR-based ZK proofs + Poseidon2)
+p3-goldilocks = "0.4"
+p3-poseidon2 = "0.4"
+p3-field = "0.4"
+p3-uni-stark = "0.4"
+p3-air = "0.4"
+
+# Random number generation in WASM
+getrandom = { version = "0.2", features = ["js"] }
+
+# Hex encoding
+hex = "0.4"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# Reduce WASM size
+[profile.release.package."*"]
+opt-level = "s"

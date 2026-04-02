@@ -1,0 +1,312 @@
+# Configuration du nœud TSN {{ inventory_hostname }}
+# Trust Stack Network - Post-Quantum Blockchain
+# Généré automatiquement par Ansible le {{ ansible_date_time.iso8601 }}
+
+[network]
+# Adresses de bind spécifiques au nœud
+http_bind = "0.0.0.0:{{ tsn_http_port | default(8080) }}"
+p2p_bind = "0.0.0.0:{{ tsn_p2p_port | default(9000) }}"
+rpc_bind = "0.0.0.0:{{ tsn_rpc_port | default(9001) }}"
+metrics_bind = "0.0.0.0:{{ tsn_metrics_port | default(9090) }}"
+
+# Configuration spécifique au rôle du nœud
+{% if node_role == 'seed' %}
+# Configuration nœud seed
+is_seed_node = true
+bootstrap_peers = []
+max_peers = 100
+max_inbound_peers = 75
+max_outbound_peers = 25
+
+{% elif node_role == 'validator' %}
+# Configuration nœud validateur
+is_validator = true
+validator_key_file = "{{ tsn_config_dir }}/validator.key"
+max_peers = 50
+max_inbound_peers = 25
+max_outbound_peers = 25
+
+{% elif node_role == 'archive' %}
+# Configuration nœud archive
+is_archive_node = true
+archive_full_history = true
+max_peers = 30
+max_inbound_peers = 20
+max_outbound_peers = 10
+
+{% else %}
+# Configuration nœud standard
+max_peers = 50
+max_inbound_peers = 25
+max_outbound_peers = 25
+{% endif %}
+
+# Seeds du réseau (tous les nœuds sauf soi-même)
+seeds = [
+{% for host in groups['tsn_nodes'] %}
+{% if host != inventory_hostname %}
+    "{{ hostvars[host]['ansible_host'] }}:{{ hostvars[host]['tsn_p2p_port'] | default(9000) }}",
+{% endif %}
+{% endfor %}
+]
+
+# Configuration réseau avancée
+connection_timeout = 30
+handshake_timeout = 10
+keep_alive_interval = 60
+max_message_size = 10485760  # 10MB
+
+[storage]
+# Répertoires de données
+data_dir = "{{ tsn_data_dir }}/blocks"
+state_dir = "{{ tsn_data_dir }}/state"
+index_dir = "{{ tsn_data_dir }}/index"
+
+# Configuration Sled DB
+{% if node_role == 'archive' %}
+# Configuration optimisée pour l'archivage
+cache_capacity = 2147483648  # 2GB pour nœud archive
+flush_every_ms = 5000
+compaction_factor = 10
+{% else %}
+# Configuration standard
+cache_capacity = {{ (ansible_memtotal_mb * 1024 * 1024 * 0.25) | int }}  # 25% de la RAM
+flush_every_ms = 1000
+compaction_factor = 5
+{% endif %}
+
+# Rétention des données
+{% if node_role == 'archive' %}
+prune_blocks = false
+prune_state = false
+{% else %}
+prune_blocks = true
+prune_state = true
+prune_blocks_keep = 10000
+prune_state_keep = 1000
+{% endif %}
+
+[consensus]
+# Configuration consensus
+consensus_algorithm = "hybrid_pow_pos"
+block_time_target = 30  # 30 secondes
+
+# Paramètres de difficulté
+difficulty_adjustment_window = 144  # ~1h12min
+difficulty_adjustment_factor = 4
+min_difficulty = 1000
+
+# Taille des blocs
+max_block_size = 1048576  # 1MB
+max_transactions_per_block = 1000
+
+# Configuration spécifique au validateur
+{% if node_role == 'validator' %}
+enable_mining = true
+mining_threads = {{ ansible_processor_vcpus | default(2) }}
+mining_intensity = "medium"
+{% else %}
+enable_mining = false
+{% endif %}
+
+[crypto]
+# Cryptographie post-quantique
+signature_scheme = "ml_dsa_65"  # FIPS 204 ML-DSA-65
+zk_proof_system = "plonky2"     # STARKs quantum-safe
+legacy_support = true           # Support Groth16 BN254
+
+# Paramètres Poseidon2
+poseidon_rounds = 8
+poseidon_width = 4
+poseidon_alpha = 7
+
+# Configuration des clés
+{% if node_role == 'validator' %}
+validator_key_file = "{{ tsn_config_dir }}/validator.key"
+{% endif %}
+node_key_file = "{{ tsn_config_dir }}/node.key"
+
+[logging]
+# Configuration des logs
+level = "{{ log_level | default('info') }}"
+format = "json"
+file = "{{ tsn_logs_dir }}/node.log"
+max_size = 104857600  # 100MB
+max_files = 10
+compress_rotated = true
+
+# Logs par module
+module_levels = [
+    "tsn={{ log_level | default('info') }}",
+    "tsn::network=info",
+    "tsn::consensus={{ 'debug' if node_role == 'validator' else 'info' }}",
+    "tsn::crypto=warn",
+    "tsn::storage={{ 'debug' if node_role == 'archive' else 'info' }}"
+]
+
+# Logs de performance
+enable_performance_logs = {{ 'true' if node_role == 'validator' else 'false' }}
+performance_log_interval = 60  # secondes
+
+[metrics]
+# Métriques Prometheus
+enabled = true
+bind = "0.0.0.0:{{ tsn_metrics_port | default(9090) }}"
+path = "/metrics"
+
+# Métriques détaillées selon le rôle
+{% if node_role == 'validator' %}
+detailed_mempool = true
+detailed_consensus = true
+detailed_mining = true
+{% elif node_role == 'archive' %}
+detailed_storage = true
+detailed_indexing = true
+{% endif %}
+detailed_network = true
+
+# Rétention des métriques
+metrics_retention = 3600  # 1 heure
+
+[api]
+# API REST
+enabled = true
+bind = "0.0.0.0:{{ tsn_http_port | default(8080) }}"
+
+# CORS et sécurité
+cors_origins = {{ api_cors_origins | default(['*']) | to_json }}
+rate_limit = {{ api_rate_limit | default(1000) }}  # requêtes/minute
+max_request_size = 10485760  # 10MB
+
+# Endpoints activés selon le rôle
+{% if node_role == 'archive' %}
+endpoints = [
+    "blocks",
+    "transactions",
+    "mempool",
+    "network",
+    "wallet",
+    "history",
+    "analytics"
+]
+{% elif node_role == 'validator' %}
+endpoints = [
+    "blocks",
+    "transactions",
+    "mempool",
+    "network",
+    "mining",
+    "validator"
+]
+{% else %}
+endpoints = [
+    "blocks",
+    "transactions",
+    "mempool",
+    "network",
+    "wallet"
+]
+{% endif %}
+
+# Cache API
+enable_cache = true
+cache_ttl = 30  # secondes
+
+[rpc]
+# RPC pour communication inter-nœuds
+enabled = true
+bind = "0.0.0.0:{{ tsn_rpc_port | default(9001) }}"
+max_connections = {{ rpc_max_connections | default(100) }}
+timeout = 30
+
+# Authentification RPC (pour les validateurs)
+{% if node_role == 'validator' %}
+require_auth = true
+auth_token_file = "{{ tsn_config_dir }}/rpc.token"
+{% else %}
+require_auth = false
+{% endif %}
+
+[security]
+# Paramètres de sécurité
+enable_tls = false  # TLS géré par le load balancer
+trusted_proxies = {{ trusted_proxies | default([]) | to_json }}
+
+# Rate limiting par IP
+requests_per_second = {{ security_rate_limit | default(100) }}
+burst_size = {{ security_burst_size | default(200) }}
+
+# Blacklist/whitelist
+{% if security_whitelist is defined %}
+ip_whitelist = {{ security_whitelist | to_json }}
+{% endif %}
+{% if security_blacklist is defined %}
+ip_blacklist = {{ security_blacklist | to_json }}
+{% endif %}
+
+[monitoring]
+# Monitoring et santé
+health_check_interval = 30  # secondes
+health_check_timeout = 10
+
+# Alertes
+{% if monitoring_webhook is defined %}
+alert_webhook = "{{ monitoring_webhook }}"
+{% endif %}
+
+# Métriques système
+collect_system_metrics = true
+system_metrics_interval = 60
+
+[node]
+# Identification du nœud
+node_id = {{ node_id }}
+node_name = "{{ inventory_hostname }}"
+node_role = "{{ node_role }}"
+datacenter = "{{ datacenter | default('unknown') }}"
+region = "{{ region | default('unknown') }}"
+
+# Métadonnées
+version = "{{ tsn_version }}"
+build_date = "{{ ansible_date_time.iso8601 }}"
+deployed_by = "ansible"
+
+# Configuration spécifique à l'environnement
+{% if environment is defined %}
+environment = "{{ environment }}"
+{% endif %}
+
+# Limites de ressources
+{% if memory_limit is defined %}
+memory_limit = "{{ memory_limit }}"
+{% endif %}
+{% if cpu_limit is defined %}
+cpu_limit = "{{ cpu_limit }}"
+{% endif %}
+
+[experimental]
+# Fonctionnalités expérimentales (désactivées par défaut)
+enable_experimental_features = false
+
+# Optimisations réseau
+enable_tcp_nodelay = true
+enable_tcp_keepalive = true
+tcp_keepalive_time = 600
+tcp_keepalive_interval = 60
+tcp_keepalive_probes = 3
+
+# Optimisations mémoire
+{% if node_role == 'archive' %}
+enable_memory_mapping = true
+mmap_threshold = 1048576  # 1MB
+{% endif %}
+
+# Debug (uniquement en développement)
+{% if environment == 'development' %}
+enable_debug_endpoints = true
+enable_profiling = true
+profiling_port = 6060
+{% else %}
+enable_debug_endpoints = false
+enable_profiling = false
+{% endif %}
