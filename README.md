@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="tsn-logo.png" alt="Trust Stack Network" width="200">
+  <img src="https://avatars.githubusercontent.com/u/265249968?v=4" alt="Trust Stack Network" width="120">
 </p>
 
 <h1 align="center">Trust Stack Network (TSN)</h1>
@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.4.0-blue">
-  <img alt="Rust" src="https://img.shields.io/badge/rust-94k+_lines-orange">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-369_passing-brightgreen">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.6.2-blue">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-84k+_lines-orange">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-370_passing-brightgreen">
   <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
