@@ -1029,17 +1029,19 @@ impl ShieldedBlockchain {
                 //    the pre-window timestamp anchor is estimated.)
                 //   After LWMA_WINDOW*2: enforce normal 10% tolerance (LWMA is warm)
                 let blocks_since_sync = self.height().saturating_sub(self.fast_sync_base_height);
-                if blocks_since_sync <= LWMA_WINDOW * 2 {
-                    // BUG FIX: The old ±25% tolerance was too tight. After fast-sync,
-                    // next_difficulty() returns self.difficulty (snapshot value) which can
-                    // differ by >25% from the real LWMA-computed difficulty. With 10 miners
-                    // producing blocks fast, nodes that fast-synced even 1 block apart could
-                    // reject each other's blocks, causing permanent forks.
-                    // Accept any valid difficulty while LWMA is warming up.
+                // LWMA needs a full window of real blocks + the pre-window anchor.
+                // fast_sync_base_height can point to the ORIGINAL snapshot (not the most
+                // recent one), so blocks_since_sync may be larger than expected.
+                // Use 3× the window to ensure LWMA has fully converged.
+                let warmup_window = LWMA_WINDOW * 3;
+                if blocks_since_sync <= warmup_window {
+                    // After fast-sync, next_difficulty() returns a fallback value that can
+                    // diverge from the real LWMA-computed difficulty. Accept any valid
+                    // difficulty while LWMA is warming up.
                     if block.header.difficulty >= MIN_DIFFICULTY {
                         tracing::debug!(
                             "Accepting difficulty {} from peer (expected {}, {}/{} blocks since fast-sync, LWMA warming up)",
-                            block.header.difficulty, expected_difficulty, blocks_since_sync, LWMA_WINDOW * 2
+                            block.header.difficulty, expected_difficulty, blocks_since_sync, warmup_window
                         );
                     } else {
                         return Err(BlockchainError::InvalidDifficulty);
