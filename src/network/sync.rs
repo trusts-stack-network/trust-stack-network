@@ -253,10 +253,11 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                 warn!("SYNC_DEBUG: ANCESTOR_FOUND height={} peer={}", ancestor, peer_id(peer_url));
                 info!("Common ancestor found at height {} via headers", ancestor);
 
-                // Cancel mining during reorg
+                // Cancel mining during reorg (this is a REAL rollback — cancel is justified)
                 state.last_reorg_height.store(ancestor, std::sync::atomic::Ordering::Relaxed);
                 state.reorg_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
+                    warn!("MINING_CANCEL=true reason=step8_rollback ancestor={} peer={}", ancestor, peer_id(peer_url));
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
 
@@ -305,8 +306,11 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                     chain.reset_for_snapshot_resync();
                     return Ok(0);
                 } else {
-                    warn!("No ancestor + checkpoint fail — banning peer {}", peer_id(peer_url));
-                    ban_peer(&state, peer_url, 1800);
+                    // FIX: Reduced from 1800s ban to 120s cooldown.
+                    // On a private network, checkpoint failure can happen due to
+                    // fast-sync placeholders, not malicious peers.
+                    warn!("No ancestor + checkpoint fail — cooldown 120s for peer {} (not banning)", peer_id(peer_url));
+                    ban_peer(&state, peer_url, 120);
                     return Ok(0);
                 }
             }
@@ -416,6 +420,7 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                 // Acquire reorg_lock BEFORE searching for ancestor to prevent race conditions
                 let _recovery_reorg_guard = state.reorg_lock.write().await;
                 if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
+                    warn!("MINING_CANCEL=true reason=recovery_rollback peer={}", peer_id(peer_url));
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
 
@@ -457,7 +462,9 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                             chain.reset_for_snapshot_resync();
                             return Ok(0);
                         } else {
-                            ban_peer(&state, peer_url, 1800);
+                            // FIX: Reduced from 1800s ban to 120s cooldown
+                            warn!("Recovery checkpoint fail — cooldown 120s for peer {} (not banning)", peer_id(peer_url));
+                            ban_peer(&state, peer_url, 120);
                         }
                         break;
                     }
@@ -522,10 +529,17 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
             ));
         }
 
+        // FIX 7: Do NOT cancel mining here at end of sync.
+        // The cancel during actual rollback (Step 8, lines ~260/419) is sufficient.
+        // This preemptive cancel was firing on every P2P-triggered sync that detected
+        // a fork — even when no rollback occurred. With blocks arriving every ~8s from
+        // forked peers, mining was cancelled faster than it could find a block,
+        // permanently stalling the miner.
         if is_fork {
-            if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
-                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
+            warn!(
+                "SYNC_DEBUG: sync_complete is_fork=true synced={} — NOT cancelling mining (cancel only during rollback)",
+                synced
+            );
         }
     }
     Ok(synced)

@@ -3124,7 +3124,10 @@ async fn cmd_node(
                     let mc = mine_state.mining_cancel.read().unwrap();
                     mc.clone().unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
                 };
-                // Reset cancel before starting
+                // Reset cancel before starting mining
+                if cancel_signal.load(std::sync::atomic::Ordering::Relaxed) {
+                    tracing::debug!("MINING_CANCEL=false reason=mining_cycle_start");
+                }
                 cancel_signal.store(false, std::sync::atomic::Ordering::Relaxed);
 
                 // Mine in a blocking task to not block the async runtime
