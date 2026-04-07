@@ -3308,9 +3308,12 @@ async fn cmd_node(
                                     tracing::error!("FORK CONFIRMED: peer is ahead. Re-syncing...");
                                     mine_state.reorg_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     let _ = tsn::network::sync_from_peer(mine_state.clone(), peer).await;
-                                    if let Some(cancel) = mine_state.mining_cancel.read().unwrap().as_ref() {
-                                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    }
+                                    // BUG FIX: Do NOT set mining_cancel here.
+                                    // sync_from_peer already cancels mining during reorg internally.
+                                    // Setting cancel=true AFTER sync returns kills the next mining
+                                    // cycle before it starts, creating a deadlock:
+                                    //   cancel=true → mine returns None → sync gate sees gap → waits
+                                    //   → nobody mines → gap never closes → mining stalled forever.
                                     unaccepted_count = 0;
                                 }
                             } else {
