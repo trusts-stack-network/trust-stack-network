@@ -1,5 +1,0 @@
-// Vérifiez que tous les délimiteurs sont correctement fermés
-// Par exemple, si vous avez un bloc if, assurez-vous qu'il est correctement fermé
-if true {
-    // Code ici
-} // Délimiteur fermé

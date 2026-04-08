@@ -17,8 +17,18 @@ wallet/dist/
 
 # Blockchain data
 data/
+data-local/
+data-miner/
 data-faucet/
 your-data/
+
+# Release binaries (use GitHub Releases instead)
+release/
+
+# Local/temp files
+wallet-local.json
+*.bak
+memory/shared_memory.json
 
 # IDE
 .idea/

@@ -1,7 +1,0 @@
-/// Tests de régression pour les vulnérabilités fixées
-use tsn_crypto::signature::verify_signature_const;
-
-#[test]
-fn regression_test_cve_2024_001_timing() {
-    // CVE-2024-001: Timing attack sur vérification signature
-    // Fix: util
