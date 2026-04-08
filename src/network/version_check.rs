@@ -183,11 +183,11 @@ mod tests {
     fn test_version_meets_minimum() {
         assert!(version_meets_minimum(MINIMUM_VERSION));
         assert!(version_meets_minimum("2.0.0"));
-        assert!(version_meets_minimum("1.7.0"));
-        assert!(version_meets_minimum("1.8.0"));
-        assert!(!version_meets_minimum("1.6.0"));
+        assert!(version_meets_minimum("2.1.0"));
+        assert!(version_meets_minimum("3.0.0"));
+        assert!(!version_meets_minimum("1.9.0"));
+        assert!(!version_meets_minimum("1.7.0"));
         assert!(!version_meets_minimum("1.5.1"));
-        assert!(!version_meets_minimum("1.4.2"));
         assert!(!version_meets_minimum("0.6.0"));
     }
 

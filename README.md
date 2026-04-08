@@ -9,10 +9,10 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.8.6-blue">
-  <img alt="Rust" src="https://img.shields.io/badge/rust-96k+_lines-orange">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-935_passing-brightgreen">
-  <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.0.0-blue">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-97k+_lines-orange">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-370+_passing-brightgreen">
+  <img alt="Testnet" src="https://img.shields.io/badge/testnet--v2-live-success">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
@@ -96,7 +96,7 @@ Merkle Node     = Poseidon(domain=5, left, right)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         TSN Node v1.4.0                              │
+│                         TSN Node v2.0.0                              │
 ├──────────────┬──────────────┬──────────────┬─────────────────────────┤
 │    Core      │    Crypto    │  Consensus   │        Network          │
 │  Block       │  Poseidon2   │  PoW Mining  │  libp2p (GossipSub)     │
@@ -330,11 +330,13 @@ New nodes join the network in **seconds** by downloading a compressed state snap
 | **Checkpoint finality** | Every 100 blocks, a checkpoint is created |
 | **Fork ID verification** | Genesis hash checked at sync — prevents silent splits |
 | **Anchor block filter** | Blocks must reference a recent valid ancestor |
-| **P2P version gate** | Nodes below MINIMUM_VERSION (v1.3.0) are rejected |
+| **P2P version gate** | Nodes below MINIMUM_VERSION (v2.0.0) are rejected |
+| **Genesis HTTP check** | Peer genesis block hash verified before any sync |
+| **Protocol magic** | TSN2 magic bytes — old network nodes cannot connect |
 
 ## Testnet Status
 
-The private testnet is live with **5 nodes** and **11,700+ blocks** mined.
+The private testnet v2 is live with a **fresh genesis**, **new network identity** (tsn-testnet-v2), and **strict version enforcement** (v2.0.0 minimum).
 
 > **TSN tokens currently have no value.** The testnet is for development and testing only. Tokens can be mined for free by anyone running a node. Economic value will only be introduced at the incentivized testnet phase.
 
@@ -413,6 +415,26 @@ A cross-chain anonymous DEX built on TSN with AMM pools, escrow P2P, yield farmi
 - **Privacy** — anonymous trading via TSN shielded transactions
 
 ## Changelog
+
+### v2.0.0 — Network Reset & Sync Stability
+
+**Breaking:** New network identity, protocol magic, and genesis — all previous versions are incompatible.
+
+- **Network reset**: fresh genesis (`tsn-testnet-v2`), clean chain from block 0
+- **Protocol magic**: `TSN1` → `TSN2` — old nodes cannot parse messages
+- **MINIMUM_VERSION**: `2.0.0` — old nodes explicitly rejected at handshake
+- **Genesis HTTP check**: peer's genesis block hash verified via REST before any sync
+- **EXPECTED_GENESIS_HASH**: hardcoded and verified at startup — prevents silent chain forks
+- **Sync stability (patches A+B+D)**: validated across 6 tests including 20 miners on 2 EPYC machines for 1 hour
+  - Patch A: prevent rollback thrashing to fast_sync_base
+  - Patch B: prevent peer isolation via ban cascade with 10+ peers
+  - Patch D: guard reset_for_snapshot_resync in post-fast-sync warmup window
+- **Headers-first sync**: refactored ancestor search with fast-sync blind zone detection
+- **Open network**: IP whitelist removed, compatibility enforced via version + magic + genesis
+- **Poseidon2 from genesis**: no legacy hash period, clean start
+- **node-1**: converted from miner to relay-only (dedicated to explorer/website)
+
+**Migration:** Stop node, delete `data/` directory, install v2.0.0 binary, restart. Old chain data is incompatible.
 
 ### v1.4.0 — Consensus Security Overhaul
 
@@ -502,11 +524,11 @@ Full security audit: 29 findings, 23 fixes applied. Score: **5.4/10 → 8.1/10**
 | Metric | Value |
 |--------|-------|
 | Language | Rust 2021 edition |
-| Lines of code | 94,000+ |
-| Source files | 298 |
-| Tests | 369 passing |
-| Commits | 32+ |
-| Nodes | 5 (1 miner + 4 seeds) |
+| Lines of code | 97,000+ |
+| Source files | 300+ |
+| Tests | 370+ passing |
+| Commits | 420+ |
+| Nodes | 5 (relay + 4 seeds) |
 
 ## API
 

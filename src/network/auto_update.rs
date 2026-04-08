@@ -934,8 +934,9 @@ mod tests {
 
         assert!(get_latest_peer_version().is_none());
 
-        notify_peer_version("2.0.0");
-        assert_eq!(get_latest_peer_version(), Some("2.0.0".to_string()));
+        // Only versions strictly newer than LOCAL_VERSION are stored
+        notify_peer_version("2.0.1");
+        assert_eq!(get_latest_peer_version(), Some("2.0.1".to_string()));
 
         // Higher version replaces
         notify_peer_version("2.1.0");
