@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.6.2-blue">
-  <img alt="Rust" src="https://img.shields.io/badge/rust-84k+_lines-orange">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-370_passing-brightgreen">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.8.6-blue">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-96k+_lines-orange">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-935_passing-brightgreen">
   <img alt="Testnet" src="https://img.shields.io/badge/testnet-live-success">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -259,8 +259,8 @@ TSN includes a **stack-based zkVM** with gas metering and ZK execution traces:
 |-----------|-------|
 | HTTP API Port | 9333 |
 | P2P Port (libp2p) | 9334 |
-| Block Reward | 50 TSN (92% miner, 5% dev fees, 3% relay pool) |
-| Halving Interval | 4,200,000 blocks (~16 months) |
+| Block Reward | 13.52 TSN at launch (92% miner, 5% dev, 3% relay) |
+| Halving Eras | 6 eras over ~10 years |
 | Target Block Time | ~10 seconds |
 | Difficulty Adjustment | LWMA per-block (N=45 window) |
 | P2P Protocol | libp2p GossipSub mesh (D=6, heartbeat 700ms) |
@@ -268,7 +268,36 @@ TSN includes a **stack-based zkVM** with gas metering and ZK execution traces:
 | Min Difficulty | 1,500,000 |
 | Nonce Size | 512 bits |
 | Max TX Size | 1 MB |
-| Max Supply | ~420,000,000 TSN (~10 years to reach) |
+| Max Supply | 100,000,000 TSN (hard cap) |
+
+## Tokenomics
+
+TSN follows a deflationary emission model with **6 halving eras** over ~10 years, converging to a hard cap of **100,000,000 TSN**. No pre-mine. No VC allocation. No pre-sale. Mining only.
+
+### Halving Schedule
+
+| Era | Reward/block | Duration | TSN Mined | Cumulative |
+|-----|-------------|----------|-----------|------------|
+| 1 | 13.52 TSN | ~6 months | 21.5M | 21.5M |
+| 2 | 6.76 TSN | ~23 months | 40.5M | 62.0M |
+| 3 | 3.38 TSN | ~23 months | 20.3M | 82.3M |
+| 4 | 1.69 TSN | ~23 months | 10.1M | 92.4M |
+| 5 | 0.85 TSN | ~23 months | 5.1M | 97.5M |
+| 6 | 0.42 TSN | ~23 months | 2.5M | 100.0M |
+
+### Distribution
+
+- **92%** → Miners (block reward)
+- **5%** → Dev fund (protocol development)
+- **3%** → Relay pool (network infrastructure)
+
+### Timeline
+
+- **Now** — Private testnet (50 TSN/block, tokens have no monetary value)
+- **May 2027** — Incentivized testnet with real tokenomics *(subject to readiness)*
+- **~2037** — Final TSN mined (100M hard cap reached)
+
+> ⚠️ The private testnet uses a simplified 50 TSN/block reward. The halving schedule above will take effect starting from the incentivized testnet phase.
 
 ## Synchronization & Anti-Fork System
 
