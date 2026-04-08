@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_message_too_large() {
-        let mut buf = BytesMut::from(&b"TSN1\xFF\xFF\xFF\xFF"[..]);
+        let mut buf = BytesMut::from(&b"TSN2\xFF\xFF\xFF\xFF"[..]);
         let result = decode_message(&mut buf);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), crate::network::NetworkError::Protocol(ref msg) if msg.contains("large") || msg.contains("Large")));
@@ -244,7 +244,7 @@ mod tests {
     
     #[test]
     fn test_incomplete_message() {
-        let mut buf = BytesMut::from(&b"TSN1\x05\x00\x00\x00hel"[..]);
+        let mut buf = BytesMut::from(&b"TSN2\x05\x00\x00\x00hel"[..]);
         let result = decode_message(&mut buf);
         assert!(result.unwrap().is_none());
     }

@@ -472,27 +472,30 @@ mod tests {
     fn test_height_routing() {
         let header = [0u8; 156];
 
-        if POSEIDON2_ACTIVATION_HEIGHT == 0 {
-            // Heights below V2 activation use Goldilocks v1
+        if POSEIDON2_V2_ACTIVATION_HEIGHT == 0 {
+            // All heights use Poseidon2 v2 when V2 activates at genesis
+            let h0 = poseidon_hash_header_for_height(&header, 0);
+            let direct_v2 = poseidon_hash_header_v2(&header);
+            assert_eq!(h0, direct_v2);
+        } else if POSEIDON2_ACTIVATION_HEIGHT == 0 {
+            // Heights below V2 use Goldilocks v1, post-V2 uses Poseidon2
             let h0 = poseidon_hash_header_for_height(&header, 0);
             let direct = poseidon_hash_header(&header);
             assert_eq!(h0, direct);
+
+            let v2 = poseidon_hash_header_for_height(&header, POSEIDON2_V2_ACTIVATION_HEIGHT);
+            let direct_v2 = poseidon_hash_header_v2(&header);
+            assert_eq!(v2, direct_v2);
         } else {
-            // Pre-activation uses legacy
+            // Pre-activation uses legacy, post-V2 uses Poseidon2
             let pre = poseidon_hash_header_for_height(&header, 0);
             let legacy = poseidon_hash_header_legacy(&header);
             assert_eq!(pre, legacy);
 
-            // Post-activation uses Goldilocks v1
-            let post = poseidon_hash_header_for_height(&header, POSEIDON2_ACTIVATION_HEIGHT);
-            let goldilocks = poseidon_hash_header(&header);
-            assert_eq!(post, goldilocks);
+            let v2 = poseidon_hash_header_for_height(&header, POSEIDON2_V2_ACTIVATION_HEIGHT);
+            let direct_v2 = poseidon_hash_header_v2(&header);
+            assert_eq!(v2, direct_v2);
         }
-
-        // Post V2 activation uses Poseidon2 (plonky3)
-        let v2 = poseidon_hash_header_for_height(&header, POSEIDON2_V2_ACTIVATION_HEIGHT);
-        let direct_v2 = poseidon_hash_header_v2(&header);
-        assert_eq!(v2, direct_v2);
     }
 
     // =============================================================================
