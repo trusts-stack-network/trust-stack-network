@@ -88,18 +88,43 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         (chain.height(), hex::encode(chain.latest_hash()), genesis)
     };
 
-    // ── Step 4: Genesis compatibility check ──
-    let placeholder = "0".repeat(64);
-    let peer_has_real_genesis = !peer_info.genesis_hash.is_empty() && peer_info.genesis_hash != placeholder;
-    let local_has_real_genesis = !local_genesis.is_empty() && local_genesis != placeholder;
-    if local_height > 0 && peer_has_real_genesis && local_has_real_genesis && peer_info.genesis_hash != local_genesis {
-        warn!(
-            "Rejecting peer {} — incompatible genesis (peer: {}…, local: {}…)",
-            peer_id(peer_url),
-            &peer_info.genesis_hash[..16.min(peer_info.genesis_hash.len())],
-            &local_genesis[..16.min(local_genesis.len())]
-        );
-        return Ok(0);
+    // ── Step 4: Genesis compatibility check (strict) ──
+    // Fetch the peer's actual genesis block hash via HTTP to prevent syncing
+    // from an incompatible chain. This catches old-network peers that the
+    // protocol magic (P2P only) and version check cannot block on REST API.
+    let expected_genesis = crate::config::EXPECTED_GENESIS_HASH;
+    if !expected_genesis.is_empty() {
+        let genesis_url = format!("{}/block/height/0", peer_url);
+        match client.get(&genesis_url).timeout(std::time::Duration::from_secs(5)).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(block) = resp.json::<PeerBlockInfo>().await {
+                    if block.hash != expected_genesis {
+                        warn!(
+                            "Rejecting peer {} — genesis mismatch (peer: {}…, expected: {}…)",
+                            peer_id(peer_url),
+                            &block.hash[..16.min(block.hash.len())],
+                            &expected_genesis[..16]
+                        );
+                        return Ok(0);
+                    }
+                }
+            }
+            _ => {
+                // If we can't fetch genesis, fall back to chain/info check
+                let placeholder = "0".repeat(64);
+                let peer_has_real_genesis = !peer_info.genesis_hash.is_empty() && peer_info.genesis_hash != placeholder;
+                let local_has_real_genesis = !local_genesis.is_empty() && local_genesis != placeholder;
+                if peer_has_real_genesis && local_has_real_genesis && peer_info.genesis_hash != local_genesis {
+                    warn!(
+                        "Rejecting peer {} — incompatible genesis (peer: {}…, local: {}…)",
+                        peer_id(peer_url),
+                        &peer_info.genesis_hash[..16.min(peer_info.genesis_hash.len())],
+                        &local_genesis[..16.min(local_genesis.len())]
+                    );
+                    return Ok(0);
+                }
+            }
+        }
     }
 
     // ── Step 5: Determine sync mode ──
