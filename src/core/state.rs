@@ -58,8 +58,18 @@ impl ShieldedState {
         }
     }
 
-    /// Get the current commitment tree root (V1).
+    /// Get the current commitment tree root.
+    /// v1.8.0: Uses V2 (PQ/Goldilocks) tree as the authoritative commitment root.
+    /// The V2 tree is ALWAYS updated on all nodes regardless of skip_v1_tree,
+    /// ensuring consensus-compatible commitment_root in block headers.
+    /// The V1 tree is legacy (BN254) and can diverge across nodes after
+    /// snapshot sync or rollback, breaking consensus.
     pub fn commitment_root(&self) -> TreeHash {
+        self.commitment_tree_pq.root()
+    }
+
+    /// Get the legacy V1 commitment tree root (for debugging only).
+    pub fn commitment_root_v1(&self) -> TreeHash {
         self.commitment_tree.root()
     }
 
@@ -537,9 +547,11 @@ impl ShieldedState {
 
         // Add output commitments to both V1 and V2 trees
         for output in &tx.outputs {
-            let cm = NoteCommitment(output.note_commitment);
-            self.commitment_tree.append(&cm);
-            // Also add to V2 tree for quantum-resistant proofs
+            if !self.skip_v1_tree {
+                let cm = NoteCommitment(output.note_commitment);
+                self.commitment_tree.append(&cm);
+            }
+            // V2 tree (quantum-resistant, always updated)
             let cm_pq = NoteCommitmentPQ::from(output.note_commitment);
             self.commitment_tree_pq.append(&cm_pq);
         }
@@ -629,9 +641,11 @@ impl ShieldedState {
 
         // Add V2 output commitments to both trees
         for output in &tx.pq_outputs {
-            let cm = NoteCommitment(output.note_commitment);
-            self.commitment_tree.append(&cm);
-            // Also add to V2 tree for quantum-resistant proofs
+            if !self.skip_v1_tree {
+                let cm = NoteCommitment(output.note_commitment);
+                self.commitment_tree.append(&cm);
+            }
+            // V2 tree (quantum-resistant, always updated)
             let cm_pq = NoteCommitmentPQ::from(output.note_commitment);
             self.commitment_tree_pq.append(&cm_pq);
         }
@@ -720,13 +734,18 @@ impl ShieldedState {
     /// Create a snapshot of the full state (V1 + V2 trees + nullifiers) for persistence.
     /// If V1 tree is being skipped (V2-only mode), save as version 1 (V2-only).
     pub fn snapshot_pq(&self) -> StateSnapshotPQ {
+        // Always include V1 tree in snapshots for consensus compatibility.
+        // Nodes that restore this snapshot will have skip_v1_tree=false and
+        // can compute correct commitment_roots identical to all other nodes.
         if self.skip_v1_tree {
-            // V2-only mode: pas de V1 tree, pas de migration_hash
+            // V2-only mode: V1 tree is empty/stale but include it anyway
+            // so receiving nodes can at least start from this state.
+            // Version 1 signals that V1 tree may not be reliable.
             StateSnapshotPQ {
                 tree_snapshot: self.commitment_tree_pq.snapshot(),
                 nullifiers: self.nullifier_set.iter().map(|n| n.0).collect(),
                 version: 1,
-                v1_tree: None,
+                v1_tree: Some(self.commitment_tree.clone()),
                 migration_hash: None,
             }
         } else {
@@ -750,11 +769,12 @@ impl ShieldedState {
     pub fn restore_pq_from_snapshot(&mut self, snapshot: StateSnapshotPQ) {
         self.commitment_tree_pq = CommitmentTreePQ::from_snapshot(snapshot.tree_snapshot);
         self.nullifier_set = snapshot.nullifiers.into_iter().map(Nullifier).collect();
-        // V1 tree is legacy (BN254 Poseidon) and NOT reliably reproducible after
-        // fast-sync. Always skip V1 validation — V2 tree is authoritative.
+        // V1 tree must be maintained for consensus: all nodes must compute
+        // the same commitment_root in block headers. If V1 tree is present
+        // in the snapshot, restore it and keep skip_v1_tree=false.
         if let Some(v1_tree) = snapshot.v1_tree {
             self.commitment_tree = v1_tree;
-            self.skip_v1_tree = true; // ALWAYS skip — V1 tree diverges across nodes
+            self.skip_v1_tree = false; // V1 tree present — consensus requires it
 
             // Vérifier le migration_hash si présent dans le checkpoint
             if snapshot.migration_hash.is_some() {
@@ -775,9 +795,11 @@ impl ShieldedState {
                 }
             }
         } else {
-            // V2-only snapshot: V1 tree stays empty, skip V1 tree updates
-            // and commitment_root validation (V1 root won't match headers).
-            // Blocks are still validated by PoW, V2 tree, and all other checks.
+            // V2-only snapshot: V1 tree stays empty. Must skip V1 tree updates
+            // because we cannot reconstruct V1 tree without replaying all blocks.
+            // This node will NOT be able to mine (commitment_root would be wrong).
+            // It can still validate via PoW, V2 tree, and other checks.
+            tracing::warn!("V2-only snapshot: V1 tree absent, skipping V1 validation (node cannot mine reliably)");
             self.skip_v1_tree = true;
 
             // Pour un snapshot V2-only, vérifier le migration_hash contre le checkpoint si disponible
@@ -990,11 +1012,15 @@ mod tests {
 
     #[test]
     fn test_empty_shielded_state() {
+        use crate::crypto::pq::merkle_pq::CommitmentTreePQ;
         let state = ShieldedState::new();
 
         assert_eq!(state.commitment_count(), 0);
         assert_eq!(state.nullifier_count(), 0);
-        assert_eq!(state.commitment_root(), CommitmentTree::empty_root());
+        // commitment_root() now returns PQ tree root (v1.8.0)
+        assert_eq!(state.commitment_root(), CommitmentTreePQ::empty_root());
+        // V1 root still accessible via commitment_root_v1()
+        assert_eq!(state.commitment_root_v1(), CommitmentTree::empty_root());
     }
 
     #[test]
@@ -1011,11 +1037,15 @@ mod tests {
 
     #[test]
     fn test_commitment_tracking() {
+        use crate::crypto::pq::commitment_pq::NoteCommitmentPQ;
         let mut state = ShieldedState::new();
         let cm = NoteCommitment([1u8; 32]);
 
         let initial_root = state.commitment_root();
+        // Must update both trees for commitment_root() to change (uses PQ tree)
         state.commitment_tree.append(&cm);
+        let cm_pq = NoteCommitmentPQ::from(cm.0);
+        state.commitment_tree_pq.append(&cm_pq);
 
         assert_eq!(state.commitment_count(), 1);
         assert_ne!(state.commitment_root(), initial_root);
@@ -1025,10 +1055,11 @@ mod tests {
     fn test_anchor_validation() {
         let mut state = ShieldedState::new();
 
-        let root_before = state.commitment_root();
+        // Use V1 root for anchor validation (anchors are V1-based)
+        let root_before = state.commitment_root_v1();
         let cm = NoteCommitment([1u8; 32]);
         state.commitment_tree.append(&cm);
-        let root_after = state.commitment_root();
+        let root_after = state.commitment_root_v1();
 
         // Both roots should be valid
         assert!(state.is_valid_anchor(&root_before));

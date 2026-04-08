@@ -30,21 +30,36 @@ pub const POSEIDON2_ACTIVATION_HEIGHT: u64 = 0;
 ///
 /// Set to current chain height + ~200 blocks to give all nodes time to upgrade.
 /// All nodes MUST upgrade to v0.4.0 before this height is reached.
-pub const POSEIDON2_V2_ACTIVATION_HEIGHT: u64 = 1100;
+pub const POSEIDON2_V2_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Default seed nodes for the TSN network.
 /// These are the initial nodes that new nodes connect to.
 /// Add your deployed node URLs here.
 pub const SEED_NODES: &[&str] = &[
-    "http://45.145.165.223:9333",   // node-1 (miner)
+    "http://45.145.165.223:9333",   // node-1 (relay)
     "http://151.240.19.253:9333",   // seed-1
     "http://45.145.164.76:9333",    // seed-2
     "http://146.19.168.71:9333",    // seed-3
     "http://45.132.96.141:9333",    // seed-4
 ];
 
+/// Whitelisted IPs — only these can connect via HTTP API and P2P.
+/// Set to empty to allow all connections (open network).
+/// Used during testing to isolate our nodes from external miners.
+pub const WHITELISTED_IPS: &[&str] = &[
+    // Empty — open network. Version check + protocol magic enforce compatibility.
+];
+
+/// Check if an IP is whitelisted. Returns true if whitelist is empty (open network).
+pub fn is_ip_whitelisted(ip: &str) -> bool {
+    if WHITELISTED_IPS.is_empty() {
+        return true;
+    }
+    WHITELISTED_IPS.iter().any(|w| ip.starts_with(w))
+}
+
 /// Network name for identification
-pub const NETWORK_NAME: &str = "tsn-mainnet";
+pub const NETWORK_NAME: &str = "tsn-testnet-v2";
 
 /// Hardcoded checkpoints for fast-sync verification.
 /// After downloading blocks in trusted mode, the node verifies that these
@@ -253,14 +268,10 @@ pub const MAX_REORG_DEPTH: u64 = 100;
 /// v1.5.0: Populated from the canonical chain on 2 April 2026.
 /// Any node whose chain doesn't match these hashes at these heights will
 /// be forced to re-sync from peers at startup.
-pub const HARDCODED_CHECKPOINTS: &[(u64, &str)] = &[
-    (18500, "000005a4699a65eb7deaccd33690970da9e621bd742a6b903fdc904ef2310034"),
-    (19000, "000005b6f4b776aac2ae85c3f8e0445bb5950171af5a20c0ee178de935835010"),
-    (19500, "000003326eaabcd8b2786329de5b301d9172d72f717d8a7845310bb8ee0f94b9"),
-    (20000, "00000ab7e29129de8f7d82fe073512aed2684f142fba3ab116d711d3232b42e9"),
-    (20500, "000002dd180f84e9d6af84a9ab0cf57843a1609777585c50ac340a7e2e61e42f"),
-    (21000, "0000013119fc0b8b1e7470472c364d2cb566b4df33c192a1edfa31d4f657d571"),
-];
+/// v2.0: Cleared for genesis reset with headers-first sync.
+/// Old checkpoints (18500-21000) from previous chain are invalid.
+/// New checkpoints will be added after the new chain stabilizes.
+pub const HARDCODED_CHECKPOINTS: &[(u64, &str)] = &[];
 
 // ============================================================================
 // Genesis Verification
@@ -274,6 +285,7 @@ pub const HARDCODED_CHECKPOINTS: &[(u64, &str)] = &[
 /// Reset after PoW refactor to numeric difficulty + 64-byte nonce.
 /// Updated for v1.0.0: matches genesis produced by all live nodes.
 /// Previous value (42b5af19...) was from dev environment with different parameters.
-/// Genesis hash — empty string disables verification (will be set after mainnet launch).
+/// Genesis hash — all nodes MUST produce this exact genesis to join the network.
+/// v2.0.0: New genesis for testnet-v2 reset (Poseidon2 from height 0, open network).
 /// Previous values: "8b6f36..." (v0.7.1), "42b5af..." (dev)
-pub const EXPECTED_GENESIS_HASH: &str = "";
+pub const EXPECTED_GENESIS_HASH: &str = "9055172503147d90a78684c5b69e7e888e13fe525612f5ad541f2d5cdb45bbd3";

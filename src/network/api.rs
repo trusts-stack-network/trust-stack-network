@@ -5,7 +5,7 @@
 //! data (block hashes, timestamps, fees) is exposed.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::Html,
     routing::{get, post},
@@ -163,6 +163,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/chain/info", get(chain_info))
         .route("/blocks", post(receive_block))
         .route("/blocks/since/:height", get(get_blocks_since))
+        .route("/headers/since/:height", get(get_headers_since))
         .route("/peers", get(get_peers))
         .route("/peers", post(add_peer))
         .route("/peers/p2p", get(get_p2p_peers))
@@ -991,10 +992,16 @@ async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse
 
 /// Receive a block from a peer node.
 async fn receive_block(
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Json(block): Json<ShieldedBlock>,
 ) -> Result<Json<ReceiveBlockResponse>, (StatusCode, String)> {
+    // IP whitelist check
+    let ip = addr.ip().to_string();
+    if !crate::config::is_ip_whitelisted(&ip) {
+        return Err((StatusCode::FORBIDDEN, format!("IP {} not whitelisted", ip)));
+    }
     // Reject blocks from nodes that don't send version header or are outdated
     if let Some(ver) = headers.get("X-TSN-Version").and_then(|v| v.to_str().ok()) {
         if !crate::network::version_check::version_meets_minimum(ver) {
@@ -1124,6 +1131,26 @@ struct BlocksSinceParams {
     limit: Option<usize>,
 }
 
+/// GET /headers/since/{height} — returns compact headers for headers-first sync protocol.
+/// Lightweight (~200 bytes/header vs ~5KB/block). Used to detect forks and find
+/// common ancestors without downloading full blocks.
+/// Max 500 headers per request (~100KB).
+async fn get_headers_since(
+    State(state): State<Arc<AppState>>,
+    Path(since_height): Path<u64>,
+    Query(params): Query<HeadersSinceParams>,
+) -> Json<Vec<crate::core::CompactHeader>> {
+    let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
+    let limit = params.limit.unwrap_or(500).min(1000);
+    let headers = chain.get_compact_headers_since(since_height, limit);
+    Json(headers)
+}
+
+#[derive(Deserialize)]
+struct HeadersSinceParams {
+    limit: Option<usize>,
+}
+
 // ============ Peer Management Endpoints ============
 
 #[derive(Serialize)]
@@ -1247,9 +1274,18 @@ fn is_self_peer(url: &str, our_addresses: &[String]) -> bool {
 
 /// Add a new peer to the peer list.
 async fn add_peer(
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddPeerRequest>,
 ) -> Json<AddPeerResponse> {
+    // IP whitelist check
+    let ip = addr.ip().to_string();
+    if !crate::config::is_ip_whitelisted(&ip) {
+        return Json(AddPeerResponse {
+            status: format!("rejected: IP {} not whitelisted", ip),
+            peer_count: state.peers.read().unwrap_or_else(|e| e.into_inner()).len(),
+        });
+    }
     let normalized = normalize_peer_url(&req.url);
 
     // H4 audit fix: validate URL scheme (only HTTP/HTTPS allowed — blocks file://, ftp://, etc.)
@@ -2289,10 +2325,16 @@ struct TipResponse {
 
 /// Receive a tip announcement from a peer.
 async fn receive_tip(
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Json(req): Json<TipRequest>,
 ) -> Result<Json<TipResponse>, (StatusCode, String)> {
+    // IP whitelist check
+    let ip = addr.ip().to_string();
+    if !crate::config::is_ip_whitelisted(&ip) {
+        return Err((StatusCode::FORBIDDEN, format!("IP {} not whitelisted", ip)));
+    }
     // Reject tips from outdated nodes
     if let Some(ver) = headers.get("X-TSN-Version").and_then(|v| v.to_str().ok()) {
         if !crate::network::version_check::version_meets_minimum(ver) {
@@ -2353,6 +2395,10 @@ struct SnapshotInfoResponse {
     height: u64,
     block_hash: String,
     size_bytes: u64,
+    /// v1.7.0: Exact cumulative_work at snapshot height, serialized as decimal string
+    /// to avoid JSON number precision loss on u128 values.
+    #[serde(default)]
+    cumulative_work: String,
 }
 
 /// GET /snapshot/info — check if a state snapshot is available for download.
@@ -2364,12 +2410,14 @@ async fn snapshot_info(State(state): State<Arc<AppState>>) -> Json<SnapshotInfoR
             height,
             block_hash: hash,
             size_bytes: data.len() as u64,
+            cumulative_work: chain.cumulative_work().to_string(),
         }),
         None => Json(SnapshotInfoResponse {
             available: false,
             height: 0,
             block_hash: String::new(),
             size_bytes: 0,
+            cumulative_work: "0".to_string(),
         }),
     }
 }

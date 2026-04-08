@@ -5,6 +5,7 @@ use tracing::{info, warn, debug};
 use hex;
 
 use crate::core::ShieldedBlock;
+use crate::consensus::LWMA_WINDOW;
 
 use crate::network::api::AppState;
 use crate::network::peer_id;
@@ -240,13 +241,16 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                 // a peer on a different fork creates a thrashing loop:
                 //   rollback → download fails → remine → peer announces → rollback → ...
                 // Instead, add a sync cooldown for this peer and skip.
-                if fast_sync_base > 0 && ancestor == fast_sync_base && local_height > fast_sync_base + 5 {
+                if fast_sync_base > 0 && ancestor <= fast_sync_base {
+                    // PATCH A: ancestor at or below fast_sync_base is ALWAYS a fallback,
+                    // never a real common ancestor. Rolling back to it is destructive
+                    // (thrashing loop). Skip this peer entirely — no ban, no rollback.
+                    // PATCH B: No ban/cooldown. With 10+ peers, banning each one for 120s
+                    // causes total isolation (all peers banned → miner forks alone).
                     warn!(
-                        "SYNC_DEBUG: ANCESTOR_IS_FALLBACK ancestor={} == fast_sync_base, local_h={}, peer_h={} — skipping peer {} with 120s cooldown (no rollback)",
-                        ancestor, local_height, peer_info.height, peer_id(peer_url)
+                        "SYNC_DEBUG: ANCESTOR_IS_FALLBACK ancestor={} <= fast_sync_base={}, local_h={}, peer_h={} — skipping peer {} (no rollback, no ban)",
+                        ancestor, fast_sync_base, local_height, peer_info.height, peer_id(peer_url)
                     );
-                    // Use a short ban as cooldown — not punitive, just prevents thrashing
-                    ban_peer(&state, peer_url, 120);
                     return Ok(0);
                 }
 
@@ -297,6 +301,16 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
             Err(_) => {
                 // No ancestor found — check peer checkpoints before drastic action
                 if verify_peer_checkpoints(&client, peer_url).await {
+                    // PATCH D: Suppress reset during post-fast-sync warm-up window.
+                    // Null-hash placeholders cause false "no ancestor" → reset is an artefact.
+                    let delta = local_height.saturating_sub(fast_sync_base);
+                    if fast_sync_base > 0 && delta < LWMA_WINDOW * 3 {
+                        warn!(
+                            "SNAPSHOT_RESYNC_SUPPRESSED_POST_FASTSYNC path=step8_err fast_sync_base={} local_height={} delta={} peer={} reason=null_hash_placeholders_in_warmup",
+                            fast_sync_base, local_height, delta, peer_id(peer_url)
+                        );
+                        return Ok(0);
+                    }
                     info!("Peer {} passes checkpoints — snapshot resync", peer_id(peer_url));
                     if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
                         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -454,6 +468,21 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                     Err(_) => {
                         // Last resort: snapshot resync if peer passes checkpoints
                         if verify_peer_checkpoints(&client, peer_url).await {
+                            // PATCH D: Suppress reset during post-fast-sync warm-up window.
+                            let recovery_fsb = {
+                                let c = state.blockchain.read()
+                                    .map_err(|e| SyncError::LockPoisoned(format!("read lock: {}", e)))?;
+                                (c.fast_sync_base_height(), c.height())
+                            };
+                            let (fsb, cur_h) = recovery_fsb;
+                            let delta = cur_h.saturating_sub(fsb);
+                            if fsb > 0 && delta < LWMA_WINDOW * 3 {
+                                warn!(
+                                    "SNAPSHOT_RESYNC_SUPPRESSED_POST_FASTSYNC path=recovery_err fast_sync_base={} local_height={} delta={} peer={} reason=null_hash_placeholders_in_warmup",
+                                    fsb, cur_h, delta, peer_id(peer_url)
+                                );
+                                break;
+                            }
                             if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
                                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
@@ -805,6 +834,20 @@ async fn find_common_ancestor_legacy(
 
     let peer_valid = verify_peer_checkpoints(client, peer_url).await;
     if peer_valid {
+        // PATCH D: Suppress reset during post-fast-sync warm-up window.
+        let (fsb, cur_h) = {
+            let c = state.blockchain.read()
+                .map_err(|e| SyncError::LockPoisoned(format!("read lock: {}", e)))?;
+            (c.fast_sync_base_height(), c.height())
+        };
+        let delta = cur_h.saturating_sub(fsb);
+        if fsb > 0 && delta < LWMA_WINDOW * 3 {
+            warn!(
+                "SNAPSHOT_RESYNC_SUPPRESSED_POST_FASTSYNC path=legacy_ancestor fast_sync_base={} local_height={} delta={} peer={} reason=null_hash_placeholders_in_warmup",
+                fsb, cur_h, delta, peer_id(peer_url)
+            );
+            return Ok(fsb);
+        }
         info!("Peer {} passes checkpoints — triggering snapshot resync", peer_id(peer_url));
         // Cancel mining before chain reset
         if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {

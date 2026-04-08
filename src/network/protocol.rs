@@ -9,7 +9,7 @@ use thiserror::Error;
 use super::Result;
 
 const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024; // 4MB max
-const PROTOCOL_MAGIC: &[u8] = b"TSN1";
+const PROTOCOL_MAGIC: &[u8] = b"TSN2";
 #[allow(dead_code)]
 const CURRENT_VERSION: ProtocolVersion = ProtocolVersion(1, 0);
 

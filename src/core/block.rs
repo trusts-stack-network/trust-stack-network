@@ -12,6 +12,19 @@ use crate::contract::{ContractDeployTransaction, ContractCallTransaction, Contra
 
 pub const BLOCK_HASH_SIZE: usize = 32;
 
+/// Compact header for lightweight headers-first sync protocol (~200 bytes vs ~5KB+ full block).
+/// Contains only the fields needed for chain comparison and fork detection.
+/// Inspired by Quantus/Bitcoin headers-first approach.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompactHeader {
+    pub height: u64,
+    pub hash: String,
+    pub prev_hash: String,
+    pub difficulty: u64,
+    pub timestamp: u64,
+    pub cumulative_work: u128,
+}
+
 /// Block header containing metadata, proof-of-work, and privacy roots.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockHeader {
