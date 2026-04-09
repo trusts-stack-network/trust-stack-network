@@ -140,7 +140,7 @@ name = "mining_scaling"
 harness = false
 
 [[bench]]
-name = "miner_cycle"
+name = "mining_race"
 harness = false
 
 [profile.release]
