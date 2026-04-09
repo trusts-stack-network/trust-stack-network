@@ -3071,7 +3071,7 @@ async fn cmd_node(
                 // Minimum block interval: wait until enough time has passed since last block.
                 // This is critical: ensures ~8-10s between blocks regardless of hashrate.
                 // Without this, fast miners find blocks in <1s and fork before propagation.
-                {
+                let block_wait_secs = {
                     let min_interval = crate::config::MIN_BLOCK_INTERVAL_SECS;
                     let wait_secs = {
                         let chain = mine_state.blockchain.read().unwrap();
@@ -3091,7 +3091,8 @@ async fn cmd_node(
                         tracing::info!("Waiting {}s for minimum block interval ({}s required)", wait_secs, min_interval);
                         tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
                     }
-                }
+                    wait_secs
+                };
 
                 // Acquire reorg READ lock — blocks if a rollback is in progress
                 let _reorg_read = mine_state.reorg_lock.read().await;
@@ -3134,6 +3135,7 @@ async fn cmd_node(
                 let mine_state_for_stats = mine_state.clone();
                 let pool = Arc::clone(&pool);
                 let cancel_for_mine = Arc::clone(&cancel_signal);
+                let wait_secs_for_log = block_wait_secs;
                 let mined_block = tokio::task::spawn_blocking(move || {
                     let start = std::time::Instant::now();
                     let attempts = pool.mine_block_cancellable(&mut block, Some(cancel_for_mine));
@@ -3162,15 +3164,21 @@ async fn cmd_node(
                         stats.last_updated = now;
                     }
 
-                    // Display hashrate info
-                    let hr_display = if hashrate > 1_000_000 {
-                        format!("{:.2} MH/s", hashrate as f64 / 1_000_000.0)
-                    } else if hashrate > 1_000 {
-                        format!("{:.2} KH/s", hashrate as f64 / 1_000.0)
+                    // Display mining metrics — raw hashrate, PoW time, wait time
+                    fn fmt_hashrate(h: u64) -> String {
+                        if h > 1_000_000 { format!("{:.2} MH/s", h as f64 / 1_000_000.0) }
+                        else if h > 1_000 { format!("{:.2} KH/s", h as f64 / 1_000.0) }
+                        else { format!("{} H/s", h) }
+                    }
+                    let pow_secs = elapsed.as_secs_f64();
+                    let cycle_secs = pow_secs + wait_secs_for_log as f64;
+                    if wait_secs_for_log > 0 {
+                        eprintln!("  ⛏ {} | PoW {:.1}s + wait {}s = cycle {:.1}s | {} attempts",
+                            fmt_hashrate(hashrate), pow_secs, wait_secs_for_log, cycle_secs, attempts);
                     } else {
-                        format!("{} H/s", hashrate)
-                    };
-                    eprintln!("  ⛏ {} ({} attempts in {:.1}s)", hr_display, attempts, elapsed.as_secs_f64());
+                        eprintln!("  ⛏ {} | PoW {:.1}s | {} attempts",
+                            fmt_hashrate(hashrate), pow_secs, attempts);
+                    }
 
                     Some(block)
                 }).await.expect("CRITICAL: mining task panicked");

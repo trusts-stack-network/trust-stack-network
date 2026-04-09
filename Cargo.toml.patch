@@ -1,0 +1,7 @@
+# À appliquer dans Cargo.toml existant
+[profile.dist]
+inherits = "release"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

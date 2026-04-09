@@ -1,6 +1,6 @@
 [package]
 name = "tsn"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 description = "TSN (Trust Stack Network) - A privacy-preserving post-quantum cryptocurrency"
 license = "MIT"
@@ -133,6 +133,14 @@ path = "fuzz/fuzz_targets/runner.rs"
 
 [[bench]]
 name = "timing_bench"
+harness = false
+
+[[bench]]
+name = "mining_scaling"
+harness = false
+
+[[bench]]
+name = "miner_cycle"
 harness = false
 
 [profile.release]

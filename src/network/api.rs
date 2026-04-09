@@ -1167,17 +1167,18 @@ struct PeersResponse {
 /// Get the list of known peers.
 async fn get_peers(State(state): State<Arc<AppState>>) -> Json<PeersResponse> {
     let peers = state.peers.read().unwrap_or_else(|e| e.into_inner());
-    // Deduplicate peers using normalized URLs before returning
+    // Privacy: return hashed peer IDs instead of raw URLs/IPs
     let mut seen = std::collections::HashSet::new();
-    let unique_peers: Vec<String> = peers
+    let masked_peers: Vec<String> = peers
         .iter()
         .map(|p| normalize_peer_url(p))
         .filter(|p| !p.contains("://localhost") && !p.contains("://127.0.0.1") && !p.contains("://0.0.0.0"))
+        .map(|p| super::peer_id(&p))
         .filter(|p| seen.insert(p.clone()))
         .collect();
     Json(PeersResponse {
-        count: unique_peers.len(),
-        peers: unique_peers,
+        count: masked_peers.len(),
+        peers: masked_peers,
         p2p_peers: vec![],
         p2p_count: None,
     })

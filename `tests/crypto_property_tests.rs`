@@ -1,0 +1,50 @@
+use proptest::prelude::*;
+use tsn_crypto::{
+    keys::{KeyPair, PublicKey},
+    signature::sign,
+    commitment::Commitment,
+    merkle_tree::MerkleTree
+};
+
+proptest! {
+    #[test]
+    fn prop_signature_verification_deterministic(
+        keypair: KeyPair,
+        message in proptest::collection::vec(any::<u8>(), 0..1024)
+    ) {
+        // La vérification doit être déterministe
+        let sig1 = sign(&message, &keypair.secret);
+        let sig2 = sign(&message, &keypair.secret);
+        
+        prop_assert_eq!(sig1, sig2);
+        prop_assert!(verify_signature(&sig1, &message, &keypair.public));
+    }
+    
+    #[test]
+    fn prop_commitment_binding(
+        input1 in any::<[u8; 32]>(),
+        input2 in any::<[u8; 32]>()
+    ) {
+        // Commitment doit être liant - inputs différents => commitments différents
+        prop_assume!(input1 != input2);
+        
+        let comm1 = Commitment::commit(&input1);
+        let comm2 = Commitment::commit(&input2);
+        
+        prop_assert_ne!(comm1, comm2);
+    }
+    
+    #[test]
+    fn prop_merkle_tree_completeness(
+        leaves in proptest::collection::vec(any::<[u8; 32]>(), 1..100)
+    ) {
+        // Toutes les feuilles doivent être incluses dans la racine
+        let tree = MerkleTree::new(&leaves);
+        let root = tree.root();
+        
+        for (i, leaf) in leaves.iter().enumerate() {
+            let proof = tree.generate_proof(i).unwrap();
+            prop_assert!(proof.verify(&root, leaf));
+        }
+    }
+}

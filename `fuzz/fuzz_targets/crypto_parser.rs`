@@ -1,0 +1,27 @@
+#![no_main]
+use libfuzzer_sys::fuzz_target;
+use tsn_crypto::note::Note;
+use tsn_crypto::commitment::Commitment;
+use tsn_crypto::nullifier::Nullifier;
+
+fuzz_target!(|data: &[u8]| {
+    // Fuzzer pour les parsers crypto - cherche des panics
+    if data.len() < 32 {
+        return;
+    }
+    
+    // Test désérialisation Note
+    if let Ok(note) = Note::from_bytes(data) {
+        let _serialized = note.to_bytes();
+    }
+    
+    // Test désérialisation Commitment
+    if let Ok(comm) = Commitment::from_bytes(data) {
+        let _root = comm.compute_root();
+    }
+    
+    // Test désérialisation Nullifier
+    if let Ok(nullifier) = Nullifier::from_bytes(data) {
+        let _hash = nullifier.hash();
+    }
+});
