@@ -147,6 +147,10 @@ pub async fn discovery_loop(state: Arc<AppState>) {
                     let public_url = state.public_url.as_deref().unwrap_or("");
                     let mut peers_guard = state.peers.write().unwrap();
                     for new_peer in new_peers {
+                        // Skip masked peer IDs (peer:xxxxxxxx) — not contactable URLs
+                        if new_peer.starts_with("peer:") {
+                            continue;
+                        }
                         // Avoid adding localhost/self and duplicates
                         if new_peer.contains("://localhost")
                             || new_peer.contains("://127.0.0.1")
@@ -173,8 +177,11 @@ pub async fn discovery_loop(state: Arc<AppState>) {
                         if new_peer.contains(&self_announce) {
                             continue;
                         }
+                        if peers_guard.len() >= 200 {
+                            break; // Cap peer list size
+                        }
                         if !peers_guard.iter().any(|p| normalize_url(p) == normalized) {
-                            info!("Discovered new peer: {}", peer_id(&new_peer));
+                            debug!("Discovered new peer: {}", peer_id(&new_peer));
                             peers_guard.push(new_peer);
                         }
                     }

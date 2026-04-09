@@ -1,78 +1,42 @@
 # User Guide — Trust Stack Network v0.1
 
-Guide pratique pour déployer et utiliser Trust Stack Network.
+## Quick Start
 
-## Déploiement d'un nœud TSN
+### Deploy a TSN Node
 
-### Prérequis
-- Système : Linux x86_64 (Ubuntu 22.04+)
-- RAM : 16 Go minimum
-- Stockage : 500 Go SSD
-- Bande passante : 100 Mbps+
-
-### Installation
 ```bash
+# Clone repository
 git clone https://github.com/trust-stack-network/tsn.git
 cd tsn
+
+# Build from source
 cargo build --release
+
+# Run node
+./target/release/tsn-node --mainnet
 ```
 
-### Configuration
-```toml
-[network]
-port = 30303
-seed_nodes = ["seed-1.tsn.network:30303"]
+### Mining Basics
 
-[consensus]
-mode = "mik"
-```
+TSN uses a proof-of-stake consensus with post-quantum security. To participate:
 
-### Lancement
+1. Generate a quantum-safe keypair: `tsn-cli keygen --pq`
+2. Stake tokens: `tsn-cli stake --amount 1000`
+3. Start validator: `tsn-cli validator --start`
+
+### Wallet Setup
+
 ```bash
-./target/release/tsn-node --config config.toml
-```
+# Create new wallet
+tsn-cli wallet create --name my-wallet
 
-## Bases du Mining
+# Generate address
+tsn-cli address generate
 
-TSN utilise le consensus MIK (Merkle Identity Key) avec preuve de travail post-quantique.
-
-### Paramètres de difficulté
-- Blocs : ~12 secondes
-- Récompense : 1000 TSN
-- Difficulté : ajustement dynamique
-
-### Configuration miner
-```toml
-[miner]
-enabled = true
-threads = 8
-pool_url = "tcp://pool.tsn.network:3333"
-```
-
-## Configuration du Wallet
-
-### Génération de clés
-```bash
-./target/release/tsn-wallet keygen --output wallet.json
-```
-
-### Création de transaction
-```bash
-./target/release/tsn-wallet send \
-  --from wallet.json \
-  --to tsn1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh \
-  --amount 100 \
-  --fee 0.001
-```
-
-### Backup et récupération
-```bash
-./target/release/tsn-wallet backup --output wallet-backup.zip
-./target/release/tsn-wallet restore --input wallet-backup.zip
+# Check balance
+tsn-cli balance --address <your-address>
 ```
 
 ---
 
-**Version :** 0.1  
-**Date :** 2026-04-09  
-**Auteur :** Laila.H
+*For complete documentation, visit [docs.truststack.network](https://docs.truststack.network)*
