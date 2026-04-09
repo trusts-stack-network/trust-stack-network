@@ -120,7 +120,8 @@ impl OperationStats {
     /// Temps de réponse moyen récent
     fn avg_response_time(&self) -> Duration {
         if self.recent_times.is_empty() {
-            return Duration::from_millis(0);
+            // Retourner un temps conservateur au lieu de 0ms pour éviter les deadlocks
+            return Duration::from_millis(100);
         }
         
         let total: Duration = self.recent_times.iter().sum();

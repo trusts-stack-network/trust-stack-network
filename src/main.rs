@@ -430,7 +430,7 @@ enum Commands {
         #[arg(short, long, default_value = "16")]
         difficulty: u64,
         /// Number of mining threads to use
-        #[arg(short, long, default_value = "1")]
+        #[arg(short = 't', long = "threads", default_value = "1")]
         jobs: usize,
         /// SIMD mode (optional). Currently supports: neon
         #[arg(short, long, value_enum)]
@@ -448,7 +448,7 @@ enum Commands {
         #[arg(short, long, default_value = "20")]
         difficulty: u64,
         /// Number of mining threads to use
-        #[arg(short, long, default_value = "1")]
+        #[arg(short = 't', long = "threads", default_value = "1")]
         jobs: usize,
         /// SIMD mode (optional). Currently supports: neon
         #[arg(short, long, value_enum)]
@@ -468,11 +468,11 @@ enum Commands {
         /// Data directory (or set TSN_DATA_DIR env var)
         #[arg(short, long)]
         data_dir: Option<String>,
-        /// Wallet file for mining (enables mining if provided)
+        /// Enable mining
         #[arg(long)]
-        mine: Option<String>,
+        mine: bool,
         /// Number of mining threads to use
-        #[arg(short, long, default_value = "1")]
+        #[arg(short = 't', long = "threads", default_value = "1")]
         jobs: usize,
         /// SIMD mode (optional). Currently supports: neon
         #[arg(short, long, value_enum)]
@@ -681,9 +681,20 @@ async fn main() -> anyhow::Result<()> {
             peers.extend(peer);
             dedup_peers(&mut peers);
 
+            // If --mine flag is set, auto-detect or auto-create wallet
+            let mine_wallet = if mine {
+                let w = auto_detect_wallet();
+                match w {
+                    Some(w) => Some(w),
+                    None => Some(auto_wallet_for_mining(&data_dir)),
+                }
+            } else {
+                None
+            };
+
             cmd_node(
                 port, peers, &data_dir,
-                mine, jobs, simd.map(Into::into), public_url,
+                mine_wallet, jobs, simd.map(Into::into), public_url,
                 force_mine, faucet_wallet, faucet_daily_limit,
                 true, // fast_sync always on
                 node_role,
@@ -2084,21 +2095,28 @@ async fn cmd_node(
 
     let mempool = Mempool::new();
 
-    // Load Circom verification keys for proof verification
+    // Load Circom verification keys for proof verification (optional — mining works without them)
     println!();
-    println!("Loading Circom verification keys...");
-
-    // Look for verification keys in circuits/keys/ (committed) first, then circuits/build/ (local dev)
-    let (spend_vkey_path, output_vkey_path) = find_verification_keys()?;
-
-    println!("  Loading {}...", spend_vkey_path);
-    println!("  Loading {}...", output_vkey_path);
-
-    let verifying_params = CircomVerifyingParams::from_files(&spend_vkey_path, &output_vkey_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load verification keys: {}", e))?;
-
-    blockchain.set_verifying_params(Arc::new(verifying_params));
-    println!("  ZK proof verification ENABLED (Circom/snarkjs)");
+    match find_verification_keys() {
+        Ok((spend_vkey_path, output_vkey_path)) => {
+            println!("Loading Circom verification keys...");
+            println!("  Loading {}...", spend_vkey_path);
+            println!("  Loading {}...", output_vkey_path);
+            match CircomVerifyingParams::from_files(&spend_vkey_path, &output_vkey_path) {
+                Ok(verifying_params) => {
+                    blockchain.set_verifying_params(Arc::new(verifying_params));
+                    println!("  ZK proof verification ENABLED (Circom/snarkjs)");
+                }
+                Err(e) => {
+                    println!("  ZK proof verification DISABLED (failed to load keys: {})", e);
+                }
+            }
+        }
+        Err(_) => {
+            println!("  ZK proof verification DISABLED (verification keys not found)");
+            println!("  Mining and relay functions work normally without ZK keys.");
+        }
+    }
 
     // Show assume-valid checkpoint status
     let assume_valid_height = blockchain.assume_valid_height();
