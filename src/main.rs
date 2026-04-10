@@ -2898,6 +2898,39 @@ async fn cmd_node(
                     continue;
                 }
 
+                // Solo fork detection: if ALL P2P peers are far behind us (or at 0),
+                // we're likely on a solo fork. Stop mining and reset.
+                {
+                    let local_h = mine_state.blockchain.read().unwrap().height();
+                    if local_h > 50 {
+                        let mut max_peer_h = 0u64;
+                        let mut peer_count = 0u32;
+                        if let Some(sp) = mine_state.p2p_shared_peers.read().unwrap().as_ref() {
+                            if let Ok(peers) = sp.read() {
+                                for p in peers.iter() {
+                                    peer_count += 1;
+                                    if let Some(h) = p.height {
+                                        if h > max_peer_h { max_peer_h = h; }
+                                    }
+                                }
+                            }
+                        }
+                        // If we have peers and ALL are > 50 blocks behind us → solo fork
+                        if peer_count >= 3 && local_h > max_peer_h + 50 {
+                            tracing::error!(
+                                "SOLO FORK DETECTED: local h={} but best peer h={}. Resetting chain.",
+                                local_h, max_peer_h
+                            );
+                            {
+                                let mut chain = mine_state.blockchain.write().unwrap();
+                                chain.reset_for_snapshot_resync();
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            continue;
+                        }
+                    }
+                }
+
                 // Sync gate: pause mining if too far behind VERIFIED peers
                 // v1.3.3: only consider peers whose height we can verify via HTTP /tip
                 // (gossip tips can come from fork chains and are unreliable)
