@@ -739,15 +739,22 @@ impl ShieldedBlockchain {
                 // Blocks from the old fork were stored as LESS_WORK in the LRU.
                 // Without purging, sync would find them via has_block() → DUP → "none accepted".
                 let lru_before = self.blocks.len();
-                // Save tip block before clearing — sync needs it for has_block() to connect new blocks.
-                let tip_hash = self.latest_hash();
-                let tip_block = self.blocks.get(&tip_hash).cloned()
-                    .or_else(|| self.db.as_ref().and_then(|db| db.load_block(&tip_hash).ok().flatten()));
+                // Save canonical chain blocks (tip + recent) before clearing.
+                // After fast-sync, blocks are in LRU but may not be in DB if they
+                // were received via P2P before the DB had time to flush.
+                let mut saved_blocks: Vec<([u8; 32], ShieldedBlock)> = Vec::new();
+                for h in target_height.saturating_sub(5)..=target_height {
+                    if let Some(hash) = self.height_index.get(h as usize) {
+                        if let Some(b) = self.blocks.get(hash).cloned() {
+                            saved_blocks.push((*hash, b));
+                        }
+                    }
+                }
                 self.blocks.clear();
                 self.orphans.clear();
-                // Re-insert tip block so incoming blocks can connect via prev_hash check.
-                if let Some(tb) = tip_block {
-                    self.blocks.put(tip_hash, tb);
+                // Re-insert canonical blocks so sync can connect new blocks.
+                for (h, b) in saved_blocks {
+                    self.blocks.put(h, b);
                 }
                 tracing::warn!(
                     "SYNC_DEBUG: ROLLBACK_DONE(instant) height={} tip={} work={} lru_purged={} orphans_cleared",
@@ -839,13 +846,18 @@ impl ShieldedBlockchain {
         }
         // v1.8.0: Purge LRU block cache after rollback.
         let lru_before = self.blocks.len();
-        let tip_hash = self.latest_hash();
-        let tip_block = self.blocks.get(&tip_hash).cloned()
-            .or_else(|| self.db.as_ref().and_then(|db| db.load_block(&tip_hash).ok().flatten()));
+        let mut saved_blocks: Vec<([u8; 32], ShieldedBlock)> = Vec::new();
+        for h in target_height.saturating_sub(5)..=target_height {
+            if let Some(hash) = self.height_index.get(h as usize) {
+                if let Some(b) = self.blocks.get(hash).cloned() {
+                    saved_blocks.push((*hash, b));
+                }
+            }
+        }
         self.blocks.clear();
         self.orphans.clear();
-        if let Some(tb) = tip_block {
-            self.blocks.put(tip_hash, tb);
+        for (h, b) in saved_blocks {
+            self.blocks.put(h, b);
         }
         tracing::warn!(
             "SYNC_DEBUG: ROLLBACK_DONE(slow) height={} tip={} work={} lru_purged={} orphans_cleared",
