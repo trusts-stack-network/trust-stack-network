@@ -1455,6 +1455,18 @@ async fn receive_transaction(
 async fn relay_block(block: &ShieldedBlock, peers: &[String], client: &reqwest::Client) {
     let block_hash_str = block.hash_hex()[..16].to_string();
 
+    // Dedup: skip relay if we already relayed this block (prevents spam from multiple sources)
+    {
+        use std::sync::Mutex;
+        static RELAYED: std::sync::LazyLock<Mutex<lru::LruCache<String, ()>>> =
+            std::sync::LazyLock::new(|| Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(200).unwrap())));
+        let mut cache = RELAYED.lock().unwrap();
+        if cache.contains(&block_hash_str) {
+            return;
+        }
+        cache.put(block_hash_str.clone(), ());
+    }
+
     let mut handles = Vec::with_capacity(peers.len());
     for peer in peers {
         if !crate::network::is_contactable_peer(peer) { continue; }
@@ -1464,7 +1476,9 @@ async fn relay_block(block: &ShieldedBlock, peers: &[String], client: &reqwest::
         let peer_name = peer_id(peer);
         let bh = block_hash_str.clone();
         handles.push(tokio::spawn(async move {
-            match client.post(&url).json(&block).send().await {
+            match client.post(&url)
+                .timeout(std::time::Duration::from_secs(3))
+                .json(&block).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     info!("Relayed block {} to {}", bh, peer_name);
                 }
@@ -1492,7 +1506,7 @@ async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String], client: &
     for peer in peers {
         if !crate::network::is_contactable_peer(peer) { continue; }
         let url = format!("{}/tx/relay", peer);
-        match client.post(&url).json(tx).send().await {
+        match client.post(&url).timeout(std::time::Duration::from_secs(3)).json(tx).send().await {
             Ok(resp) if resp.status().is_success() => {
                 info!("Relayed transaction {} to {}", tx_hash, peer_id(peer));
             }

@@ -3315,7 +3315,10 @@ async fn cmd_node(
                     }
 
                     Some(block)
-                }).await.expect("CRITICAL: mining task panicked");
+                }).await.unwrap_or_else(|e| {
+                    tracing::warn!("Mining task cancelled ({}), restarting cycle", e);
+                    None
+                });
 
                 // If cancelled, restart on new tip (with cooldown after reorg)
                 let mined_block = match mined_block {

@@ -299,6 +299,15 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
                 let mut chain = state.blockchain.write()
                     .map_err(|e| SyncError::LockPoisoned(format!("write lock: {}", e)))?;
                 if let Err(e) = chain.rollback_to_height(ancestor) {
+                    let err_msg = format!("{}", e);
+                    if err_msg.contains("below finalized height") {
+                        // Finalization prevents rollback — reset completely and fast-sync
+                        warn!("Rollback blocked by finalization (ancestor={}, error={}). Wiping chain for fresh sync.", ancestor, err_msg);
+                        chain.reset_for_snapshot_resync();
+                        drop(chain);
+                        // Re-sync from this peer via snapshot
+                        return Ok(0); // Return 0 — the sync_loop will retry and fast-sync
+                    }
                     warn!("Rollback to height {} failed: {}", ancestor, e);
                     return Err(SyncError::HttpError(format!("Rollback failed: {}", e)));
                 }
