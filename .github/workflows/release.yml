@@ -32,6 +32,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+      - name: Git config (Windows path fix)
+        if: runner.os == 'Windows'
+        run: git config --global core.protectNTFS false
+
       - uses: actions/checkout@v4
 
       - name: Install Rust
@@ -71,8 +75,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag }}
-          files: |
-            ${{ matrix.artifact }}
-            tsn-${{ github.event.inputs.tag }}-${{ matrix.target }}.*
+          files: tsn-${{ github.event.inputs.tag }}-${{ matrix.target }}.*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
