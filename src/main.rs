@@ -2523,6 +2523,10 @@ async fn cmd_node(
             let p2p_cancel = Arc::clone(&mining_cancel);
             let mut p2p_events = p2p.event_rx;
             tokio::spawn(async move {
+                // Throttle orphan sync: at most one sync task every 10 seconds
+                let orphan_sync_lock = Arc::new(tokio::sync::Mutex::new(()));
+                let last_orphan_sync = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
                 while let Some(event) = p2p_events.recv().await {
                     match event {
                         P2pEvent::NewBlock(data) => {
@@ -2540,24 +2544,36 @@ async fn cmd_node(
                                             p2p_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
                                         Ok(false) => {
-                                            // Stored as orphan or side chain — trigger sync but do NOT cancel mining.
-                                            // Mining continues on current tip. If sync changes our tip,
-                                            // the block acceptance handler above (Ok(true)) will cancel mining.
+                                            // Stored as orphan or side chain — trigger sync but throttled.
+                                            // At most one orphan sync every 10 seconds to prevent rollback storms.
                                             let local_height = p2p_blockchain.blockchain.read().unwrap().height();
-                                            tracing::info!("P2P: block #{} stored as orphan (local: {}), triggering sync", height, local_height);
-                                            let sync_state = p2p_blockchain.clone();
-                                            let sync_peers = p2p_blockchain.peers.read().unwrap().clone();
-                                            tokio::spawn(async move {
-                                                for peer in &sync_peers {
-                                                    match tsn::network::sync_from_peer(sync_state.clone(), peer).await {
-                                                        Ok(n) if n > 0 => {
-                                                            tracing::info!("Orphan sync: got {} blocks from {}", n, tsn::network::peer_id(peer));
-                                                            break;
+                                            let now_secs = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default().as_secs();
+                                            let last = last_orphan_sync.load(std::sync::atomic::Ordering::Relaxed);
+                                            if now_secs - last < 10 {
+                                                tracing::debug!("P2P: block #{} orphan — sync throttled ({}s ago)", height, now_secs - last);
+                                            } else {
+                                                tracing::info!("P2P: block #{} stored as orphan (local: {}), triggering sync", height, local_height);
+                                                last_orphan_sync.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                                                let sync_state = p2p_blockchain.clone();
+                                                let sync_peers = p2p_blockchain.peers.read().unwrap().clone();
+                                                let lock = orphan_sync_lock.clone();
+                                                tokio::spawn(async move {
+                                                    // Only one sync at a time
+                                                    let _guard = lock.lock().await;
+                                                    for peer in &sync_peers {
+                                                        if !tsn::network::is_contactable_peer(peer) { continue; }
+                                                        match tsn::network::sync_from_peer(sync_state.clone(), peer).await {
+                                                            Ok(n) if n > 0 => {
+                                                                tracing::info!("Orphan sync: got {} blocks from {}", n, tsn::network::peer_id(peer));
+                                                                break;
+                                                            }
+                                                            _ => {}
                                                         }
-                                                        _ => {}
                                                     }
-                                                }
-                                            });
+                                                });
+                                            }
                                         }
                                         Err(e) => tracing::debug!("P2P: block #{} rejected: {}", height, e),
                                     }
