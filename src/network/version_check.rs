@@ -71,22 +71,24 @@ pub fn version_meets_minimum(v: &str) -> bool {
 
 /// Check a single seed node for version info.
 async fn check_seed_version(client: &reqwest::Client, seed_url: &str) -> Option<RemoteVersionInfo> {
+    use crate::network::peer_id;
     let url = format!("{}/version.json", seed_url);
+    let label = peer_id(seed_url);
     match client
         .get(&url)
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(5))
         .send()
         .await
     {
         Ok(resp) => match resp.json::<RemoteVersionInfo>().await {
             Ok(info) => Some(info),
             Err(e) => {
-                warn!("Failed to parse version from {}: {}", seed_url, e);
+                warn!("Failed to parse version from {}", label);
                 None
             }
         },
-        Err(e) => {
-            warn!("Failed to query version from {}: {}", seed_url, e);
+        Err(_) => {
+            warn!("Failed to query version from {} (timeout or unreachable)", label);
             None
         }
     }

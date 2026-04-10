@@ -56,6 +56,13 @@ use tokio::time::Duration;
 /// - Autres URLs → "peer:" + 8 premiers hex d'un hash SHA-256
 ///
 /// L'URL originale reste utilisée en interne ; seul l'affichage change.
+///
+/// Returns true if this peer string is a contactable HTTP URL (not a hashed peer ID).
+/// Hashed peer IDs like "peer:a1b2c3d4" are display-only and must never be used for HTTP requests.
+pub fn is_contactable_peer(peer: &str) -> bool {
+    peer.starts_with("http://") || peer.starts_with("https://")
+}
+
 pub fn peer_id(url: &str) -> String {
     // Détection des seeds connus
     for i in 1..=4 {

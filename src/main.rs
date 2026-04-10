@@ -2801,11 +2801,16 @@ async fn cmd_node(
                     let peers_list = mine_state.peers.read().unwrap().clone();
 
                     // Query ACTUAL peer heights via HTTP (not gossip)
+                    // Use short timeout (1s) to avoid stalling mining on unreachable peers
                     let mut verified_max_height: u64 = 0;
                     for peer in &peers_list {
+                        // Skip non-URL peers (hashed peer IDs like "peer:xxxx")
+                        if !tsn::network::is_contactable_peer(peer) {
+                            continue;
+                        }
                         let tip_url = format!("{}/tip", peer);
                         if let Ok(resp) = sync_client.get(&tip_url)
-                            .timeout(std::time::Duration::from_secs(3))
+                            .timeout(std::time::Duration::from_secs(1))
                             .send().await
                         {
                             if let Ok(tip) = resp.json::<serde_json::Value>().await {
@@ -2858,9 +2863,10 @@ async fn cmd_node(
                                 // Require at least 2 peers agreeing (within 5% of max work) before resyncing.
                                 let mut peer_infos: Vec<(String, u64, u128)> = Vec::new(); // (url, height, work)
                                 for peer in &peers_list {
+                                    if !tsn::network::is_contactable_peer(peer) { continue; }
                                     let info_url = format!("{}/chain/info", peer);
                                     if let Ok(resp) = sync_client.get(&info_url)
-                                        .timeout(std::time::Duration::from_secs(5))
+                                        .timeout(std::time::Duration::from_secs(2))
                                         .send().await
                                     {
                                         if let Ok(info) = resp.json::<serde_json::Value>().await {
@@ -3037,7 +3043,7 @@ async fn cmd_node(
 
                                                                     let mut chain = mine_state.blockchain.write().unwrap();
                                                                     chain.import_snapshot_at_height(snapshot, snap_height, block_hash, diff, next_diff, peer_work);
-                                                                    tracing::info!("Auto-resync complete: jumped to height {} from peer {}", snap_height, peer_url);
+                                                                    tracing::info!("Auto-resync complete: jumped to height {} from peer {}", snap_height, peer_id(&peer_url));
                                                                 }
                                                             }
                                                         }
@@ -3301,7 +3307,7 @@ async fn cmd_node(
                 // Broadcast via HTTP (fallback for non-upgraded nodes)
                 let mut current_peers = mine_state.peers.read().unwrap().clone();
                 current_peers.retain(|peer| {
-                    peer != &announce_url && peer != &local_url && peer != &local_ip_url
+                    tsn::network::is_contactable_peer(peer) && peer != &announce_url && peer != &local_url && peer != &local_ip_url
                 });
                 if !current_peers.is_empty() {
                     broadcast_block(&mined_block, &current_peers, &client).await;
@@ -3312,7 +3318,7 @@ async fn cmd_node(
                 if let Some(peer) = current_peers.first() {
                     let height = mined_block.coinbase.height;
                     let ci_url = format!("{}/chain/info", peer);
-                    if let Ok(resp) = client.get(&ci_url).timeout(std::time::Duration::from_secs(5)).send().await {
+                    if let Ok(resp) = client.get(&ci_url).timeout(std::time::Duration::from_secs(1)).send().await {
                         if let Ok(peer_info) = resp.json::<serde_json::Value>().await {
                             let peer_height = peer_info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
                             let peer_hash = peer_info.get("latest_hash").and_then(|v| v.as_str()).unwrap_or("");

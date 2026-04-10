@@ -36,6 +36,11 @@ fn ban_peer(state: &Arc<AppState>, peer_url: &str, duration_secs: u64) {
 /// v2.0: Headers-first sync — fetches compact headers to detect forks BEFORE downloading blocks.
 /// Inspired by Quantus (Substrate) and Dilithion (Bitcoin) sync protocols.
 pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64, SyncError> {
+    // Skip hashed peer IDs — not contactable URLs
+    if !super::is_contactable_peer(peer_url) {
+        return Ok(0);
+    }
+
     let client = state.http_client.clone();
 
     // ── Step 1: Ban check ──
@@ -1016,6 +1021,7 @@ async fn verify_peer_checkpoints(client: &reqwest::Client, peer_url: &str) -> bo
 pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String], client: &reqwest::Client) -> Vec<Result<(), SyncError>> {
     let mut results = Vec::new();
     for peer in peers {
+        if !super::is_contactable_peer(peer) { continue; }
         let url = format!("{}/blocks", peer);
         let result = client
             .post(&url)
@@ -1068,6 +1074,10 @@ pub async fn sync_loop(state: Arc<AppState>, seed_peers: Vec<String>, sync_inter
         let peers = state.peers.read().unwrap().clone();
 
         for peer in &peers {
+            // Skip hashed peer IDs (not contactable URLs)
+            if !super::is_contactable_peer(peer) {
+                continue;
+            }
             // v1.8.0: Skip peers with too many consecutive failures (temporary cooldown).
             // After 20 failures, skip this peer for this cycle. Counter resets on success.
             // This prevents the sync loop from wasting time on dead peers while
@@ -1303,11 +1313,11 @@ pub async fn verify_snapshot_multi_peer(
                 Ok(resp) if resp.status().is_success() => {
                     match resp.json::<PeerSnapshotInfo>().await {
                         Ok(info) => responses.push((peer, info)),
-                        Err(e) => warn!("Peer {} invalid response: {}", peer_id(&peer), e),
+                        Err(e) => warn!("Peer {} invalid response: {}", peer_id(&peer), sanitize_error(&e)),
                     }
                 }
                 Ok(resp) => warn!("Peer {} HTTP {}", peer_id(&peer), resp.status()),
-                Err(e) => warn!("Peer {} unreachable: {}", peer_id(&peer), e),
+                Err(e) => warn!("Peer {} unreachable: {}", peer_id(&peer), sanitize_error(&e)),
             }
         }
     }

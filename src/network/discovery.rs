@@ -135,9 +135,10 @@ pub async fn discovery_loop(state: Arc<AppState>) {
 
         // Annonce à chaque pair et découvre de nouveaux pairs
         for peer in &peers {
+            if !crate::network::is_contactable_peer(peer) { continue; }
             // Announce ourselves to the peer
             if let Err(e) = announce_to_peer(&client, peer, &state).await {
-                debug!("Failed to announce to peer {}: {}", peer, e);
+                debug!("Failed to announce to peer {}: {}", peer_id(peer), e);
             }
 
             // Fetch their peer list for discovery
@@ -148,7 +149,7 @@ pub async fn discovery_loop(state: Arc<AppState>) {
                     let mut peers_guard = state.peers.write().unwrap();
                     for new_peer in new_peers {
                         // Skip masked peer IDs (peer:xxxxxxxx) — not contactable URLs
-                        if new_peer.starts_with("peer:") {
+                        if !crate::network::is_contactable_peer(&new_peer) {
                             continue;
                         }
                         // Avoid adding localhost/self and duplicates

@@ -186,6 +186,8 @@ impl MiningPool {
             return 0;
         }
 
+        let total = attempts_total.load(Ordering::Relaxed);
+
         // SECURITY FIX: Remplacement de unwrap() par unwrap_or_default() + log
         if let Ok(mut guard) = result.lock() {
             if let Some(winner) = guard.take() {
@@ -193,7 +195,7 @@ impl MiningPool {
             }
         }
 
-        attempts_total.load(Ordering::Relaxed)
+        total
     }
 }
 

@@ -19,6 +19,14 @@ use super::rate_limiter::{RateLimiter, RateLimitConfig};
 use super::protocol::{encode_message, decode_message, TsnMessage};
 use super::{NetworkError, Result};
 
+/// Mask a SocketAddr to a short hash for logs (no IP leak).
+fn masked_addr(addr: &SocketAddr) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    addr.hash(&mut h);
+    format!("tcp:{:08x}", h.finish() as u32)
+}
+
 /// Configuration du transport réseau
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
@@ -68,7 +76,7 @@ impl TcpConnection {
 
     async fn send_message(&mut self, message: &TsnMessage) -> Result<()> {
         if !self.rate_limiter.check(&self.addr).await {
-            return Err(NetworkError::RateLimited(format!("TCP peer {}", self.addr)));
+            return Err(NetworkError::RateLimited(format!("TCP peer {}", masked_addr(&self.addr))));
         }
 
         let encoded = encode_message(message)?;
@@ -76,7 +84,7 @@ impl TcpConnection {
         match timeout(Duration::from_secs(10), self.stream.write_all(&encoded)).await {
             Ok(Ok(())) => {
                 self.last_activity = Instant::now();
-                trace!("Message TCP envoyé vers {}: {} bytes", self.addr, encoded.len());
+                trace!("Message TCP envoyé vers {}: {} bytes", masked_addr(&self.addr), encoded.len());
                 Ok(())
             },
             Ok(Err(e)) => Err(NetworkError::Io(e)),
@@ -89,7 +97,12 @@ impl TcpConnection {
         let mut temp_buf = [0u8; 8192];
 
         match timeout(Duration::from_millis(100), self.stream.read(&mut temp_buf)).await {
-            Ok(Ok(0)) => return Err(NetworkError::PeerDisconnected(self.addr)),
+            Ok(Ok(0)) => {
+                // Use a zeroed addr to avoid leaking the real IP in error Display
+                return Err(NetworkError::PeerDisconnected(
+                    SocketAddr::from(([0, 0, 0, 0], 0))
+                ));
+            }
             Ok(Ok(n)) => {
                 self.buffer.extend_from_slice(&temp_buf[..n]);
                 self.last_activity = Instant::now();
@@ -103,7 +116,7 @@ impl TcpConnection {
             self.buffer.advance(consumed);
 
             if self.buffer.len() > 1024 * 1024 {
-                warn!("Buffer TCP trop gros pour {}, reset", self.addr);
+                warn!("Buffer TCP trop gros pour {}, reset", masked_addr(&self.addr));
                 self.buffer.clear();
                 break;
             }
@@ -236,7 +249,7 @@ impl NetworkTransport {
     }
 
     async fn create_tcp_connection(&self, addr: SocketAddr, message: TsnMessage) -> Result<()> {
-        debug!("Création connexion TCP vers {}", addr);
+        debug!("Création connexion TCP vers {}", masked_addr(&addr));
 
         let stream = match timeout(self.config.tcp_connect_timeout, TcpStream::connect(addr)).await {
             Ok(Ok(stream)) => stream,
@@ -250,13 +263,13 @@ impl NetworkTransport {
         {
             let mut connections = self.tcp_connections.write().await;
             if connections.len() >= self.config.max_tcp_connections {
-                warn!("Limite de connexions TCP atteinte, refuse {}", addr);
+                warn!("Limite de connexions TCP atteinte, refuse {}", masked_addr(&addr));
                 return Err(NetworkError::RateLimited("Trop de connexions TCP".to_string()));
             }
             connections.insert(addr, connection);
         }
 
-        debug!("Connexion TCP établie vers {}", addr);
+        debug!("Connexion TCP établie vers {}", masked_addr(&addr));
         Ok(())
     }
 
@@ -264,12 +277,12 @@ impl NetworkTransport {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    debug!("Nouvelle connexion TCP depuis {}", addr);
+                    debug!("Nouvelle connexion TCP depuis {}", masked_addr(&addr));
 
                     {
                         let connections = self.tcp_connections.read().await;
                         if connections.len() >= self.config.max_tcp_connections {
-                            warn!("Limite de connexions TCP atteinte, refuse {}", addr);
+                            warn!("Limite de connexions TCP atteinte, refuse {}", masked_addr(&addr));
                             continue;
                         }
                     }
@@ -303,7 +316,7 @@ impl NetworkTransport {
                         match conn.read_messages().await {
                             Ok(messages) => messages,
                             Err(e) => {
-                                debug!("Erreur lecture TCP {}: {}", addr, e);
+                                debug!("Erreur lecture TCP {}: {}", masked_addr(&addr), e);
                                 connections.remove(&addr);
                                 break;
                             }
@@ -322,7 +335,7 @@ impl NetworkTransport {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        debug!("Handler TCP terminé pour {}", addr);
+        debug!("Handler TCP terminé pour {}", masked_addr(&addr));
     }
 
     async fn udp_receive_loop(&self, socket: Arc<UdpSocket>) {
@@ -337,7 +350,7 @@ impl NetworkTransport {
                             .or_insert_with(|| Arc::new(RateLimiter::new(self.config.rate_limit.clone())));
 
                         if !limiter.check(&addr).await {
-                            trace!("Rate limit UDP dépassé pour {}", addr);
+                            trace!("Rate limit UDP dépassé pour {}", masked_addr(&addr));
                             continue;
                         }
                     }
@@ -345,16 +358,16 @@ impl NetworkTransport {
                     let mut buf = BytesMut::from(&buffer[..len]);
                     match decode_message(&mut buf) {
                         Ok(Some((message, _))) => {
-                            trace!("Message UDP reçu de {}: {} bytes", addr, len);
+                            trace!("Message UDP reçu de {}: {} bytes", masked_addr(&addr), len);
                             if let Err(e) = self.message_tx.send((addr, message)) {
                                 error!("Erreur envoi message UDP interne: {}", e);
                             }
                         },
                         Ok(None) => {
-                            trace!("Message UDP incomplet de {}", addr);
+                            trace!("Message UDP incomplet de {}", masked_addr(&addr));
                         },
                         Err(e) => {
-                            warn!("Erreur décodage UDP de {}: {}", addr, e);
+                            warn!("Erreur décodage UDP de {}: {}", masked_addr(&addr), e);
                         }
                     }
                 },
@@ -378,7 +391,7 @@ impl NetworkTransport {
                 connections.retain(|addr, conn| {
                     let active = conn.is_active();
                     if !active {
-                        debug!("Suppression connexion TCP inactive: {}", addr);
+                        debug!("Suppression connexion TCP inactive: {}", masked_addr(addr));
                     }
                     active
                 });

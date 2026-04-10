@@ -248,14 +248,14 @@ impl P2pNode {
         for (peer, addr) in &config.bootstrap_peers {
             swarm.behaviour_mut().kademlia.add_address(peer, addr.clone());
             swarm.dial(addr.clone()).ok();
-            info!("Dialing bootstrap peer: {} at {}", peer, addr);
+            info!("Dialing bootstrap peer: {}", &peer.to_string()[..16.min(peer.to_string().len())]);
         }
 
         // Dial seed nodes (PeerID unknown — Identify protocol will exchange them)
         for addr in &config.dial_seeds {
             match swarm.dial(addr.clone()) {
                 Ok(_) => info!("Dialing P2P seed..."),
-                Err(e) => warn!("Failed to dial P2P seed: {:?}", e),
+                Err(_) => warn!("Failed to dial P2P seed"),
             }
         }
 

@@ -951,6 +951,7 @@ async fn submit_transaction_v2(
         let client = state.http_client.clone();
         tokio::spawn(async move {
             for peer in &peers {
+                if !crate::network::is_contactable_peer(peer) { continue; }
                 let url = format!("{}/tx/v2", peer);
                 let _ = client.post(&url)
                     .json(&serde_json::json!({ "transaction": tx_clone }))
@@ -1205,6 +1206,7 @@ async fn get_p2p_peers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
                 // Collect known HTTP peer heights
                 let mut http_heights: Vec<u64> = Vec::new();
                 for peer_url in &http_peers {
+                    if !crate::network::is_contactable_peer(peer_url) { continue; }
                     let url = format!("{}/chain/info", peer_url);
                     if let Ok(resp) = client.get(&url).send().await {
                         if let Ok(info) = resp.json::<serde_json::Value>().await {
@@ -1416,6 +1418,7 @@ async fn relay_block(block: &ShieldedBlock, peers: &[String], client: &reqwest::
 
     let mut handles = Vec::with_capacity(peers.len());
     for peer in peers {
+        if !crate::network::is_contactable_peer(peer) { continue; }
         let url = format!("{}/blocks", peer);
         let client = client.clone();
         let block = block.clone();
@@ -1448,6 +1451,7 @@ async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String], client: &
     let tx_hash = &hex::encode(tx.hash())[..16];
 
     for peer in peers {
+        if !crate::network::is_contactable_peer(peer) { continue; }
         let url = format!("{}/tx/relay", peer);
         match client.post(&url).json(tx).send().await {
             Ok(resp) if resp.status().is_success() => {
