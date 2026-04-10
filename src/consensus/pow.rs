@@ -253,10 +253,12 @@ fn run_mining_job(job: MineJob, _worker_id: usize) {
     let mut attempts = 0u64;
 
     loop {
-        if found.load(Ordering::Relaxed) {
-            break;
-        }
+        // Check shared atomics every 1024 iterations to reduce cache-line bouncing
+        // across CCDs on multi-socket/EPYC systems (240 threads = massive contention)
         if attempts & 0x3FF == 0 {
+            if found.load(Ordering::Relaxed) {
+                break;
+            }
             if let Some(ref c) = cancel {
                 if c.load(Ordering::Relaxed) {
                     break;

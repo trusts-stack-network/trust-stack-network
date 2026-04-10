@@ -152,6 +152,23 @@ pub fn poseidon_hash_header_parts_for_height(
 
 /// Pack arbitrary bytes into p3 Goldilocks field elements (7 bytes per element).
 /// Same packing as Poseidon v1 — same field, same representation.
+/// Convert bytes to Goldilocks field elements (7 bytes per element).
+/// Uses a stack buffer to avoid heap allocation in hot mining loop.
+/// Max 31 elements for 212-byte header.
+fn bytes_to_p3_goldilocks_stack(data: &[u8], out: &mut [Goldilocks; 32]) -> usize {
+    let mut count = 0;
+    for chunk in data.chunks(7) {
+        let mut val: u64 = 0;
+        for (i, &byte) in chunk.iter().enumerate() {
+            val |= (byte as u64) << (i * 8);
+        }
+        out[count] = <Goldilocks as QuotientMap<u64>>::from_int(val);
+        count += 1;
+    }
+    count
+}
+
+/// Heap-allocating version for non-hot-path callers.
 fn bytes_to_p3_goldilocks(data: &[u8]) -> Vec<Goldilocks> {
     let mut elements = Vec::new();
     for chunk in data.chunks(7) {
@@ -188,13 +205,16 @@ lazy_static::lazy_static! {
 /// Uses the Horizen Labs Poseidon2 constants for the Goldilocks field with
 /// width=8, rate=4, output=4 field elements (32 bytes).
 pub fn poseidon_hash_header_v2(header_bytes: &[u8]) -> [u8; 32] {
-    let elements = bytes_to_p3_goldilocks(header_bytes);
+    // Zero-allocation hot path: all buffers on stack
+    let mut elem_buf = [Goldilocks::default(); 32];
+    let n = bytes_to_p3_goldilocks_stack(header_bytes, &mut elem_buf);
 
-    let mut inputs = Vec::with_capacity(elements.len() + 1);
-    inputs.push(<Goldilocks as QuotientMap<u64>>::from_int(DOMAIN_POW));
-    inputs.extend_from_slice(&elements);
+    // inputs = [domain_separator, elem_buf[0..n]]
+    let mut inputs = [Goldilocks::default(); 33];
+    inputs[0] = <Goldilocks as QuotientMap<u64>>::from_int(DOMAIN_POW);
+    inputs[1..=n].copy_from_slice(&elem_buf[..n]);
 
-    let hash_out: [Goldilocks; 4] = POSEIDON2_SPONGE.hash_slice(&inputs);
+    let hash_out: [Goldilocks; 4] = POSEIDON2_SPONGE.hash_slice(&inputs[..=n]);
 
     let mut result = [0u8; 32];
     for (i, elem) in hash_out.iter().enumerate() {
