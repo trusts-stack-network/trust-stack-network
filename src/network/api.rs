@@ -1474,8 +1474,8 @@ async fn relay_block(block: &ShieldedBlock, peers: &[String], client: &reqwest::
                         warn!("Relay to {} returned {}", peer_name, status);
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to relay block to {}: {}", peer_name, e);
+                Err(_) => {
+                    warn!("Failed to relay block to {} (timeout or unreachable)", peer_name);
                 }
             }
         }));
@@ -1500,7 +1500,7 @@ async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String], client: &
                 // Peer might already have it - not an error
             }
             Err(e) => {
-                warn!("Failed to relay transaction to {}: {}", peer_id(peer), e);
+                warn!("Failed to relay transaction to {} (timeout or unreachable)", peer_id(peer));
             }
         }
     }

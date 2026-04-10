@@ -2549,35 +2549,44 @@ async fn cmd_node(
                                             p2p_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
                                         Ok(false) => {
-                                            // Stored as orphan or side chain — trigger sync but throttled.
-                                            // At most one orphan sync every 10 seconds to prevent rollback storms.
+                                            // Stored as orphan — request missing blocks via P2P
                                             let local_height = p2p_blockchain.blockchain.read().unwrap().height();
                                             let now_secs = std::time::SystemTime::now()
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .unwrap_or_default().as_secs();
                                             let last = last_orphan_sync.load(std::sync::atomic::Ordering::Relaxed);
-                                            if now_secs - last < 10 {
-                                                tracing::debug!("P2P: block #{} orphan — sync throttled ({}s ago)", height, now_secs - last);
+                                            if now_secs - last < 5 {
+                                                tracing::debug!("P2P: block #{} orphan — request throttled", height);
                                             } else {
-                                                tracing::info!("P2P: block #{} stored as orphan (local: {}), triggering sync", height, local_height);
                                                 last_orphan_sync.store(now_secs, std::sync::atomic::Ordering::Relaxed);
-                                                let sync_state = p2p_blockchain.clone();
-                                                let sync_peers = p2p_blockchain.peers.read().unwrap().clone();
-                                                let lock = orphan_sync_lock.clone();
-                                                tokio::spawn(async move {
-                                                    // Only one sync at a time
-                                                    let _guard = lock.lock().await;
-                                                    for peer in &sync_peers {
-                                                        if !tsn::network::is_contactable_peer(peer) { continue; }
-                                                        match tsn::network::sync_from_peer(sync_state.clone(), peer).await {
-                                                            Ok(n) if n > 0 => {
-                                                                tracing::info!("Orphan sync: got {} blocks from {}", n, tsn::network::peer_id(peer));
-                                                                break;
-                                                            }
-                                                            _ => {}
-                                                        }
+                                                let gap = height.saturating_sub(local_height);
+                                                if gap > 0 && gap <= 50 {
+                                                    // Request missing blocks via P2P (no HTTP needed)
+                                                    tracing::info!("P2P: block #{} orphan (local: {}), requesting {} blocks via P2P", height, local_height, gap);
+                                                    let tx = p2p_blockchain.p2p_broadcast.read().unwrap().clone();
+                                                    if let Some(tx) = tx {
+                                                        let _ = tx.send(tsn::network::p2p::P2pCommand::RequestBlocks(local_height + 1, height)).await;
                                                     }
-                                                });
+                                                } else if gap > 50 {
+                                                    // Too far behind — try HTTP sync as fallback
+                                                    tracing::info!("P2P: block #{} orphan (local: {}, gap={}), falling back to HTTP sync", height, local_height, gap);
+                                                    let sync_state = p2p_blockchain.clone();
+                                                    let sync_peers = p2p_blockchain.peers.read().unwrap().clone();
+                                                    let lock = orphan_sync_lock.clone();
+                                                    tokio::spawn(async move {
+                                                        let _guard = lock.lock().await;
+                                                        for peer in &sync_peers {
+                                                            if !tsn::network::is_contactable_peer(peer) { continue; }
+                                                            match tsn::network::sync_from_peer(sync_state.clone(), peer).await {
+                                                                Ok(n) if n > 0 => {
+                                                                    tracing::info!("HTTP sync: got {} blocks from {}", n, tsn::network::peer_id(peer));
+                                                                    break;
+                                                                }
+                                                                _ => {}
+                                                            }
+                                                        }
+                                                    });
+                                                }
                                             }
                                         }
                                         Err(e) => tracing::debug!("P2P: block #{} rejected: {}", height, e),
@@ -2604,11 +2613,37 @@ async fn cmd_node(
                             info!("P2P: NAT status = {}", status);
                         }
                         P2pEvent::PeerHttpAddr(url) => {
-                            // Auto-discovered HTTP address from P2P peer — add to peer list for sync
                             let mut peers = p2p_blockchain.peers.write().unwrap();
                             if !peers.contains(&url) {
                                 debug!("P2P: discovered HTTP peer {}", tsn::network::peer_id(&url));
                                 peers.push(url);
+                            }
+                        }
+                        P2pEvent::BlockRequest(from, to) => {
+                            // A peer needs blocks from us — serve them via P2P
+                            let blocks_data = {
+                                let chain = p2p_blockchain.blockchain.read().unwrap();
+                                let local_h = chain.height();
+                                if from <= local_h && to <= local_h {
+                                    let mut bd: Vec<Vec<u8>> = Vec::new();
+                                    for h in from..=to {
+                                        if let Some(block) = chain.get_block_by_height(h) {
+                                            if let Ok(data) = serde_json::to_vec(&block) {
+                                                bd.push(data);
+                                            }
+                                        }
+                                    }
+                                    bd
+                                } else {
+                                    Vec::new()
+                                }
+                            };
+                            if !blocks_data.is_empty() {
+                                tracing::info!("P2P: serving {} blocks ({} → {})", blocks_data.len(), from, to);
+                                let tx = p2p_blockchain.p2p_broadcast.read().unwrap().clone();
+                                if let Some(tx) = tx {
+                                    let _ = tx.send(tsn::network::p2p::P2pCommand::SendBlocks(blocks_data)).await;
+                                }
                             }
                         }
                     }

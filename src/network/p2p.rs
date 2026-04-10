@@ -27,6 +27,7 @@ use tracing::{info, warn, error, debug};
 /// GossipSub topic names
 const TOPIC_BLOCKS: &str = "tsn/blocks/1";
 const TOPIC_TRANSACTIONS: &str = "tsn/transactions/1";
+const TOPIC_BLOCK_REQUEST: &str = "tsn/block-request/1";
 
 /// P2P configuration
 pub struct P2pConfig {
@@ -69,6 +70,8 @@ pub enum P2pEvent {
     NatStatus(String),
     /// A peer was identified with HTTP-reachable addresses
     PeerHttpAddr(String), // e.g. "http://1.2.3.4:9333"
+    /// A peer requested blocks (from_height, to_height)
+    BlockRequest(u64, u64),
 }
 
 /// Commands sent to the P2P layer from the application
@@ -80,6 +83,10 @@ pub enum P2pCommand {
     BroadcastTransaction(Vec<u8>),
     /// Get the list of connected peers
     GetPeers(tokio::sync::oneshot::Sender<Vec<PeerInfo>>),
+    /// Request missing blocks from the network (from_height, to_height)
+    RequestBlocks(u64, u64),
+    /// Send blocks in response to a BlockRequest (serialized blocks)
+    SendBlocks(Vec<Vec<u8>>),
 }
 
 /// Information about a connected peer
@@ -243,8 +250,10 @@ impl P2pNode {
         // Subscribe to topics
         let block_topic = gossipsub::IdentTopic::new(TOPIC_BLOCKS);
         let tx_topic = gossipsub::IdentTopic::new(TOPIC_TRANSACTIONS);
+        let req_topic = gossipsub::IdentTopic::new(TOPIC_BLOCK_REQUEST);
         swarm.behaviour_mut().gossipsub.subscribe(&block_topic)?;
         swarm.behaviour_mut().gossipsub.subscribe(&tx_topic)?;
+        swarm.behaviour_mut().gossipsub.subscribe(&req_topic)?;
 
         // Listen on TCP and QUIC
         let listen_addr_tcp: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", config.listen_port).parse()?;
@@ -329,6 +338,7 @@ async fn p2p_event_loop(
 ) {
     let block_topic = gossipsub::IdentTopic::new(TOPIC_BLOCKS);
     let tx_topic = gossipsub::IdentTopic::new(TOPIC_TRANSACTIONS);
+    let req_topic = gossipsub::IdentTopic::new(TOPIC_BLOCK_REQUEST);
 
     // Track identified peers to avoid spam logging
     let mut identified_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
@@ -395,6 +405,16 @@ async fn p2p_event_loop(
                         } else if topic == tx_topic.hash().as_str() {
                             debug!("Received transaction via GossipSub ({} bytes)", message.data.len());
                             event_tx.send(P2pEvent::NewTransaction(message.data)).await.ok();
+                        } else if topic == req_topic.hash().as_str() {
+                            // Block request received — forward to application to serve blocks
+                            if let Ok(req) = serde_json::from_slice::<serde_json::Value>(&message.data) {
+                                let from = req.get("from").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let to = req.get("to").and_then(|v| v.as_u64()).unwrap_or(0);
+                                if from > 0 && to >= from && to - from <= 50 {
+                                    debug!("P2P: block request received: {} → {}", from, to);
+                                    event_tx.send(P2pEvent::BlockRequest(from, to)).await.ok();
+                                }
+                            }
                         }
                     }
                     SwarmEvent::Behaviour(TsnBehaviourEvent::Identify(
@@ -558,6 +578,25 @@ async fn p2p_event_loop(
                             })
                             .collect();
                         reply.send(peers).ok();
+                    }
+                    P2pCommand::RequestBlocks(from, to) => {
+                        // Publish a block request on the P2P network
+                        let req = serde_json::json!({"from": from, "to": to});
+                        if let Ok(data) = serde_json::to_vec(&req) {
+                            debug!("P2P: requesting blocks {} → {}", from, to);
+                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(req_topic.clone(), data) {
+                                debug!("P2P: block request publish failed: {:?}", e);
+                            }
+                        }
+                    }
+                    P2pCommand::SendBlocks(blocks) => {
+                        // Send blocks one by one via the blocks topic
+                        for block_data in blocks {
+                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(block_topic.clone(), block_data) {
+                                debug!("P2P: failed to send requested block: {:?}", e);
+                                break;
+                            }
+                        }
                     }
                 }
             }
