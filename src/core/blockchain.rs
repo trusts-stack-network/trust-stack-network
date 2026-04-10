@@ -738,10 +738,17 @@ impl ShieldedBlockchain {
                 // v1.8.0: Purge LRU block cache after rollback.
                 // Blocks from the old fork were stored as LESS_WORK in the LRU.
                 // Without purging, sync would find them via has_block() → DUP → "none accepted".
-                // The canonical chain blocks are safe in DB; fork blocks will be re-downloaded.
                 let lru_before = self.blocks.len();
+                // Save tip block before clearing — sync needs it for has_block() to connect new blocks.
+                let tip_hash = self.latest_hash();
+                let tip_block = self.blocks.get(&tip_hash).cloned()
+                    .or_else(|| self.db.as_ref().and_then(|db| db.load_block(&tip_hash).ok().flatten()));
                 self.blocks.clear();
                 self.orphans.clear();
+                // Re-insert tip block so incoming blocks can connect via prev_hash check.
+                if let Some(tb) = tip_block {
+                    self.blocks.put(tip_hash, tb);
+                }
                 tracing::warn!(
                     "SYNC_DEBUG: ROLLBACK_DONE(instant) height={} tip={} work={} lru_purged={} orphans_cleared",
                     self.height(), hex::encode(&self.latest_hash()[..8]),
@@ -832,8 +839,14 @@ impl ShieldedBlockchain {
         }
         // v1.8.0: Purge LRU block cache after rollback.
         let lru_before = self.blocks.len();
+        let tip_hash = self.latest_hash();
+        let tip_block = self.blocks.get(&tip_hash).cloned()
+            .or_else(|| self.db.as_ref().and_then(|db| db.load_block(&tip_hash).ok().flatten()));
         self.blocks.clear();
         self.orphans.clear();
+        if let Some(tb) = tip_block {
+            self.blocks.put(tip_hash, tb);
+        }
         tracing::warn!(
             "SYNC_DEBUG: ROLLBACK_DONE(slow) height={} tip={} work={} lru_purged={} orphans_cleared",
             self.height(), hex::encode(&self.latest_hash()[..8]),
