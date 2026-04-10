@@ -195,8 +195,13 @@ async fn fetch_peer_chain_info(
     client: &reqwest::Client,
     peer_url: &str,
 ) -> Option<PeerChainInfo> {
+    if !tsn::network::is_contactable_peer(peer_url) {
+        return None;
+    }
     let info_url = format!("{}/chain/info", peer_url);
-    let response = client.get(&info_url).send().await.ok()?;
+    let response = client.get(&info_url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -2800,25 +2805,29 @@ async fn cmd_node(
                     let sync_client = mine_state.http_client.clone();
                     let peers_list = mine_state.peers.read().unwrap().clone();
 
-                    // Query ACTUAL peer heights via HTTP (not gossip)
-                    // Use short timeout (1s) to avoid stalling mining on unreachable peers
-                    let mut verified_max_height: u64 = 0;
+                    // Query ACTUAL peer heights via HTTP (concurrent, 1s timeout)
+                    let mut tip_handles = Vec::new();
                     for peer in &peers_list {
-                        // Skip non-URL peers (hashed peer IDs like "peer:xxxx")
-                        if !tsn::network::is_contactable_peer(peer) {
-                            continue;
-                        }
+                        if !tsn::network::is_contactable_peer(peer) { continue; }
                         let tip_url = format!("{}/tip", peer);
-                        if let Ok(resp) = sync_client.get(&tip_url)
-                            .timeout(std::time::Duration::from_secs(1))
-                            .send().await
-                        {
-                            if let Ok(tip) = resp.json::<serde_json::Value>().await {
-                                let h = tip["height"].as_u64().unwrap_or(0);
-                                // Fix 5: skip peers at height 0
-                                if h > 0 && h > verified_max_height {
-                                    verified_max_height = h;
+                        let c = sync_client.clone();
+                        tip_handles.push(tokio::spawn(async move {
+                            if let Ok(resp) = c.get(&tip_url)
+                                .timeout(std::time::Duration::from_secs(1))
+                                .send().await
+                            {
+                                if let Ok(tip) = resp.json::<serde_json::Value>().await {
+                                    return tip["height"].as_u64().unwrap_or(0);
                                 }
+                            }
+                            0u64
+                        }));
+                    }
+                    let mut verified_max_height: u64 = 0;
+                    for h in tip_handles {
+                        if let Ok(height) = h.await {
+                            if height > 0 && height > verified_max_height {
+                                verified_max_height = height;
                             }
                         }
                     }

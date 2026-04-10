@@ -1017,25 +1017,38 @@ async fn verify_peer_checkpoints(client: &reqwest::Client, peer_url: &str) -> bo
 
 // ============ Block Broadcast ============
 
-/// Broadcast a newly mined block to all peers.
+/// Broadcast a newly mined block to all peers (concurrent, with timeout).
 pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String], client: &reqwest::Client) -> Vec<Result<(), SyncError>> {
-    let mut results = Vec::new();
+    let mut handles = Vec::new();
     for peer in peers {
         if !super::is_contactable_peer(peer) { continue; }
         let url = format!("{}/blocks", peer);
-        let result = client
-            .post(&url)
-            .header("X-TSN-Version", env!("CARGO_PKG_VERSION"))
-            .json(block)
-            .send()
-            .await
-            .map(|_| ())
-            .map_err(SyncError::from);
+        let client = client.clone();
+        let block = block.clone();
+        let peer_label = peer_id(peer);
+        handles.push(tokio::spawn(async move {
+            let result = client
+                .post(&url)
+                .header("X-TSN-Version", env!("CARGO_PKG_VERSION"))
+                .timeout(std::time::Duration::from_secs(3))
+                .json(&block)
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(SyncError::from);
 
-        if let Err(ref e) = result {
-            debug!("Failed to broadcast to {}: {}", peer_id(peer), sanitize_error(e));
+            if let Err(ref e) = result {
+                debug!("Failed to broadcast to {}: {}", peer_label, sanitize_error(e));
+            }
+            result
+        }));
+    }
+    let mut results = Vec::new();
+    for h in handles {
+        match h.await {
+            Ok(r) => results.push(r),
+            Err(_) => results.push(Err(SyncError::HttpError("broadcast task join error".to_string()))),
         }
-        results.push(result);
     }
     results
 }
