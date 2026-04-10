@@ -2191,7 +2191,7 @@ async fn cmd_node(
         banned_peers: std::sync::RwLock::new(std::collections::HashMap::new()),
         peer_info: std::sync::RwLock::new(std::collections::HashMap::new()),
         error_log: std::sync::RwLock::new(Vec::new()),
-        auto_heal_mode: std::sync::RwLock::new("validation".to_string()),
+        auto_heal_mode: std::sync::RwLock::new("automatic".to_string()),
     });
 
     // ========================================================================
@@ -2367,6 +2367,42 @@ async fn cmd_node(
                                 last_height = 0;
                             }
                         }
+                    }
+                }
+
+                // Check 2b: Fork divergence — peers are far ahead and we can't catch up
+                // If verified peer tip is > 20 blocks ahead for > 60 seconds, auto wipe + resync
+                {
+                    let sync_client = &watchdog_state.http_client;
+                    let peers_list = watchdog_state.peers.read().unwrap().clone();
+                    let mut max_peer_h = 0u64;
+                    for peer in &peers_list {
+                        if !tsn::network::is_contactable_peer(peer) { continue; }
+                        let url = format!("{}/tip", peer);
+                        if let Ok(resp) = sync_client.get(&url).timeout(std::time::Duration::from_secs(2)).send().await {
+                            if let Ok(tip) = resp.json::<serde_json::Value>().await {
+                                let h = tip["height"].as_u64().unwrap_or(0);
+                                if h > max_peer_h { max_peer_h = h; }
+                            }
+                        }
+                    }
+                    // Also check P2P peer heights
+                    if let Some(sp) = watchdog_state.p2p_shared_peers.read().unwrap().as_ref() {
+                        if let Ok(peers) = sp.read() {
+                            for p in peers.iter() {
+                                if let Some(h) = p.height {
+                                    if h > max_peer_h { max_peer_h = h; }
+                                }
+                            }
+                        }
+                    }
+                    let gap = max_peer_h.saturating_sub(current_height);
+                    if gap > 20 {
+                        tracing::warn!("WATCHDOG: Fork detected — peers at {} but local at {} (gap={}). Auto wipe + resync.", max_peer_h, current_height, gap);
+                        let mut chain = watchdog_state.blockchain.write().unwrap();
+                        chain.reset_for_snapshot_resync();
+                        stuck_since = None;
+                        last_height = 0;
                     }
                 }
 

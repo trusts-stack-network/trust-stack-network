@@ -113,6 +113,24 @@ Merkle Node     = Poseidon(domain=5, left, right)
 └──────────────┴─────────────────────────────────────┴────────────────┘
 ```
 
+## Built from Scratch
+
+TSN is not a fork. Every core component was designed and written from zero — no Substrate, no Cosmos SDK, no framework.
+
+| Component | Lines | Status |
+|-----------|-------|--------|
+| **Consensus engine** | 9,880 | LWMA difficulty, PoW validation, fork resolution, checkpoints, reorg protection |
+| **P2P network protocol** | 23,168 | Headers-first sync, peer scoring, eclipse protection, anti-DoS, auto-update |
+| **zkVM** | 1,122 | Stack-based bytecode, 40+ opcodes, gas model, ZK execution traces |
+| **Smart contracts** | 2,458 | Executor, on-chain storage, templates (Token, Escrow, Multisig, AMM) |
+| **Cryptographic layer** | 24,070 | Poseidon2 PoW, nullifiers, commitments, Merkle trees, ZK proof adapters |
+| **Block & transaction format** | 9,640 | Custom binary format, shielded TX, binding signatures |
+| **Wallet** | 2,355 | BIP39 seed, ML-DSA-65 keygen, shielded send/receive, TX history |
+| **Stablecoin (ZST)** | 2,617 | Gold-backed stablecoin module with Djed/Zephyr model |
+| **Total** | **92,545** | **298 source files, 432 tests** |
+
+We use battle-tested cryptographic primitives (`fips204` for ML-DSA-65, `p3-poseidon2` for hashing, `plonky2`/`plonky3` for ZK proofs, `libp2p` for transport) — but everything above the primitive layer is original TSN code. We don't reinvent cryptography, we build on it.
+
 ## Quick Start
 
 ### Download binary (recommended)
