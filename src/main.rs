@@ -2188,6 +2188,7 @@ async fn cmd_node(
         reorg_count: std::sync::atomic::AtomicU64::new(0),
         reorg_lock: tokio::sync::RwLock::new(()),
         banned_peers: std::sync::RwLock::new(std::collections::HashMap::new()),
+        peer_info: std::sync::RwLock::new(std::collections::HashMap::new()),
         error_log: std::sync::RwLock::new(Vec::new()),
         auto_heal_mode: std::sync::RwLock::new("validation".to_string()),
     });
@@ -2580,6 +2581,14 @@ async fn cmd_node(
                         }
                         P2pEvent::NatStatus(status) => {
                             info!("P2P: NAT status = {}", status);
+                        }
+                        P2pEvent::PeerHttpAddr(url) => {
+                            // Auto-discovered HTTP address from P2P peer — add to peer list for sync
+                            let mut peers = p2p_blockchain.peers.write().unwrap();
+                            if !peers.contains(&url) {
+                                debug!("P2P: discovered HTTP peer {}", tsn::network::peer_id(&url));
+                                peers.push(url);
+                            }
                         }
                     }
                 }

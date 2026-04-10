@@ -67,6 +67,8 @@ pub enum P2pEvent {
     PeerDisconnected(PeerId),
     /// NAT status detected
     NatStatus(String),
+    /// A peer was identified with HTTP-reachable addresses
+    PeerHttpAddr(String), // e.g. "http://1.2.3.4:9333"
 }
 
 /// Commands sent to the P2P layer from the application
@@ -427,6 +429,30 @@ async fn p2p_event_loop(
                         // Add discovered addresses to Kademlia
                         for addr in &info.listen_addrs {
                             swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                        }
+                        // Extract HTTP-reachable address from peer's listen addrs
+                        // Look for /ip4/X.X.X.X/tcp/PORT patterns and derive HTTP URL
+                        for addr in &info.listen_addrs {
+                            let addr_str = addr.to_string();
+                            // Parse multiaddr: /ip4/1.2.3.4/tcp/9334 → http://1.2.3.4:9333
+                            if let Some(ip_start) = addr_str.find("/ip4/") {
+                                let rest = &addr_str[ip_start + 5..];
+                                if let Some(ip_end) = rest.find('/') {
+                                    let ip = &rest[..ip_end];
+                                    // Skip private/local IPs for public peers
+                                    if ip == "127.0.0.1" || ip == "0.0.0.0" { continue; }
+                                    // P2P port is typically API port + 1 (9334 → 9333)
+                                    if let Some(tcp_idx) = rest.find("/tcp/") {
+                                        let port_str = &rest[tcp_idx + 5..];
+                                        let port_end = port_str.find('/').unwrap_or(port_str.len());
+                                        if let Ok(p2p_port) = port_str[..port_end].parse::<u16>() {
+                                            let api_port = if p2p_port > 1 { p2p_port - 1 } else { p2p_port };
+                                            let http_url = format!("http://{}:{}", ip, api_port);
+                                            event_tx.send(P2pEvent::PeerHttpAddr(http_url)).await.ok();
+                                        }
+                                    }
+                                }
+                            }
                         }
                         // Bootstrap Kademlia now that we know a peer
                         let _ = swarm.behaviour_mut().kademlia.bootstrap();

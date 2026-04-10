@@ -86,10 +86,46 @@ pub struct AppState {
     /// Banned peer URLs with expiry timestamps (Instant).
     /// Peers are banned for sending checkpoint-violating or incompatible chains.
     pub banned_peers: RwLock<std::collections::HashMap<String, std::time::Instant>>,
+    /// Detailed peer info (version, role, last seen) — updated on every HTTP interaction.
+    pub peer_info: RwLock<std::collections::HashMap<String, PeerDetail>>,
     /// Error log for telemetry — recent errors stored for P2P sharing and dashboard
     pub error_log: RwLock<Vec<NodeError>>,
     /// Auto-heal mode: "validation" (default, human approves) or "automatic" (self-repair)
     pub auto_heal_mode: RwLock<String>,
+}
+
+/// Info about an HTTP peer, updated on every interaction.
+#[derive(Clone, serde::Serialize)]
+pub struct PeerDetail {
+    pub peer_id: String,       // masked peer:xxxx
+    pub version: String,       // from X-TSN-Version header
+    pub role: String,          // "miner" or "relay" (from protocol or endpoint used)
+    pub height: u64,           // last known height
+    pub last_seen: u64,        // unix timestamp
+}
+
+/// Update peer info from an incoming HTTP request.
+pub fn update_peer_info(state: &AppState, peer_url: &str, version: Option<&str>, height: Option<u64>) {
+    let peer_id = super::peer_id(peer_url);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut info = state.peer_info.write().unwrap();
+    let entry = info.entry(peer_id.clone()).or_insert(PeerDetail {
+        peer_id: peer_id.clone(),
+        version: "?".to_string(),
+        role: "relay".to_string(),
+        height: 0,
+        last_seen: now,
+    });
+    if let Some(v) = version {
+        entry.version = v.to_string();
+    }
+    if let Some(h) = height {
+        if h > entry.height { entry.height = h; }
+    }
+    entry.last_seen = now;
 }
 
 /// Structured error for telemetry reporting
@@ -167,6 +203,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/peers", get(get_peers))
         .route("/peers", post(add_peer))
         .route("/peers/p2p", get(get_p2p_peers))
+        .route("/peers/detailed", get(get_peers_detailed))
         .route("/tx/relay", post(receive_transaction))
         .route("/tip", get(get_tip).post(receive_tip))
         .route("/sync/status", get(sync_status))
@@ -1004,13 +1041,24 @@ async fn receive_block(
         return Err((StatusCode::FORBIDDEN, format!("IP {} not whitelisted", ip)));
     }
     // Reject blocks from nodes that don't send version header or are outdated
-    if let Some(ver) = headers.get("X-TSN-Version").and_then(|v| v.to_str().ok()) {
+    let peer_ver = headers.get("X-TSN-Version").and_then(|v| v.to_str().ok());
+    if let Some(ver) = peer_ver {
         if !crate::network::version_check::version_meets_minimum(ver) {
             warn!("Rejected block from outdated peer (version {})", ver);
             return Err((StatusCode::FORBIDDEN, format!("Node version {} is below minimum {}", ver, crate::network::version_check::MINIMUM_VERSION)));
         }
     }
-    // Note: missing header is allowed for backward compatibility during transition
+    // Track peer info (version, height, last seen)
+    let peer_url = format!("http://{}:9333", addr.ip());
+    update_peer_info(&state, &peer_url, peer_ver, Some(block.coinbase.height));
+    // Mark as miner — they sent us a block they mined
+    {
+        let pid = super::peer_id(&peer_url);
+        let mut info = state.peer_info.write().unwrap();
+        if let Some(entry) = info.get_mut(&pid) {
+            entry.role = "miner".to_string();
+        }
+    }
 
     let block_hash = block.hash_hex();
 
@@ -1236,6 +1284,33 @@ async fn get_p2p_peers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         }
     }
     Json(serde_json::json!({ "count": 0, "peers": [], "local_height": local_height }))
+}
+
+/// Returns detailed info about HTTP peers with stale cleanup (>5min offline removed).
+async fn get_peers_detailed(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let stale_threshold = 300; // 5 minutes
+
+    let peers: Vec<serde_json::Value> = {
+        let mut info = state.peer_info.write().unwrap();
+        info.retain(|_, v| now - v.last_seen < stale_threshold);
+        info.values().map(|p| serde_json::json!({
+            "peer_id": p.peer_id,
+            "version": p.version,
+            "role": p.role,
+            "height": p.height,
+            "last_seen": p.last_seen,
+        })).collect()
+    };
+
+    let local_h = state.blockchain.read().unwrap().height();
+    Json(serde_json::json!({
+        "local_height": local_h,
+        "peers": peers,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -2341,12 +2416,16 @@ async fn receive_tip(
         return Err((StatusCode::FORBIDDEN, format!("IP {} not whitelisted", ip)));
     }
     // Reject tips from outdated nodes
-    if let Some(ver) = headers.get("X-TSN-Version").and_then(|v| v.to_str().ok()) {
+    let peer_ver = headers.get("X-TSN-Version").and_then(|v| v.to_str().ok());
+    if let Some(ver) = peer_ver {
         if !crate::network::version_check::version_meets_minimum(ver) {
             warn!("Rejected tip from outdated peer (version {})", ver);
             return Err((StatusCode::FORBIDDEN, format!("Node version {} is below minimum {}", ver, crate::network::version_check::MINIMUM_VERSION)));
         }
     }
+    // Track peer info
+    let peer_url = format!("http://{}:9333", addr.ip());
+    update_peer_info(&state, &peer_url, peer_ver, Some(req.height));
 
     // Parse the hash from hex
     let hash_bytes: [u8; 32] = hex::decode(&req.hash)
