@@ -64,6 +64,8 @@ pub struct AppState {
     pub p2p_broadcast: RwLock<Option<tokio::sync::mpsc::Sender<super::p2p::P2pCommand>>>,
     /// Local P2P PeerID (set after libp2p starts)
     pub p2p_peer_id: RwLock<Option<String>>,
+    /// Shared P2P peer list — updated by the P2P loop, read instantly by API
+    pub p2p_shared_peers: RwLock<Option<super::p2p::SharedPeerList>>,
     /// Node role (miner, relay, light)
     pub node_role: String,
     /// Mining cancel signal — set by P2P when a new block arrives to abort current PoW
@@ -1235,55 +1237,17 @@ async fn get_peers(State(state): State<Arc<AppState>>) -> Json<PeersResponse> {
 
 /// Get P2P peers connected via libp2p (identified by PeerID).
 async fn get_p2p_peers(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let local_height = {
-        let chain = state.blockchain.read().unwrap_or_else(|e| e.into_inner());
-        chain.height()
-    };
-
-    let p2p_tx = state.p2p_broadcast.read().unwrap_or_else(|e| e.into_inner()).clone();
-    if let Some(tx) = p2p_tx {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if tx.try_send(super::p2p::P2pCommand::GetPeers(reply_tx)).is_ok() {
-            if let Ok(Ok(mut peers)) = tokio::time::timeout(
-                std::time::Duration::from_millis(500), reply_rx
-            ).await {
-                // For peers without height, fetch heights from HTTP peers
-                let http_peers = state.peers.read().unwrap_or_else(|e| e.into_inner()).clone();
-                let client = &state.http_client;
-
-                // Collect known HTTP peer heights
-                let mut http_heights: Vec<u64> = Vec::new();
-                for peer_url in &http_peers {
-                    if !crate::network::is_contactable_peer(peer_url) { continue; }
-                    let url = format!("{}/chain/info", peer_url);
-                    if let Ok(resp) = client.get(&url).send().await {
-                        if let Ok(info) = resp.json::<serde_json::Value>().await {
-                            if let Some(h) = info.get("height").and_then(|h| h.as_u64()) {
-                                http_heights.push(h);
-                            }
-                        }
-                    }
-                }
-
-                // Fill missing P2P peer heights with HTTP peer data
-                // Assign heights round-robin from HTTP peers (best-effort mapping)
-                let mut http_idx = 0;
-                for peer in &mut peers {
-                    if peer.height.is_none() && !http_heights.is_empty() {
-                        peer.height = Some(http_heights[http_idx % http_heights.len()]);
-                        http_idx += 1;
-                    }
-                }
-
-                return Json(serde_json::json!({
-                    "count": peers.len(),
-                    "peers": peers,
-                    "local_height": local_height,
-                }));
-            }
-        }
-    }
-    Json(serde_json::json!({ "count": 0, "peers": [], "local_height": local_height }))
+    let local_height = state.blockchain.read().unwrap_or_else(|e| e.into_inner()).height();
+    // Read directly from shared peer list — instant, no channel wait, no HTTP calls
+    let peers = state.p2p_shared_peers.read().unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|sp| sp.read().unwrap_or_else(|e| e.into_inner()).clone())
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "count": peers.len(),
+        "peers": peers,
+        "local_height": local_height,
+    }))
 }
 
 /// Returns detailed info about HTTP peers with stale cleanup (>5min offline removed).

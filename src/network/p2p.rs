@@ -109,6 +109,10 @@ pub struct TsnBehaviour {
     pub dcutr: dcutr::Behaviour,
 }
 
+/// Shared peer list — updated by the P2P event loop, read by the HTTP API.
+/// This avoids going through the mpsc channel (which blocks when the loop is busy).
+pub type SharedPeerList = Arc<std::sync::RwLock<Vec<PeerInfo>>>;
+
 /// The P2P node handle — used by the application to interact with the P2P layer
 pub struct P2pNode {
     /// Send commands to the P2P event loop
@@ -117,6 +121,8 @@ pub struct P2pNode {
     pub event_rx: mpsc::Receiver<P2pEvent>,
     /// Our PeerId
     pub peer_id: PeerId,
+    /// Shared peer list for instant read by API (no channel wait)
+    pub shared_peers: SharedPeerList,
     /// Our local keypair (for signing)
     local_key: libp2p::identity::Keypair,
 }
@@ -274,15 +280,18 @@ impl P2pNode {
         // Create channels for communication with application
         let (event_tx, event_rx) = mpsc::channel(1024);
         let (command_tx, command_rx) = mpsc::channel(1024);
+        let shared_peers: SharedPeerList = Arc::new(std::sync::RwLock::new(Vec::new()));
 
         // Spawn the event loop (with seed addresses for periodic redial)
         let seed_addrs = config.dial_seeds.clone();
-        tokio::spawn(p2p_event_loop(swarm, event_tx, command_rx, seed_addrs));
+        let loop_peers = shared_peers.clone();
+        tokio::spawn(p2p_event_loop(swarm, event_tx, command_rx, seed_addrs, loop_peers));
 
         Ok(P2pNode {
             command_tx,
             event_rx,
             peer_id,
+            shared_peers,
             local_key,
         })
     }
@@ -316,6 +325,7 @@ async fn p2p_event_loop(
     event_tx: mpsc::Sender<P2pEvent>,
     mut command_rx: mpsc::Receiver<P2pCommand>,
     seed_addrs: Vec<Multiaddr>,
+    shared_peers: SharedPeerList,
 ) {
     let block_topic = gossipsub::IdentTopic::new(TOPIC_BLOCKS);
     let tx_topic = gossipsub::IdentTopic::new(TOPIC_TRANSACTIONS);
@@ -329,6 +339,23 @@ async fn p2p_event_loop(
     // Backoff for outdated peers: don't spam disconnect logs every 30s
     // Maps PeerID → (next_allowed_log_time, disconnect_count)
     let mut outdated_backoff: std::collections::HashMap<PeerId, (std::time::Instant, u32)> = std::collections::HashMap::new();
+
+    // Helper: refresh the shared peer list from current swarm state
+    macro_rules! refresh_shared_peers {
+        () => {
+            let local_proto = format!("tsn/{}/relay", env!("CARGO_PKG_VERSION"));
+            let peers_snapshot: Vec<PeerInfo> = swarm.connected_peers()
+                .map(|p| PeerInfo {
+                    peer_id: p.to_string(),
+                    height: peer_heights.get(p).copied(),
+                    protocol: peer_versions.get(p).cloned().unwrap_or_else(|| local_proto.clone()),
+                })
+                .collect();
+            if let Ok(mut sp) = shared_peers.write() {
+                *sp = peers_snapshot;
+            }
+        };
+    }
 
     // Periodic redial timer for seeds (every 30s if not enough peers)
     let mut redial_interval = tokio::time::interval(Duration::from_secs(30));
@@ -454,6 +481,8 @@ async fn p2p_event_loop(
                                 }
                             }
                         }
+                        // Update shared peer list with new version info
+                        refresh_shared_peers!();
                         // Bootstrap Kademlia now that we know a peer
                         let _ = swarm.behaviour_mut().kademlia.bootstrap();
                     }
@@ -486,13 +515,14 @@ async fn p2p_event_loop(
                     }
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                         debug!("P2P peer connected: {}", peer_id);
+                        refresh_shared_peers!();
                         event_tx.send(P2pEvent::PeerConnected(peer_id)).await.ok();
                     }
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
                         debug!("P2P peer disconnected: {}", peer_id);
                         identified_peers.remove(&peer_id);
                         peer_heights.remove(&peer_id);
-                        // Keep peer_versions — retain last known protocol/role for display
+                        refresh_shared_peers!();
                         event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await.ok();
                     }
                     SwarmEvent::NewListenAddr { address, .. } => {

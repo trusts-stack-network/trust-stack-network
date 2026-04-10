@@ -2178,6 +2178,7 @@ async fn cmd_node(
         public_url: public_url.clone(),
         p2p_broadcast: RwLock::new(None),
         p2p_peer_id: RwLock::new(None),
+        p2p_shared_peers: RwLock::new(None),
         node_role: format!("{}", node_role),
         mining_cancel: RwLock::new(None),
         http_client,
@@ -2494,10 +2495,14 @@ async fn cmd_node(
             println!("  Full PeerID: {}", p2p.peer_id);
             println!("  P2P port:    {}", p2p_port);
 
-            // Store PeerID in AppState for /node/info endpoint
+            // Store PeerID and shared peer list in AppState
             {
                 let mut pid = state.p2p_peer_id.write().unwrap();
                 *pid = Some(p2p.peer_id.to_string());
+            }
+            {
+                let mut sp = state.p2p_shared_peers.write().unwrap();
+                *sp = Some(p2p.shared_peers.clone());
             }
 
             let p2p_peer_id = p2p.peer_id;
