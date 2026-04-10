@@ -280,17 +280,13 @@ async fn wait_for_initial_sync(
                     // Wiping was the cause of catastrophic chain loss.
                     let _ = tsn::network::sync_from_peer(state.clone(), &peer_url).await;
                 }
-            } else if local_height > info.height + 100 && info.height > 10 {
-                // We're FAR ahead of peers who have a real chain → solo fork. Reset.
-                // Only trigger if peer height > 10 (not just starting up).
+            } else if local_height > info.height + 5 {
+                // We're ahead of peers — just start mining, the network will catch up
                 println!(
-                    "SOLO FORK: local h={} but network h={}. Resetting chain to rejoin network.",
+                    "Local chain ahead of peers (local: {}, peer: {}). Starting mining.",
                     local_height, info.height
                 );
-                {
-                    let mut chain = state.blockchain.write().unwrap();
-                    chain.reset_for_snapshot_resync();
-                }
+                return Ok(());
             } else {
                 println!(
                     "Waiting for sync... local height={}, peer height={} (gap: {})",
@@ -2407,9 +2403,11 @@ async fn cmd_node(
                             }
                         }
                     }
+                    // NOTE: Watchdog fork detection — only trigger if peers are AHEAD of us
+                    // (not when we're ahead of them). Require significant gap and real peer heights.
                     let gap = max_peer_h.saturating_sub(current_height);
-                    if gap > 50 && max_peer_h > 10 {
-                        tracing::warn!("WATCHDOG: Fork detected — peers at {} but local at {} (gap={}). Auto wipe + resync.", max_peer_h, current_height, gap);
+                    if gap > 100 && max_peer_h > 100 && current_height > 0 {
+                        tracing::warn!("WATCHDOG: Peers far ahead — peers at {} but local at {} (gap={}). Auto wipe + resync.", max_peer_h, current_height, gap);
                         let mut chain = watchdog_state.blockchain.write().unwrap();
                         chain.reset_for_snapshot_resync();
                         stuck_since = None;
@@ -2909,40 +2907,9 @@ async fn cmd_node(
                     continue;
                 }
 
-                // Solo fork detection: if ALL P2P peers have a real chain (h > 10)
-                // but are far behind us → we're on a solo fork. Reset.
-                // Skip if peers report h=0 (they might just be starting up).
-                {
-                    let local_h = mine_state.blockchain.read().unwrap().height();
-                    if local_h > 100 {
-                        let mut max_peer_h = 0u64;
-                        let mut peers_with_chain = 0u32;
-                        if let Some(sp) = mine_state.p2p_shared_peers.read().unwrap().as_ref() {
-                            if let Ok(peers) = sp.read() {
-                                for p in peers.iter() {
-                                    if let Some(h) = p.height {
-                                        if h > 10 { peers_with_chain += 1; }
-                                        if h > max_peer_h { max_peer_h = h; }
-                                    }
-                                }
-                            }
-                        }
-                        // Only trigger if peers have a real chain (not just starting)
-                        // AND we're >100 blocks ahead of all of them
-                        if peers_with_chain >= 3 && max_peer_h > 10 && local_h > max_peer_h + 100 {
-                            tracing::error!(
-                                "SOLO FORK DETECTED: local h={} but best peer h={}. Resetting chain.",
-                                local_h, max_peer_h
-                            );
-                            {
-                                let mut chain = mine_state.blockchain.write().unwrap();
-                                chain.reset_for_snapshot_resync();
-                            }
-                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                            continue;
-                        }
-                    }
-                }
+                // NOTE: Solo fork detection DISABLED in mining loop.
+                // P2P shared_peers heights are unreliable (often 0 at startup).
+                // The watchdog handles fork detection with proper HTTP verification.
 
                 // Sync gate: pause mining if too far behind VERIFIED peers
                 // v1.3.3: only consider peers whose height we can verify via HTTP /tip
