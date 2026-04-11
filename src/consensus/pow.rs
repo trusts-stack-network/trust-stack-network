@@ -287,12 +287,10 @@ fn run_mining_job(job: MineJob, _worker_id: usize) {
         nonce[56..64].copy_from_slice(&counter.wrapping_add(1).to_le_bytes());
         attempts += 1;
 
-        if attempts % 1_000_000 == 0 {
-            if let Ok(duration) = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH) {
-                template.header.timestamp = duration.as_secs();
-            }
-        }
+        // v2.0.9: Do NOT update timestamp during PoW.
+        // Changing the timestamp mid-mining invalidates the merkle roots
+        // that were calculated at template creation time, and can cause
+        // blocks to be rejected by peers with different timestamp views.
     }
 
     attempts_total.fetch_add(attempts, Ordering::Relaxed);

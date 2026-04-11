@@ -144,6 +144,21 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     };
     let peer_work = peer_info.cumulative_work;
 
+    // v2.0.9: Basic sanity check on reported cumulative_work.
+    // A peer claiming extremely high work relative to height is suspicious.
+    // Max possible work per block = MAX_DIFFICULTY (~u64::MAX/2 ≈ 9.2e18).
+    // Sanity: peer_work should not exceed height * MAX_DIFFICULTY.
+    if peer_work > 0 && peer_info.height > 0 {
+        let max_reasonable_work = (peer_info.height as u128) * (u64::MAX as u128 / 2);
+        if peer_work > max_reasonable_work {
+            warn!(
+                "Rejecting peer {} — reported cumulative_work {} exceeds maximum possible for height {}",
+                peer_id(peer_url), peer_work, peer_info.height
+            );
+            return Err(SyncError::InvalidResponse("Unreasonable cumulative_work".into()));
+        }
+    }
+
     let peer_ahead = peer_info.height > local_height
         || (peer_info.height == local_height && peer_work > local_work);
     let mut is_fork = peer_info.height == local_height
@@ -718,7 +733,8 @@ async fn detect_fork_via_headers(
     result
 }
 
-/// Legacy fork detection: check single block at local height (for peers without /headers/since).
+/// Legacy fork detection: binary search for the fork point (for peers without /headers/since).
+/// v2.0.9: Instead of guessing ancestor = height - 1, search back to find the real fork point.
 async fn detect_fork_legacy(
     state: &Arc<AppState>,
     client: &reqwest::Client,
@@ -733,17 +749,55 @@ async fn detect_fork_legacy(
         hex::encode(chain.latest_hash())
     };
 
+    // First check: are we even forked?
     let check_url = format!("{}/block/height/{}", peer_url, local_height);
     if let Ok(resp) = client.get(&check_url).timeout(Duration::from_secs(5)).send().await {
         if resp.status().is_success() {
             if let Ok(peer_block) = resp.json::<PeerBlockInfo>().await {
-                if peer_block.hash != local_hash {
-                    return ForkDetection::ForkDetected { ancestor_height: local_height.saturating_sub(1) };
+                if peer_block.hash == local_hash {
+                    return ForkDetection::NoFork; // Same tip, no fork
                 }
             }
         }
+    } else {
+        return ForkDetection::NoFork;
     }
-    ForkDetection::NoFork
+
+    // Binary search for the fork point (check up to 100 blocks back)
+    let search_depth = local_height.min(crate::config::MAX_REORG_DEPTH);
+    let mut low = local_height.saturating_sub(search_depth);
+    let mut high = local_height;
+    let mut best_ancestor = low;
+
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let local_hash_at_mid = {
+            let chain = match state.blockchain.read() {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+            chain.get_hash_at_height(mid).map(|h| hex::encode(h))
+        };
+
+        let Some(local_h) = local_hash_at_mid else { break; };
+
+        let url = format!("{}/block/height/{}", peer_url, mid);
+        let matches = if let Ok(resp) = client.get(&url).timeout(Duration::from_secs(5)).send().await {
+            if resp.status().is_success() {
+                resp.json::<PeerBlockInfo>().await.ok().map(|b| b.hash == local_h).unwrap_or(false)
+            } else { false }
+        } else { false };
+
+        if matches {
+            best_ancestor = mid;
+            low = mid + 1;
+        } else {
+            if mid == 0 { break; }
+            high = mid - 1;
+        }
+    }
+
+    ForkDetection::ForkDetected { ancestor_height: best_ancestor }
 }
 
 // ============ Headers-First Common Ancestor Search ============
@@ -984,6 +1038,46 @@ async fn attempt_snapshot_sync(
         (1000, 1000)
     };
 
+    // v2.0.9: Cross-verify snapshot height/hash with at least one other peer.
+    // Prevents a single malicious peer from injecting a forged state.
+    {
+        let peers = state.peers.read()
+            .map_err(|e| SyncError::LockPoisoned(format!("read lock: {}", e)))?
+            .clone();
+        let mut verified = false;
+        for other_peer in &peers {
+            if other_peer == peer_url || !super::is_contactable_peer(other_peer) {
+                continue;
+            }
+            let verify_url = format!("{}/block/height/{}", other_peer, snap_height);
+            if let Ok(resp) = client.get(&verify_url).timeout(Duration::from_secs(5)).send().await {
+                if let Ok(block_info) = resp.json::<PeerBlockInfo>().await {
+                    if block_info.hash == snap_hash_str {
+                        verified = true;
+                        break;
+                    } else {
+                        warn!(
+                            "Snapshot cross-verify FAILED: {} says hash={} at height {}, but {} says hash={}",
+                            peer_id(peer_url), &snap_hash_str[..16.min(snap_hash_str.len())],
+                            snap_height, peer_id(other_peer), &block_info.hash[..16.min(block_info.hash.len())]
+                        );
+                        return Err(SyncError::InvalidResponse(
+                            "Snapshot hash mismatch with other peers".into()
+                        ));
+                    }
+                }
+            }
+        }
+        if !verified {
+            // No other peer could confirm — only accept from seed nodes
+            let is_seed = crate::config::SEED_NODES.iter().any(|s| peer_url.starts_with(s));
+            if !is_seed {
+                warn!("Rejecting snapshot from non-seed {} — no cross-verification possible", peer_id(peer_url));
+                return Err(SyncError::InvalidResponse("Cannot cross-verify snapshot from non-seed".into()));
+            }
+        }
+    }
+
     let mut chain = state.blockchain.write()
         .map_err(|e| SyncError::LockPoisoned(format!("write lock: {}", e)))?;
     chain.import_snapshot_at_height(snapshot, snap_height, block_hash, diff, next_diff, snap_work);
@@ -1113,7 +1207,15 @@ pub async fn sync_loop(state: Arc<AppState>, seed_peers: Vec<String>, sync_inter
                 }
             }
 
+            // v2.0.9: Max 50 iterations per peer to prevent infinite loop
+            // if a peer keeps returning the same blocks
+            let mut sync_iterations = 0u32;
             loop {
+                sync_iterations += 1;
+                if sync_iterations > 50 {
+                    warn!("Sync from {} hit max iterations (50), moving to next peer", peer_id(peer));
+                    break;
+                }
                 match sync_from_peer(state.clone(), peer).await {
                     Ok(n) if n > 0 => {
                         SYNC_FAIL_COUNT.store(0, Ordering::Relaxed);

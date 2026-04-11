@@ -2364,8 +2364,12 @@ async fn cmd_node(
                                 tracing::warn!("WATCHDOG: {}. Triggering snapshot re-sync.", msg);
                                 tsn::network::log_node_error(&watchdog_state, "stuck_height", &msg);
                                 if is_auto {
+                                    // v2.0.9: Take reorg_lock to prevent race with miner
+                                    let _reorg_guard = watchdog_state.reorg_lock.write().await;
                                     let mut chain = watchdog_state.blockchain.write().unwrap();
                                     chain.reset_for_snapshot_resync();
+                                    drop(chain);
+                                    drop(_reorg_guard);
                                 } else {
                                     tracing::info!("WATCHDOG: Mode validation — action proposée, en attente d'approbation via /admin/force-resync");
                                 }
@@ -2378,40 +2382,44 @@ async fn cmd_node(
                 }
 
                 // Check 2b: Fork divergence — peers are far ahead and we can't catch up
-                // If verified peer tip is > 20 blocks ahead for > 60 seconds, auto wipe + resync
+                // v2.0.9: Only use HTTP-verified heights (not P2P which can be 0 at startup).
+                // Requires is_auto mode, reorg_lock, and verifies tip hash from at least 2 peers.
                 {
                     let sync_client = &watchdog_state.http_client;
                     let peers_list = watchdog_state.peers.read().unwrap().clone();
-                    let mut max_peer_h = 0u64;
+                    let mut verified_heights: Vec<(u64, String)> = Vec::new(); // (height, tip_hash)
                     for peer in &peers_list {
                         if !tsn::network::is_contactable_peer(peer) { continue; }
                         let url = format!("{}/tip", peer);
                         if let Ok(resp) = sync_client.get(&url).timeout(std::time::Duration::from_secs(2)).send().await {
                             if let Ok(tip) = resp.json::<serde_json::Value>().await {
                                 let h = tip["height"].as_u64().unwrap_or(0);
-                                if h > max_peer_h { max_peer_h = h; }
-                            }
-                        }
-                    }
-                    // Also check P2P peer heights
-                    if let Some(sp) = watchdog_state.p2p_shared_peers.read().unwrap().as_ref() {
-                        if let Ok(peers) = sp.read() {
-                            for p in peers.iter() {
-                                if let Some(h) = p.height {
-                                    if h > max_peer_h { max_peer_h = h; }
+                                let hash = tip["hash"].as_str().unwrap_or("").to_string();
+                                if h > 0 && !hash.is_empty() {
+                                    verified_heights.push((h, hash));
                                 }
                             }
                         }
                     }
-                    // NOTE: Watchdog fork detection — only trigger if peers are AHEAD of us
-                    // (not when we're ahead of them). Require significant gap and real peer heights.
+                    // v2.0.9: Require at least 2 HTTP-verified peers agreeing on tip height
+                    // Do NOT use P2P heights (often 0 at startup, caused infinite reset loops in v2.0.8)
+                    let max_peer_h = verified_heights.iter().map(|(h, _)| *h).max().unwrap_or(0);
+                    let peers_at_max = verified_heights.iter().filter(|(h, _)| *h >= max_peer_h.saturating_sub(5)).count();
                     let gap = max_peer_h.saturating_sub(current_height);
-                    if gap > 100 && max_peer_h > 100 && current_height > 0 {
-                        tracing::warn!("WATCHDOG: Peers far ahead — peers at {} but local at {} (gap={}). Auto wipe + resync.", max_peer_h, current_height, gap);
-                        let mut chain = watchdog_state.blockchain.write().unwrap();
-                        chain.reset_for_snapshot_resync();
-                        stuck_since = None;
-                        last_height = 0;
+                    if gap > 100 && max_peer_h > 100 && current_height > 0 && peers_at_max >= 2 {
+                        if is_auto {
+                            tracing::warn!("WATCHDOG: Peers far ahead — {} peers at ~{} but local at {} (gap={}). Auto wipe + resync.", peers_at_max, max_peer_h, current_height, gap);
+                            // v2.0.9: Take reorg_lock to prevent race with miner
+                            let _reorg_guard = watchdog_state.reorg_lock.write().await;
+                            let mut chain = watchdog_state.blockchain.write().unwrap();
+                            chain.reset_for_snapshot_resync();
+                            drop(chain);
+                            drop(_reorg_guard);
+                            stuck_since = None;
+                            last_height = 0;
+                        } else {
+                            tracing::info!("WATCHDOG: Mode validation — peers far ahead (gap={}), action proposée via /admin/force-resync", gap);
+                        }
                     }
                 }
 
@@ -2422,8 +2430,12 @@ async fn cmd_node(
                     tsn::network::log_node_error(&watchdog_state, "resync_loop", &msg);
                     if is_auto {
                         tracing::warn!("WATCHDOG: Auto mode — full wipe + fresh sync.");
+                        // v2.0.9: Take reorg_lock to prevent race with miner
+                        let _reorg_guard = watchdog_state.reorg_lock.write().await;
                         let mut chain = watchdog_state.blockchain.write().unwrap();
                         chain.reset_for_snapshot_resync();
+                        drop(chain);
+                        drop(_reorg_guard);
                         let mut bans = watchdog_state.banned_peers.write().unwrap();
                         bans.clear();
                     } else {
@@ -2435,8 +2447,10 @@ async fn cmd_node(
                 }
 
                 // Check 4: Verify checkpoints periodically (every 5 min)
-                {
+                // v2.0.9: Collect violation info first, drop read guard, then act
+                let checkpoint_violated = {
                     let chain = watchdog_state.blockchain.read().unwrap();
+                    let mut violated = false;
                     for &(cp_height, cp_hash) in crate::config::HARDCODED_CHECKPOINTS {
                         if cp_height <= chain.height() {
                             if let Some(actual) = chain.get_hash_at_height(cp_height) {
@@ -2445,19 +2459,26 @@ async fn cmd_node(
                                     let msg = format!("Checkpoint violation at height {}", cp_height);
                                     tracing::error!("WATCHDOG: {}! Re-syncing.", msg);
                                     tsn::network::log_node_error(&watchdog_state, "checkpoint_violation", &msg);
-                                    drop(chain);
-                                    // Always auto for checkpoint violations — chain is on wrong fork
-                                    let mut chain_w = watchdog_state.blockchain.write().unwrap();
-                                    chain_w.reset_for_snapshot_resync();
-                                    let mut bans = watchdog_state.banned_peers.write().unwrap();
-                                    bans.clear();
-                                    last_height = 0;
-                                    stuck_since = None;
+                                    violated = true;
                                     break;
                                 }
                             }
                         }
                     }
+                    violated
+                }; // read guard dropped here
+                if checkpoint_violated {
+                    // Always auto for checkpoint violations — chain is on wrong fork
+                    // v2.0.9: Take reorg_lock to prevent race with miner
+                    let _reorg_guard = watchdog_state.reorg_lock.write().await;
+                    let mut chain_w = watchdog_state.blockchain.write().unwrap();
+                    chain_w.reset_for_snapshot_resync();
+                    drop(chain_w);
+                    drop(_reorg_guard);
+                    let mut bans = watchdog_state.banned_peers.write().unwrap();
+                    bans.clear();
+                    last_height = 0;
+                    stuck_since = None;
                 }
             }
         });
@@ -2584,6 +2605,8 @@ async fn cmd_node(
                                 Ok(block) => {
                                     let height = block.coinbase.height;
                                     let result = {
+                                        // v2.0.9: Take reorg_lock to prevent race with miner
+                                        let _reorg_guard = p2p_blockchain.reorg_lock.read().await;
                                         let mut chain = p2p_blockchain.blockchain.write().unwrap();
                                         chain.try_add_block(block)
                                     };

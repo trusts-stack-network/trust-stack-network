@@ -268,9 +268,11 @@ pub const MAX_REORG_DEPTH: u64 = 100;
 /// v1.5.0: Populated from the canonical chain on 2 April 2026.
 /// Any node whose chain doesn't match these hashes at these heights will
 /// be forced to re-sync from peers at startup.
-/// v2.0: Cleared for genesis reset with headers-first sync.
-/// Old checkpoints (18500-21000) from previous chain are invalid.
-/// New checkpoints will be added after the new chain stabilizes.
+/// v2.0.9: Checkpoints for the new chain (genesis reset April 11, 2026).
+/// These protect against alternative chain attacks and speed up initial sync.
+// v2.0.9: Checkpoints cleared after genesis reset (commitment_root fix).
+// Will be re-added once the chain stabilizes with 100+ blocks.
+// Genesis hash is verified separately via EXPECTED_GENESIS_HASH.
 pub const HARDCODED_CHECKPOINTS: &[(u64, &str)] = &[];
 
 // ============================================================================

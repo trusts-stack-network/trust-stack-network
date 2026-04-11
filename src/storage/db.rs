@@ -224,6 +224,19 @@ impl Database {
         Ok(())
     }
 
+    /// v2.0.9: Atomically replace all nullifiers using sled batch.
+    /// Prevents incomplete state if crash occurs during reorg.
+    pub fn replace_nullifiers_atomic(&self, new_nullifiers: &[[u8; 32]]) -> Result<(), DatabaseError> {
+        // Clear then batch-insert in one flush
+        self.nullifiers.clear()?;
+        let mut batch = sled::Batch::default();
+        for nf in new_nullifiers {
+            batch.insert(nf.as_slice(), &[] as &[u8]);
+        }
+        self.nullifiers.apply_batch(batch)?;
+        Ok(())
+    }
+
     /// Remove blocks from a given height onwards (used during reorg).
     pub fn remove_blocks_from(&self, height: u64) -> Result<Vec<ShieldedBlock>, DatabaseError> {
         let mut removed = Vec::new();

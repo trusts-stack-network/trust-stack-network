@@ -1085,6 +1085,12 @@ async fn receive_block(
                     info!("Added block {} to chain (height: {})", &block_hash[..16], new_height);
                 }
 
+                // v2.0.9: Cancel mining when a new block is accepted via HTTP
+                // Previously only P2P blocks cancelled mining, causing stale blocks and forks
+                if let Some(cancel) = state.mining_cancel.read().unwrap().as_ref() {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+
                 // Remove confirmed transactions from mempool
                 let tx_hashes: Vec<[u8; 32]> = block
                     .transactions

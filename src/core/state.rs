@@ -304,15 +304,18 @@ impl ShieldedState {
         let cm_pq = NoteCommitmentPQ::from(coinbase.note_commitment_pq);
         self.commitment_tree_pq.append(&cm_pq);
 
-        // Add dev fee commitment if present
+        // v2.0.9: Dev fee V1 and PQ are now independent.
+        // Previously PQ append was nested inside V1 check, causing tree divergence
+        // when V1 field was None but PQ field was Some (blocks from transition period).
         if let Some(ref dev_cm) = coinbase.dev_fee_commitment {
             if !self.skip_v1_tree {
                 self.commitment_tree.append(dev_cm);
             }
-            if let Some(dev_cm_pq) = coinbase.dev_fee_commitment_pq {
-                let cm_pq = NoteCommitmentPQ::from(dev_cm_pq);
-                self.commitment_tree_pq.append(&cm_pq);
-            }
+        }
+        // PQ dev fee: always append independently of V1 field
+        if let Some(dev_cm_pq) = coinbase.dev_fee_commitment_pq {
+            let cm_pq = NoteCommitmentPQ::from(dev_cm_pq);
+            self.commitment_tree_pq.append(&cm_pq);
         }
     }
 

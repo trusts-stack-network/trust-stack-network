@@ -398,6 +398,8 @@ async fn p2p_event_loop(
                                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&message.data) {
                                     if let Some(h) = v.get("coinbase").and_then(|c| c.get("height")).and_then(|h| h.as_u64()) {
                                         peer_heights.insert(source, h);
+                                        // v2.1.0: Refresh shared peer list so explorer shows live heights
+                                        refresh_shared_peers!();
                                     }
                                 }
                             }

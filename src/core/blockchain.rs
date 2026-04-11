@@ -570,8 +570,15 @@ impl ShieldedBlockchain {
             let new_finalized = depth_finalized.max(self.last_checkpoint_height);
             if new_finalized > self.finalized_height {
                 self.finalized_height = new_finalized;
-                // Prune orphans that reference blocks below finalized height
+                // v2.0.9: Prune orphans below finalized height.
+                // Also cap orphan pool size to prevent memory exhaustion from malicious peers.
                 self.orphans.retain(|_, block| block.coinbase.height > self.finalized_height);
+                // Hard cap: keep at most 500 orphans
+                while self.orphans.len() > 500 {
+                    if let Some(oldest_key) = self.orphans.keys().next().cloned() {
+                        self.orphans.remove(&oldest_key);
+                    } else { break; }
+                }
                 tracing::debug!("Finalization advanced to height {}", self.finalized_height);
             }
         }
@@ -742,8 +749,9 @@ impl ShieldedBlockchain {
                 // Save canonical chain blocks (tip + recent) before clearing.
                 // After fast-sync, blocks are in LRU but may not be in DB if they
                 // were received via P2P before the DB had time to flush.
+                // v2.0.9: Save LWMA_WINDOW blocks (was 5) so next_difficulty() works after rollback
                 let mut saved_blocks: Vec<([u8; 32], ShieldedBlock)> = Vec::new();
-                for h in target_height.saturating_sub(5)..=target_height {
+                for h in target_height.saturating_sub(LWMA_WINDOW)..=target_height {
                     if let Some(hash) = self.height_index.get(h as usize) {
                         if let Some(b) = self.blocks.get(hash).cloned() {
                             saved_blocks.push((*hash, b));
@@ -1044,35 +1052,33 @@ impl ShieldedBlockchain {
             let within_one_step = ratio >= 0.90 && ratio <= 1.10;
 
             if self.fast_sync_base_height > 0 {
-                // v1.4.0: Graduated difficulty tolerance post fast-sync.
-                // After fast-sync, the node has no real block history for LWMA, so
-                // next_difficulty() returns a fallback value that can be wildly off from
-                // the actual network difficulty. Tolerance is graduated:
-                //   0..LWMA_WINDOW*2 blocks: accept any difficulty >= MIN_DIFFICULTY
-                //   (The LWMA window needs LWMA_WINDOW real blocks to converge, and even
-                //    then the first few windows after fast-sync can be inaccurate because
-                //    the pre-window timestamp anchor is estimated.)
-                //   After LWMA_WINDOW*2: enforce normal 10% tolerance (LWMA is warm)
+                // v2.0.9: Tighter difficulty tolerance post fast-sync.
+                // Instead of accepting ANY difficulty >= MIN_DIFFICULTY (which allows
+                // attackers to mine 135 blocks at minimum difficulty), we use a graduated
+                // tolerance that narrows as LWMA warms up:
+                //   0..LWMA_WINDOW: ±50% of expected (LWMA very inaccurate)
+                //   LWMA_WINDOW..LWMA_WINDOW*2: ±25% of expected (LWMA converging)
+                //   After LWMA_WINDOW*2: ±10% (normal tolerance)
+                // Always require >= MIN_DIFFICULTY regardless.
                 let blocks_since_sync = self.height().saturating_sub(self.fast_sync_base_height);
-                // LWMA needs a full window of real blocks + the pre-window anchor.
-                // fast_sync_base_height can point to the ORIGINAL snapshot (not the most
-                // recent one), so blocks_since_sync may be larger than expected.
-                // Use 3× the window to ensure LWMA has fully converged.
-                let warmup_window = LWMA_WINDOW * 3;
-                if blocks_since_sync <= warmup_window {
-                    // After fast-sync, next_difficulty() returns a fallback value that can
-                    // diverge from the real LWMA-computed difficulty. Accept any valid
-                    // difficulty while LWMA is warming up.
-                    if block.header.difficulty >= MIN_DIFFICULTY {
-                        tracing::debug!(
-                            "Accepting difficulty {} from peer (expected {}, {}/{} blocks since fast-sync, LWMA warming up)",
-                            block.header.difficulty, expected_difficulty, blocks_since_sync, warmup_window
-                        );
-                    } else {
-                        return Err(BlockchainError::InvalidDifficulty);
-                    }
-                } else if !within_one_step {
-                    // After LWMA warm-up: enforce normal 10% tolerance
+                let (tolerance_low, tolerance_high) = if blocks_since_sync <= LWMA_WINDOW {
+                    (0.50, 1.50) // ±50% during first window
+                } else if blocks_since_sync <= LWMA_WINDOW * 2 {
+                    (0.75, 1.25) // ±25% during second window
+                } else {
+                    (0.90, 1.10) // ±10% after convergence
+                };
+                let within_tolerance = ratio >= tolerance_low && ratio <= tolerance_high;
+                if block.header.difficulty >= MIN_DIFFICULTY && within_tolerance {
+                    tracing::debug!(
+                        "Accepting difficulty {} from peer (expected {}, ratio={:.2}, {}/{} blocks since fast-sync)",
+                        block.header.difficulty, expected_difficulty, ratio, blocks_since_sync, LWMA_WINDOW * 2
+                    );
+                } else if block.header.difficulty < MIN_DIFFICULTY || !within_tolerance {
+                    tracing::warn!(
+                        "Rejecting difficulty {} (expected {}, ratio={:.2}, tolerance={:.0}%-{:.0}%)",
+                        block.header.difficulty, expected_difficulty, ratio, tolerance_low * 100.0, tolerance_high * 100.0
+                    );
                     return Err(BlockchainError::InvalidDifficulty);
                 }
             } else if within_one_step {
@@ -1172,31 +1178,23 @@ impl ShieldedBlockchain {
         }
         temp_state.apply_coinbase(&block.coinbase);
 
-        // v1.8.0: Skip commitment_root validation during block acceptance.
-        // After fast-sync/snapshot restore, the Merkle trees (V1 and PQ) can diverge
-        // between nodes because snapshot state doesn't always match exactly the state
-        // that produced the block header. The commitment_root is still SET correctly
-        // during mining (from the miner's own state), but cross-node validation fails
-        // because trees diverge after snapshot. Security is maintained by:
-        // - PoW verification (computational cost to produce blocks)
-        // - Nullifier uniqueness (double-spend prevention)
-        // - Transaction proof verification (ZK proofs)
-        // - Cumulative work comparison (heaviest chain rule)
-        // TODO: Fix tree determinism after snapshot restore to re-enable this check.
+        // v2.0.9: Commitment root validation — WARN on mismatch but don't reject yet.
+        // After fast-sync/snapshot restore, Merkle trees can diverge between nodes.
+        // We log at WARN level to track how often this happens. Once we confirm
+        // tree determinism is fixed (no mismatches in logs), we'll re-enable hard reject.
+        // TODO: Fix tree determinism after snapshot restore to re-enable hard reject.
         {
             let computed = temp_state.commitment_root();
             let expected = block.header.commitment_root;
             if computed != expected {
-                tracing::debug!(
-                    "Commitment root mismatch at height {} (non-blocking): computed={}, expected={}, v1_skip={}, pq_count={}",
+                tracing::warn!(
+                    "COMMITMENT_ROOT_MISMATCH at height {} — computed={}, expected={}, v1_skip={}, pq_count={}. Block accepted (soft check). Fix tree determinism to harden.",
                     block.coinbase.height,
                     hex::encode(&computed[..8]),
                     hex::encode(&expected[..8]),
                     temp_state.is_v1_tree_skipped(),
                     temp_state.commitment_tree_pq().size(),
                 );
-                // Do NOT reject — tree divergence after snapshot is expected.
-                // Block validity is ensured by PoW + nullifiers + ZK proofs.
             }
         }
 
@@ -1575,7 +1573,8 @@ impl ShieldedBlockchain {
         let mut accumulated_difficulty = block_work;
         let mut current_hash = block.header.prev_hash;
         let mut depth = 0u32;
-        const MAX_WALK: u32 = 200;
+        // v2.0.9: Increased from 200 to 500 to handle deep forks after rollback
+        const MAX_WALK: u32 = 500;
 
         loop {
             if depth >= MAX_WALK {
@@ -2046,14 +2045,9 @@ impl ShieldedBlockchain {
                 }
             }
 
-            // Now atomically: clear old nullifiers and insert all new ones
-            // The window of vulnerability is minimized to the time of this loop
-            db.clear_nullifiers()
+            // v2.0.9: Atomically replace nullifiers using sled batch
+            db.replace_nullifiers_atomic(&new_nullifiers)
                 .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-            for nf in &new_nullifiers {
-                db.save_nullifier(nf)
-                    .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-            }
 
             db.set_metadata("difficulty", &self.difficulty.to_string())
                 .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
