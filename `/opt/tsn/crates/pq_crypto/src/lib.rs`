@@ -1,4 +1,0 @@
-//! Post-quantum cryptography implementations
-pub mod slh_dsa;
-
-pub use slh_dsa::{SlhDsa, KeyPair, Signature, ParameterSet};

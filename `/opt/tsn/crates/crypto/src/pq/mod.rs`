@@ -1,4 +1,0 @@
-//! Module Post-Quantum Cryptography
-pub mod slh_dsa;
-
-pub use slh_dsa::SlhDsaKeypair;
