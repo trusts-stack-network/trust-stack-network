@@ -72,7 +72,7 @@ jobs:
           Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath tsn-${{ github.event.inputs.tag }}-${{ matrix.target }}.zip
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag }}
           files: tsn-${{ github.event.inputs.tag }}-${{ matrix.target }}.*
